@@ -1,0 +1,154 @@
+{
+  "recommended": {
+    "extractor": {
+      "model": "claude-sonnet-5-5",
+      "priceInPerM": 2,
+      "priceOutPerM": 10,
+      "dailyBudgetUsd": 20,
+      "maxOutputTokens": 16000
+    },
+    "assembler": {
+      "enabled": true,
+      "model": "gemini-3.8-flash",
+      "priceInPerM": 0.5,
+      "priceOutPerM": 3,
+      "maxOutputTokens": 4000,
+      "timeoutMs": 40000,
+      "keysModel": "claude-haiku-4-5-20251001",
+      "keysPriceInPerM": 1,
+      "keysPriceOutPerM": 5
+    },
+    "advisor": {
+      "enabled": true,
+      "model": "gemini-3.8-flash",
+      "priceInPerM": 0.5,
+      "priceOutPerM": 3,
+      "budgetChars": 40000
+    },
+    "planner": {
+      "provider": "api",
+      "budgetUsd": 10
+    },
+    "contacts": {
+      "enabled": true,
+      "minGap": 16
+    },
+    "absence": {
+      "mode": "real",
+      "minHours": 24,
+      "maxDays": 30
+    },
+    "situation": {
+      "enabled": true
+    },
+    "stages": {
+      "extract": {
+        "key": "Claude"
+      },
+      "keys": {
+        "key": "Claude"
+      },
+      "plan": {
+        "key": "Claude",
+        "model": "claude-opus-4-6"
+      },
+      "away": {
+        "key": "Claude",
+        "model": "claude-opus-4-6"
+      },
+      "setup": {
+        "key": "Claude",
+        "model": "claude-opus-4-6"
+      },
+      "setupKeys": {
+        "key": "Claude"
+      },
+      "fresh": {
+        "key": "Claude"
+      },
+      "talk": {
+        "key": "Claude",
+        "model": "claude-opus-4-6"
+      },
+      "assemble": {
+        "key": "Gemini"
+      },
+      "judge": {
+        "key": "Gemini"
+      },
+      "advisor": {
+        "key": "Gemini"
+      },
+      "profile": {
+        "key": "Gemini"
+      },
+      "scene": {
+        "key": "Gemini"
+      },
+      "prep": {
+        "key": "Gemini"
+      },
+      "situation": {
+        "key": "Gemini"
+      },
+      "lore": {
+        "key": "Gemini"
+      }
+    }
+  },
+  "knownPrices": {
+    "claude-fable-5-1": [
+      10,
+      50
+    ],
+    "claude-opus-5-5": [
+      4,
+      20
+    ],
+    "claude-opus-4-6": [
+      5,
+      25
+    ],
+    "claude-sonnet-4-6": [
+      3,
+      15
+    ],
+    "claude-sonnet-5-5": [
+      2,
+      10
+    ],
+    "claude-haiku-5-5": [
+      0.1,
+      0.5
+    ],
+    "claude-haiku-4-5-20251001": [
+      1,
+      5
+    ],
+    "gemini-3.8-flash": [
+      0.5,
+      3
+    ],
+    "gemini-embedding-001": [
+      0.15,
+      0
+    ],
+    "text-embedding-3-large": [
+      0.13,
+      0
+    ],
+    "text-embedding-3-small": [
+      0.02,
+      0
+    ],
+    "claude-sonnet-5": [
+      3,
+      15
+    ]
+  },
+  "embedModel": "gemini-embedding-001",
+  "routeCheckModels": [
+    "claude-opus-4-6",
+    "claude-opus-5-5"
+  ]
+}

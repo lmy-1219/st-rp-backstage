@@ -1,0 +1,8 @@
+{
+  "name": "st-rp-backstage",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "core": "node --disable-warning=ExperimentalWarning core/main.mjs"
+  }
+}
