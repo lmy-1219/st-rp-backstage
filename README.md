@@ -1,6 +1,6 @@
 # RP：幕后
 
-为 SillyTavern 增加记忆、角色动机、幕后规划和场面管理。关掉系统后，SillyTavern 仍可正常使用。
+为 SillyTavern 增加记忆、角色动机、幕后规划和场面管理。关掉系统后，SillyTavern 仍可正常使用。交流QQ群:1131373686
 
 ## 安装
 
