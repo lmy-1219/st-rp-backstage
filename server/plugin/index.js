@@ -17,15 +17,25 @@ export const info = {
 // 插件独立部署，不能 import core；此默认值须和 core/local.mjs 保持一致。
 const DEFAULT_PORT = 8019;
 const here = path.dirname(fileURLToPath(import.meta.url));
-const stRoot = path.resolve(here, '..', '..');
+export function pluginPaths(dir=here) {
+    const root=path.resolve(dir,'..','..');
+    let layout2=false;
+    try{layout2=JSON.parse(fs.readFileSync(path.join(root,'release.json'),'utf8')).layout===2;}catch{}
+    return {repo:layout2?root:path.resolve(dir,'..'),stRoot:layout2?path.resolve(root,'..','..'):path.resolve(dir,'..','..'),config:layout2?path.join(root,'config.json'):path.join(dir,'config.json'),fallbackConfig:path.join(dir,'config.json'),entry:path.resolve(dir,'..','core','main.mjs'),layout2};
+}
+const stRoot = pluginPaths().stRoot;
 // 接口名只认小写字母和连字符，其余由后台自己认（以后加接口不用改插件、不用重启 ST）
 const ROUTE = /^[a-z][a-z-]{0,39}$/;
 const LONG = new Set(['slot', 'fresh', 'stage-probe', 'update', 'arrive', 'leave']);   // 要等模型或要拉代码的，多等一会儿（后台连着一分半没动静才算模型卡住，这里得等得更久）
 
-function readConfig() {
-    try { return JSON.parse(fs.readFileSync(path.join(here, 'config.json'), 'utf8')); }
-    catch { return {}; }
+export function readConfig() {
+    const paths=pluginPaths();let config={};
+    const file=fs.existsSync(paths.config)?paths.config:paths.fallbackConfig;
+    try { config=JSON.parse(fs.readFileSync(file,'utf8')); } catch {}
+    if(paths.layout2||fs.existsSync(paths.entry))config={...config,autoStart:{entry:paths.entry,home:path.join(stRoot,'data','rp-emergence'),...config.autoStart}};
+    return config;
 }
+function codeRepo(entry) {const parent=path.resolve(path.dirname(entry),'..');return path.basename(parent)==='server'&&fs.existsSync(path.join(parent,'..','release.json'))?path.resolve(parent,'..'):parent;}
 
 async function health(base) {
     try { return (await fetch(`${base}/v1/health`, { signal: AbortSignal.timeout(1500) })).ok; }
@@ -77,15 +87,16 @@ function firstFollow(repo, follow) {
 }
 
 // 跟上正本（D-117）：拉取已推送的最新版、快进、把扩展和插件文件拷进这个 ST。调不通就用眼下这份，照常开。
-async function followRelease(config) {
+export async function followRelease(config) {
     if (!config.update?.follow || !config.autoStart?.entry) return;
-    const repo = path.resolve(path.dirname(config.autoStart.entry), '..');
-    const updater = path.join(repo, 'core', 'update.mjs');
+    const repo = codeRepo(config.autoStart.entry);
+    const updater = path.join(path.dirname(config.autoStart.entry), 'update.mjs');
     try {
         // 代码比"跟着正本"这套还旧（还没有 update.mjs）：先自己拉取、快进一次，有了再往下走
         if (!fs.existsSync(updater)) await firstFollow(repo, config.update.follow);
         const { applyRelease } = await import(pathToFileURL(updater).href);
-        const r = await Promise.race([applyRelease({ repo, stRoot, follow: config.update.follow }), new Promise(resolve => setTimeout(() => resolve({ ok: false, error: '超时' }), 45000))]);
+        let timer;
+        const r = await Promise.race([applyRelease({ repo, stRoot, follow: config.update.follow }), new Promise(resolve => {timer=setTimeout(() => resolve({ ok: false, error: '超时' }), 45000);})]).finally(()=>clearTimeout(timer));
         if (!r.ok) console.warn(`[rp-emergence] 没跟上正本：${r.error}`);
         else console.log(`[rp-emergence] ${r.updated ? `已跟上正本（${r.target}，${r.behind} 个提交）` : `已是正本最新（${r.head}）`}${r.copied ? `，装了 ${r.copied} 个文件` : ''}${r.needsStRestart ? '；这次改到了转发插件，再重启一次 ST 才用上' : ''}`);
     } catch (error) {
@@ -97,7 +108,7 @@ async function followRelease(config) {
 // 更老的后台不报版本、也不会因为这个重启：只提示一句。
 async function restartIfStale(base, config) {
     if (!config.update?.follow || !config.autoStart?.entry || !(await health(base))) return;
-    const repo = path.resolve(path.dirname(config.autoStart.entry), '..');
+    const repo = codeRepo(config.autoStart.entry);
     const disk = await new Promise(resolve => execFile('git', ['-C', repo, 'rev-parse', 'HEAD'], { timeout: 10000, windowsHide: true }, (e, out) => resolve(e ? null : String(out).trim())));
     let code = null;
     try { code = (await (await fetch(`${base}/v1/health`, { signal: AbortSignal.timeout(3000) })).json())?.code ?? null; } catch {}

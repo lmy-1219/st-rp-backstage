@@ -67,14 +67,14 @@ export const LEAD_NOTE = "引子——\"到现场\"的活动要〔玩家〕在�
 // 亲密件的五格（T013）；旧件存的是名目、新在哪、走到哪、留下什么，照旧能读
 export const INTIMATE_CELLS = ['名目', '玩法', '怎么带', '走到哪', '留下什么'];
 export const PLAN_INTIMATE = "【亲密线】这一局开了亲密线（简报里\"亲密线\"那几条：谁和谁、走到哪一格、往上几格、各自怎么主动、底线、可加入的人）。这条线的看头是牵头的一方怎么把对方一步步带下去。每个节点给它排一到两件，进口袋，牵头的是有卡的那一方，不是玩家。\n阶梯是一条往下沉的路：每一格比上一格多走一点——更大胆、更不顾场合、更离不开牵头的一方、更认 TA 立的规矩；对方每下一格，都是被 TA 引着、自己也想要。一格一格走，不跳格；一格可以分几件磨，磨透了再往下。\n每件多写五格：名目——TA 凭什么此刻出手（局势逼的、上回留下的、TA 自己的欲望和性子），要这一刻说得通；玩法——这一件玩的是什么，和上一件换一样：耻感、开发、调教、被看见的风险、道具、惩罚、加人、换个地方（户外、外人就在附近），地方和由头也至少一样和上一件不同；怎么带——TA 主导着怎么走：从哪一步下手，拿什么诱对方踏出下一步（哄、激、设个小局、给甜头、立规矩、讲条件），对方犹豫、嘴硬时 TA 怎么接，到哪一步收手、留着下回；走到哪——成、差一点（被外头打断、被局势拦下）、只是挑起来，别回回都成；留下什么——给下一件的钩子（痕迹、约定、立下的规矩、欠下的、被谁看见）。\n底线写了的不排。加人只从这一条\"可加入\"里挑。只排每个人都愿意的：发起靠由头和欲望，不排强迫、下药、趁睡、催眠这类让对方没法选的事。";
-export const PURE_INTIMATE_OPENING = "【亲密线】这一局以亲密线为主（简报里\"亲密线\"那几条：谁和谁、走到哪一格、往上几格、各自怎么主动、底线、可加入的人）。看头是牵头的一方怎么把对方一步步带下去；主线、支线、意外照样排，但它们主要给亲密线递由头、换场合、添阻碍、招来看客，不跟它抢戏。每个节点给它排三到四件，进口袋，牵头的是有卡的那一方，不是玩家。开了几条亲密线的，摊开排，别都给同一对。\n阶梯是一条往下沉的路：每一格比上一格多走一点——更大胆、更不顾场合、更离不开牵头的一方、更认 TA 立的规矩；对方每下一格，都是被 TA 引着、自己也想要。一格一格走，不跳格；这一档走得比剧情向快，每个节点至少有一件是冲着下一格去的（走到哪可以是差一点），别一直在同一格里打转。";
+// 纯NSFW 档的口味文字不随系统发（D-228）：放在单独的口味包里，用户自己导入。没导入时纯NSFW 和剧情向用同一份。
 const intimateConsent = PLAN_INTIMATE.slice(PLAN_INTIMATE.indexOf('只排每个人都愿意的：'));
 const aliveAt = PLAN_TASTE.findIndex(x => x.startsWith('【角色是活的】'));
 const tasteBlocks = [PLAN_TASTE[0], PLAN_TASTE.slice(1, aliveAt).join('\n'), PLAN_TASTE.slice(aliveAt).join('\n')];
 registerPromptDefaults({
     'plan.dare': tasteBlocks[0], 'plan.shape': tasteBlocks[1], 'plan.alive': tasteBlocks[2],
     'plan.intimate': PLAN_INTIMATE.slice(0, -intimateConsent.length), 'intimate.consent': intimateConsent,
-}, { 'plan.intimate': ['牵头的是有卡的那一方，不是玩家。', '每件多写五格：', '名目——', '玩法——', '怎么带——', '走到哪——', '留下什么——', '底线写了的不排。加人只从这一条"可加入"里挑。'] }, { 纯NSFW: { 'plan.intimate': `${PURE_INTIMATE_OPENING}\n${PLAN_INTIMATE.slice(PLAN_INTIMATE.indexOf('每件多写五格：'), -intimateConsent.length)}` } });
+}, { 'plan.intimate': ['牵头的是有卡的那一方，不是玩家。', '每件多写五格：', '名目——', '玩法——', '怎么带——', '走到哪——', '留下什么——', '底线写了的不排。加人只从这一条"可加入"里挑。'] });
 const intimatePromptFor = opts => promptText('plan.intimate', opts) + promptText('intimate.consent', opts);
 export const INTIMATE_PROGRESS_NOTE = '亲密线进度——开了亲密线时，每一对写一行：现在走到阶梯的哪一格（照阶梯原话），依据一句；没往上走就照旧写，不跳格。';
 export const INTIMATE_PROGRESS_OUTPUT = `${INTIMATE_PROGRESS_NOTE}\n输出加："亲密线进度": [{"谁和谁": ["甲", "乙"], "现在": "阶梯原话", "依据": "已经发生的依据一句"}]。\n\n`;

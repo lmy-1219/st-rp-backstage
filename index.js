@@ -141,7 +141,7 @@ async function api(route, body, timeout = 30000) {
         const response = await fetch(`/api/plugins/rp-emergence/${route}`, {
             method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(timeout),
         });
-        state.backendDown = response.status >= 500;
+        state.backendDown = response.status >= 500 || response.status === 404 && (route === 'update' || state.backendDown === true);
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw Object.assign(new Error(data.error || String(response.status)), { status: response.status });
         ok = true;
@@ -973,6 +973,7 @@ async function openUpdate() {
         return;
     }
     if (!r.ok) { await c.callGenericPopup(`<h3>检查更新</h3><p>没查成：${escapeHtml(r.error ?? '')}</p>`, c.POPUP_TYPE.TEXT); return; }
+    if (r.layout === 2) { await c.callGenericPopup('<h3>检查更新</h3><p>扩展和服务端由酒馆自己更新。版本还没对上时，重启一次酒馆就好。</p>', c.POPUP_TYPE.TEXT); return; }
     if (!r.behind && !r.stale) { globalThis.toastr?.success(`已经是最新（${r.head}）。`); return; }
     // 代码已经是新的、后台跑的还是旧的（D-163）：只要重启后台
     const ok = await c.callGenericPopup(!r.behind ? `<h3>后台该重启了</h3>
@@ -1486,12 +1487,25 @@ export function releaseLabel(info) {
     const version = edition === '正式版' && Number.isSafeInteger(info.version) && info.version > 0 ? ` v${info.version}` : '';
     return `${edition}${version} · ${info.running ?? info.head ?? '版本未取得'}${info.release ? info.ok === false || info.fetchFailed ? ' · 新版检查失败' : info.behind > 0 ? ' · 有新版本' : ' · 发布分支无新版' : ''}`;
 }
+export function installationHint({backendDown,localRelease,backendRelease}={}) {
+    if(backendDown)return '<p>还差一步：运行安装器（Windows 双击 安装.bat；手机和 Mac 运行 install.sh），然后重启酒馆。 <a href="https://github.com/lmy-1219/st-rp-backstage#安装" target="_blank" rel="noopener noreferrer">查看安装说明</a></p>';
+    if(localRelease?.layout===2&&Number.isSafeInteger(localRelease.version)&&Number.isSafeInteger(backendRelease?.version)&&localRelease.version!==backendRelease.version)return '<p>扩展和后台版本还没对上，重启一次酒馆就好。</p>';
+    return '';
+}
+async function loadExtensionRelease() {
+    try {
+        const response=await fetch(new URL('./release.json',import.meta.url));
+        if(response.ok){const value=await response.json();if(value.layout===2&&Number.isSafeInteger(value.version))state.localRelease=value;}
+    } catch { /* 开发安装没有发布清单，沿用开发流程。 */ }
+    render();
+}
 export function contentControlsHtml(content) {
     return !content ? '' : `<b>口味</b>
             ${content.tiers.length > 1 ? `<label>档位：<select data-content="tier"><option value=""${content.ownTier ? '' : ' selected'}>跟全局默认（当前 ${escapeHtml(content.tier)}）</option>${content.tiers.map(t => `<option${content.ownTier === t ? ' selected' : ''}>${escapeHtml(t)}</option>`).join('')}</select></label>` : ''}
             <div class="rpe-pace" role="group" aria-label="节奏">${['快', '中', '慢'].map(p => `<button type="button" class="menu_button" data-pace="${p}" aria-pressed="${content.pace === p}">${p}</button>`).join('')}</div>
             ${content.tier === 'SFW' ? '<p>SFW 档不用亲密线</p>' : ''}
             ${content.pureIntimateInactive ? '<small>纯NSFW 要开局单里有亲密线才起作用，现在和剧情向一样。</small>' : ''}
+            ${content.pureNoPack && !content.pureIntimateInactive ? '<small>纯NSFW 的口味文字在单独的口味包里：在“高级 → 口味 → 看／改口味包”里导入，再选它。没导入时和剧情向一样。</small>' : ''}
             ${content.intimate.map(r => `<label class="checkbox_label"><input type="checkbox" data-content-adult="${r.index}"${r.adult ? ' checked' : ''}${content.tier === 'SFW' ? ' disabled' : ''}> 这一条里的人都已成年：${escapeHtml(r.people.join('、'))}</label>${r.error && content.tier !== 'SFW' ? `<small>${escapeHtml(r.error)}</small>` : ''}${r.progress ? `<p>现在：${escapeHtml(r.progress.current)}${r.progress.day != null ? `（第${r.progress.day + 1}天更新）` : '（开局原文）'} <label>改回：<select data-intimate-progress="${r.index}">${r.progress.choices.map(v => `<option value="${escapeHtml(v)}"${v === r.progress.current ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select></label></p>` : ''}`).join('')}`;
 }
 
@@ -1662,7 +1676,7 @@ export function panelShellHtml() {
     #rp_emergence_panel summary{cursor:pointer;min-height:40px}#rp_emergence_panel input[type=number]{width:100%}
     @media(max-width:420px){#rp_emergence_panel .rpe-grid{grid-template-columns:1fr}#rp_emergence_panel .rpe-task{flex-wrap:wrap}}
     </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><div class="rpe-topbar"><span class="rpe-dot" data-role="connection-dot" aria-label="未接入"></span><b>RP：幕后</b><small data-role="spend"></small><button class="menu_button" type="button" data-action="pending-tab" data-role="pending-badge" hidden></button></div><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
-    <div class="inline-drawer-content"><nav class="rpe-tabs" role="tablist" aria-label="RP：幕后">${[['now','此刻'],['story','这一局'],['ledger','账'],['settings','设置']].map(([id,text])=>`<button type="button" class="menu_button" role="tab" data-tab="${id}" aria-controls="rpe-page-${id}">${text}</button>`).join('')}</nav>${['now','story','ledger','settings','advanced'].map(id=>`<div id="rpe-page-${id}" data-page="${id}" role="tabpanel">${panelPageHtml(id)}</div>`).join('')}<small data-role="note"></small></div></div>`;
+    <div class="inline-drawer-content"><div data-role="installation-hint" role="status" hidden></div><nav class="rpe-tabs" role="tablist" aria-label="RP：幕后">${[['now','此刻'],['story','这一局'],['ledger','账'],['settings','设置']].map(([id,text])=>`<button type="button" class="menu_button" role="tab" data-tab="${id}" aria-controls="rpe-page-${id}">${text}</button>`).join('')}</nav>${['now','story','ledger','settings','advanced'].map(id=>`<div id="rpe-page-${id}" data-page="${id}" role="tabpanel">${panelPageHtml(id)}</div>`).join('')}<small data-role="note"></small></div></div>`;
 }
 
 function mountPanel() {
@@ -1685,6 +1699,8 @@ function mountPanel() {
     });
     render = () => {
         const s = settings(), st = state.status;
+        const hint=$('[data-role="installation-hint"]');
+        hint.innerHTML=installationHint({backendDown:state.backendDown,localRelease:state.localRelease,backendRelease:state.release});hint.hidden=!hint.innerHTML;
         const door = document.querySelector('#rpe_door');
         if (door) {
             door.innerHTML = state.chatKey && s.enabled ? autoDoorHtml({...auto,items:state.door?.items??[],lit:state.door?.lit},escapeHtml) : '';
@@ -3303,6 +3319,7 @@ function refreshPlanStatus() {
 }
 
 mountPanel();
+loadExtensionRelease();
 addDayButtons();
 addWand();
 registerCommands();

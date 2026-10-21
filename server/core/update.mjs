@@ -31,13 +31,20 @@ export function readReleaseInfo(repo) {
         return Number.isSafeInteger(info.version) && info.version > 0 && /^[a-f0-9]{40,64}$/i.test(info.sourceCommit) && Number.isFinite(Date.parse(info.date)) ? info : null;
     } catch { return null; }
 }
+// 后台在 layout:2 下位于 server/core；旧后台传入的 repo 因而是 server。
+export function releaseRoot(repo) {
+    if(readReleaseInfo(repo)?.layout===2)return repo;
+    const parent=path.dirname(repo);
+    return path.basename(repo)==='server'&&readReleaseInfo(parent)?.layout===2?parent:repo;
+}
 
 // 看一眼：这份拷贝在哪个版本、正本推送到了哪、差几个提交、改到了哪些地方
 export async function checkRelease({ repo, follow = 'origin/main', fetch = true }) {
+    repo=releaseRoot(repo);
     const remote = await git(repo, ['remote', 'get-url', 'origin']);
     const releaseRepository = remote.ok && isReleaseOrigin(remote.out);
     const info = readReleaseInfo(repo), published = follow === 'origin/main' && releaseRepository && !!info;
-    const channel = { follow, releaseRepository, version: published ? info.version : null,
+    const channel = { follow, releaseRepository, version: published ? info.version : null, layout: info?.layout ?? 1,
         edition: published || follow === 'origin/release' ? '正式版' : follow === 'origin/main' ? '开发版（跟 main）' : '开发版' };
     const fetched = fetch && follow.includes('/') ? await git(repo, ['fetch', '--quiet', follow.split('/')[0]], 30000) : null;
     channel.fetchFailed = fetched?.ok === false;
@@ -53,7 +60,7 @@ export async function checkRelease({ repo, follow = 'origin/main', fetch = true 
         head: head.out.slice(0, 7), headFull: head.out, target: target.out.slice(0, 7), behind, ahead, dirty, log,
         changed: changed.length,
         // 改到转发插件的，要重启 ST 才生效；改到扩展的，刷新网页
-        needsStRestart: changed.some(f => f.startsWith('plugin/')), needsReload: changed.some(f => f.startsWith('extension/')),
+        needsStRestart: info?.layout===2?behind>0:changed.some(f => f.startsWith('plugin/')), needsReload: info?.layout===2?false:changed.some(f => f.startsWith('extension/')),
     };
 }
 
@@ -77,6 +84,7 @@ export function installFiles({ repo, stRoot }) {
 
 // 更新：只快进（这份拷贝里有没提交的改动、或者有正本里没有的提交，就不动，说清楚为什么）；然后把文件拷进 ST。
 export async function applyRelease({ repo, stRoot = null, follow = 'origin/main', fetch = true }) {
+    repo=releaseRoot(repo);
     const s = await checkRelease({ repo, follow, fetch });
     if (!s.ok) return s;
     if (s.dirty) return { ...s, ok: false, error: '这份代码里有没提交的改动，没更新' };
@@ -85,6 +93,7 @@ export async function applyRelease({ repo, stRoot = null, follow = 'origin/main'
         const m = await git(repo, ['merge', '--ff-only', '--quiet', follow], 60000);
         if (!m.ok) return { ...s, ok: false, error: `没更新成：${m.err}` };
     }
-    const copied = stRoot ? installFiles({ repo, stRoot }) : 0;
-    return { ...s, ok: true, updated: s.behind > 0, copied };
+    const layout2=readReleaseInfo(repo)?.layout===2;
+    const copied = stRoot&&!layout2 ? installFiles({ repo, stRoot }) : 0;
+    return { ...s, layout:readReleaseInfo(repo)?.layout ?? s.layout, ok: true, updated: s.behind > 0, copied };
 }

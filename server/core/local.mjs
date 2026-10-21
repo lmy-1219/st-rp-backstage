@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const DEFAULT_PORT = 8019;
+export const INSTALL_PORT = 8030;
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 export function readLocal(root = repo) {

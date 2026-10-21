@@ -1,8 +1,10 @@
 {
   "name": "st-rp-backstage",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
+  "main": "server/plugin/index.js",
   "scripts": {
-    "core": "node --disable-warning=ExperimentalWarning core/main.mjs"
+    "core": "node --disable-warning=ExperimentalWarning server/core/main.mjs"
   }
 }

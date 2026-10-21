@@ -82,6 +82,8 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             selected: options.selected, pack: options.pack, globalPack: options.config.content?.pack ?? DEFAULT_PACK, warning: options.warning,
             ownPack: store.getMeta(`prompt_pack:${store.requireChat(chatKey).story_id}`) ?? '', packs: env?.packs?.list() ?? [], slots: slotTable(options),
             pureIntimateInactive: options.tier === '纯NSFW' && !rows.some(r => r.ok),
+            // 纯NSFW 的口味文字在单独的口味包里（D-228）：这一局用的包没给这一段，就和剧情向一样
+            pureNoPack: options.tier === '纯NSFW' && typeof options.paragraphs?.['plan.intimate'] !== 'string',
             intimate: rows.map((r, index) => {
                 const current = progress.find(p => intimatePair(p.people) === intimatePair(r.谁));
                 return { index, people: [...r.谁, ...r.可加入], adult: r.成年, error: options.tier === 'SFW' ? 'SFW 档不用亲密线' : r.error ?? '',
