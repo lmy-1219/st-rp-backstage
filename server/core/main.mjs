@@ -50,7 +50,7 @@ import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFo
 import { pendingFor } from './pending.mjs';
 import { planBrief, nodeCheckLines, nodeCheckTaken, awayMaterial, storyContext, sceneMaterial, prepMaterial, situationMaterial, prefetchFor, intimateSetup, intimatePlanOptions } from './slot.mjs';
 import { AWAY_SYSTEM, AWAY_REVISE_SYSTEM, parseAway, awayPrompt, revisePrompt, pinNames, actualDaysOf } from './away.mjs';
-import { FRESH_SYSTEM, freshPrompt, staleSpans, applyFresh, voiceOf, PREVIOUS } from './fresh.mjs';
+import { FRESH_SYSTEM, freshPrompt, staleSpans, applyFresh, freshAnswerValid, voiceOf, PREVIOUS } from './fresh.mjs';
 import { STAY_SYSTEM, stayPrompt, parseStay, applyStay } from './stay.mjs';
 import { echoOpenings, dropEchoHeads } from './pace.mjs';
 import { createHandoffs } from './handoff.mjs';
@@ -1372,6 +1372,13 @@ async function stayMessage({ chatKey, speaker, name, text, said }) {
     }
 }
 
+function hasBoundVoice({ chatKey, speaker }) {
+    const cfg = getConfig();
+    if (!cfg.fresh.enabled) return false;
+    const chat = store.requireChat(chatKey);
+    const actor = store.getCast(chat.story_id).find(e => e.avatar === speaker && e.role !== '不用' && !String(e.avatar).startsWith('face:'));
+    return !!actor && !!voiceOf(path.join(home, '口吻'), [actor.name, speaker]);
+}
 async function freshMessage({ chatKey, speaker, text, before = null, lore = null }) {
     const cfg = getConfig(), a0 = cfg.stages.fresh;   // 去复读那一环节（D-106）；默认跟着检索词那档：路数得赶在用户下一句之前记下
     const model = a0.model;
@@ -1381,6 +1388,10 @@ async function freshMessage({ chatKey, speaker, text, before = null, lore = null
     const cut = typeof before === 'string' ? all.map(m => m.text).lastIndexOf(before) : -1;
     const messages = cut >= 0 ? all.slice(0, cut + 1) : all;
     const echo = [...messages].reverse().find(m => m.is_user)?.text ?? '';
+    const chat = store.requireChat(chatKey);
+    const actor = store.getCast(chat.story_id).find(e => e.avatar === speaker && e.role !== '不用' && !String(e.avatar).startsWith('face:'));
+    const name = actor?.name ?? messages.filter(m => m.speaker === speaker).at(-1)?.name ?? speaker;
+    const voice = cfg.fresh.enabled && actor ? voiceOf(path.join(home, '口吻'), [name, speaker]) : '';
     // 台词段首拿对方的话反问一句（"借钱？"）、"至于……"拎对方话头的：程序直接去掉，不花钱；模型换上来的句子再过一遍
     const tidy = out => {
         if (cfg.fresh.dropEchoes === false) return out;
@@ -1389,17 +1400,16 @@ async function freshMessage({ chatKey, speaker, text, before = null, lore = null
     };
     const done = out => { if (out.changes.length) store.markFreshened(fingerprint(false, speaker, out.text), fingerprint(false, speaker, text)); return out; };
     // 先截一刀（默认关），再去复读
-    const stayed = cfg.stay?.enabled ? await stayMessage({ chatKey, speaker, name: messages.filter(m => m.speaker === speaker).at(-1)?.name ?? speaker, text, said: echo }) : { text, changes: [] };
+    // 截一刀和以前一样跟着去复读总开关（第二档），不跟绑定走：没绑语料的角色照旧能截
+    const stayed = cfg.fresh.enabled && cfg.stay?.enabled ? await stayMessage({ chatKey, speaker, name, text, said: echo }) : { text, changes: [] };
     const pre = tidy({ text: stayed.text, changes: stayed.changes });
+    if (!voice) return done(pre);
     if (!a0.baseUrl || !a0.apiKey || !model || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return done(pre);
     const his = messages.filter(m => !m.is_user && m.speaker === speaker && m.text !== text && !(m.text.length >= 40 && text.startsWith(m.text))).map(m => m.text);
     const previous = his.slice(-PREVIOUS), usual = his.slice(-PREVIOUS - 30, -PREVIOUS);   // 更早的：他一贯的说法、这个世界的叫法
-    if (!previous.length) return done(pre);
-    const name = messages.filter(m => m.speaker === speaker).at(-1)?.name ?? speaker;
     // 他上一次开口之后、别人说的（至多两条）：别顺着别人的比喻往下说
     const lastMine = messages.map(m => m.speaker === speaker && m.text !== text).lastIndexOf(true);
     const others = messages.slice(lastMine + 1).filter(m => !m.is_user && m.speaker !== speaker && m.text !== text).slice(-2).map(m => ({ name: m.name ?? m.speaker, text: m.text }));
-    const chat = store.requireChat(chatKey);
     const exclude = [...store.getCast(chat.story_id).map(e => e.name), ...messages.filter(m => m.is_user).map(m => m.name)].filter(Boolean);
     // 拿对方原话起头的台词（用户 9/29）也请模型换：当成程序找到的，括起来（段首的上面已经去掉了，剩下段中间的）
     const spans = [...staleSpans(pre.text, previous, { exclude, echo, usual }), ...echoOpenings(pre.text, echo).map(span => ({ span, count: 0, echo: true }))];
@@ -1407,7 +1417,6 @@ async function freshMessage({ chatKey, speaker, text, before = null, lore = null
     const started = Date.now();
     try {
         // 他本人的口吻：数据目录 口吻/<名字>.md（fresh.voice，默认开；没放文件就没有）
-        const voice = cfg.fresh.voice === false ? '' : voiceOf(path.join(home, '口吻'), [name, speaker]);
         const setupData = store.setupOf?.(chat.story_id)?.data;
         const roster = store.getCast(chat.story_id).map(e => e.name);
         const facts = (staleBackstory(setupData, records.visible(chatKey), [...messages].reverse().find(m => m.is_user)?.name)?.前史 ?? []).filter(x => x.常驻 && !x.过时 && (!x.谁知道?.length || x.谁知道.some(p => sameName(p, name, roster)))).map(x => x.事);
@@ -1422,8 +1431,9 @@ async function freshMessage({ chatKey, speaker, text, before = null, lore = null
         const recalled = store.getSlotParts?.({ chatKey, speaker, anchor: upto.length ? `${upto.length}:${upto.at(-1).fp}` : 'start' })?.recall ?? '';
         const r = await createModelClient({ ...a0, model, maxOutputTokens: 6000 }).complete({ system: renderPronouns(FRESH_SYSTEM, { ...playerContext(store, chatKey), person: name }), user: freshPrompt({ name, text: pre.text, spans, previous, others, voice, facts, context, lore: loreTexts, state: stateNow, recall: recalled }) });
         const costUsd = ((r.usage?.input ?? 0) * prices[0] + (r.usage?.output ?? 0) * prices[1]) / 1e6;
+        if (!freshAnswerValid(r.text)) throw Object.assign(new Error('fresh_bad_json'), { usage: r.usage });
         records.logAssemble({ chatKey, speaker: '(去复读)', model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
-        const got = applyFresh(pre.text, spans, r.text, previous, { voice, said: echo });
+        const got = applyFresh(pre.text, spans, r.text, previous, { voice, said: echo, styleOnly: !previous.length });
         const out = tidy({ ...got, changes: [...pre.changes, ...got.changes] });
         // 他一再用的路数记在这一条上（存下来的是换过的那版），他下一次开口时那一格提前说一声（fresh.waysLine）。
         // 也记着这条接的是哪一条（after）：左滑重来时这条换掉了，接的那条还在，下一版照样拿得到（试玩 9/30）
@@ -1653,7 +1663,8 @@ setInterval(() => {
 // 素材包按局选（D-104，T-22：换个题材不能带出别的题材的价码、时事、年表、专名）。meta pack:<局> 记这一局用 素材包/ 下哪个目录；
 // 没选就什么都不给（以前 config 里 economy.priceTable、world.*、advisor.library／nameTable 是全局的，每一局都拿同一个包——不再用）。
 // 包里的文件都可有可无：物价.json、年表/时事种子.csv、年表/纪年锚点.json、专名对照表.csv；整个目录当参谋的开卷资料。
-const packsDir = () => path.resolve(repo, loadConfig(home).packs.dir);
+const packsDir = () => { const configured = loadConfig(home).packs.dir; return configured === '素材包' ? path.join(home, '素材包') : path.resolve(repo, configured); };
+const packRoots = () => [...new Set([packsDir(), path.resolve(repo, loadConfig(home).packs.dir), path.join(repo, '素材包')])];
 const packFiles = new Map();
 const cachedFile = (file, load) => {
     if (!file) return null;
@@ -1666,14 +1677,14 @@ const cachedFile = (file, load) => {
     return value;
 };
 function listPacks() {
-    try { return fs.readdirSync(packsDir(), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name); } catch { return []; }
+    return [...new Set(packRoots().flatMap(dir => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name); } catch { return []; } }))];
 }
 function packOf(chatKey) {
     let storyId = null;
     try { storyId = store.requireChat(chatKey).story_id; } catch { return null; }
     const name = store.getMeta(`pack:${storyId}`);
     if (!name || !listPacks().includes(name)) return null;
-    const dir = path.join(packsDir(), name);
+    const dir = packRoots().map(root => path.join(root, name)).find(d => { try { return fs.statSync(d).isDirectory(); } catch { return false; } });
     const file = rel => (fs.existsSync(path.join(dir, rel)) ? path.join(dir, rel) : null);
     return {
         name, dir, nameTable: file('专名对照表.csv'),
@@ -1849,7 +1860,7 @@ async function autoAnswer({ chatKey, who, answer }) {
 
 const settings = () => {
     const config = loadConfig(home);
-    return { code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: config.fresh.enabled ? { ...config.fresh, run: freshMessage } : null, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
+    return { code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
 };
 const server = createServer(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
 server.on('error', error => {

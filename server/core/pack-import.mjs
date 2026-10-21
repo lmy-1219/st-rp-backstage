@@ -1,8 +1,12 @@
 // 开局包（_dev/开局包格式-20261017.md，用户 10/17：一键导入一整局）：局包是一个文件夹，根目录一份 开局包.json 清单；
-// 这里只做读和核——卡、user 卡、世界书、局预设、ST 预设各读成文本交给扩展（扩展拿着酒馆的请求头往 ST 里导），素材包复制进本仓的素材包目录。
-// 不碰 ST 的数据目录（那是扩展在页面里做的）；本机路径由用户在面板里填。题材无关。
+// 卡、user 卡、世界书、局预设、ST 预设读成文本交给扩展；新素材复制进后台数据目录。
+// ZIP/Git 来源也只准备文件，ST 导入仍由扩展完成。题材无关。
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
+import { extractZip, ZIP_MAX_BYTES } from './zip.mjs';
 import { readLocal } from './local.mjs';
 
 const MANIFEST = ['开局包.json', 'opening-pack.json'];
@@ -12,6 +16,11 @@ const isFile = p => { try { return fs.statSync(p).isFile(); } catch { return fal
 const readJson = p => JSON.parse(fs.readFileSync(p, 'utf8'));
 const fail = message => { throw Object.assign(new Error(message), { status: 400 }); };
 const names = v => (Array.isArray(v) ? v.map(x => String(x ?? '').trim()).filter(Boolean) : []);
+function assertOpeningDirectory(root, local = readLocal()) {
+    if (!isDir(root)) fail('这个路径不是一个文件夹');
+    const real = fs.realpathSync.native(root).toLowerCase();
+    if (local.productionSt.some(p => { const base = (isDir(p) ? fs.realpathSync.native(p) : path.resolve(p)).toLowerCase(); return real === base || real.startsWith(base + path.sep); })) fail('这是生产 ST 的目录');
+}
 
 // 读一张 chara_card_v3（ST 直接导的那种）：name、first_mes 在顶层或 data 里
 function readCard(file) {
@@ -46,26 +55,26 @@ export function checkPack(dir) {
  *   books: [{ file, name, bind, text }], preset: { name, text, data } | null, stPreset: { name, text } | null, pack: { name, dir, checks } | null, warnings: [] }
  * full=false 时不带 text（先看一眼用）
  */
-export function readOpeningPack(dir, { full = true, local = readLocal() } = {}) {
+export function readOpeningPack(dir, { full = true, local = readLocal(), boundary = null } = {}) {
     const root = path.resolve(String(dir ?? '').trim().replace(/^"|"$/g, ''));
-    if (!root || !isDir(root)) fail('这个路径不是一个文件夹');
-    const real = fs.realpathSync.native(root).toLowerCase();
-    if (local.productionSt.some(p => {
-        const protectedRoot = (isDir(p) ? fs.realpathSync.native(p) : path.resolve(p)).toLowerCase();
-        return real === protectedRoot || real.startsWith(protectedRoot + path.sep);
-    })) fail('这是生产 ST 的目录');
+    assertOpeningDirectory(root, local);
+    if (boundary) {
+        const check = dir => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { if (e.name === '.git') continue; if (e.isSymbolicLink()) fail('开局包不能引用链接'); if (e.isDirectory()) check(path.join(dir, e.name)); } };
+        check(root);
+    }
     const mf = MANIFEST.map(n => path.join(root, n)).find(isFile);
     if (!mf) fail(`文件夹里没有 ${MANIFEST[0]}（清单；格式见 _dev/开局包格式-20261017.md）`);
     let m;
     try { m = readJson(mf); } catch { fail('开局包.json 不是 JSON'); }
     if (m?.v !== 1) fail('开局包.json 的 v 要是 1');
-    const rel = p => path.resolve(root, String(p));
+    const inside = file => { if (!boundary) return true; const base = fs.realpathSync(boundary), resolved = fs.existsSync(file) ? fs.realpathSync(file) : path.resolve(file); return resolved === base || resolved.startsWith(base + path.sep); };
+    const rel = p => { const file = path.resolve(root, String(p)); if (!inside(file) || path.basename(file).toLowerCase() === 'secrets.json' || (boundary && path.relative(boundary, file).split(path.sep).includes('.git'))) fail('清单引用了包外或受保护的文件'); return file; };
     const warnings = [];
     // 卡
     const cardDir = rel(m.卡 ?? '卡');
     if (!isDir(cardDir)) fail(`没有卡的目录：${m.卡 ?? '卡'}`);
     const userFile = m.user卡 ? rel(m.user卡) : null;
-    const cards = fs.readdirSync(cardDir).filter(f => /\.json$/i.test(f) && (!userFile || path.resolve(cardDir, f) !== userFile)).sort()
+    const cards = fs.readdirSync(cardDir).filter(f => /\.json$/i.test(f) && f.toLowerCase() !== 'secrets.json' && (!userFile || path.resolve(cardDir, f) !== userFile)).sort()
         .map(f => readCard(path.join(cardDir, f)));
     if (!cards.length) fail('卡的目录里没有 *.json');
     const dup = cards.map(c => c.name).filter((n, i, a) => a.indexOf(n) !== i);
@@ -113,11 +122,16 @@ export function readOpeningPack(dir, { full = true, local = readLocal() } = {}) 
     // 素材包
     let pack = null;
     if (m.素材包) {
-        const d = rel(m.素材包);
-        if (!isDir(d)) fail(`没有素材包目录：${m.素材包}`);
-        pack = { name: path.basename(d), dir: d, checks: checkPack(d) };
-        if (preset?.pack && preset.pack !== pack.name) warnings.push(`局预设里 pack＝"${preset.pack}"，素材包目录名是"${pack.name}"，对不上（套完以后这一局选不到包）`);
-        for (const c of pack.checks) if (c.ok === false) warnings.push(`素材包 ${c.file}：${c.why}`);
+        const original = path.resolve(root, String(m.素材包)), last = String(m.素材包).replaceAll('\\', '/').split('/').filter(Boolean).at(-1);
+        const candidates = [original, path.join(root, '素材包', last ?? ''), path.join(root, last ?? '')];
+        const d = candidates.find(p => inside(p) && isDir(p));
+        if (!d) warnings.push('素材包缺；其他资源仍可导入');
+        else {
+            if (d !== original) warnings.push('素材包在包里找到了');
+            pack = { name: path.basename(d), dir: d, checks: checkPack(d) };
+            if (preset?.pack && preset.pack !== pack.name) warnings.push(`局预设里 pack＝"${preset.pack}"，素材包目录名是"${pack.name}"，对不上（套完以后这一局选不到包）`);
+            for (const c of pack.checks) if (c.ok === false) warnings.push(`素材包 ${c.file}：${c.why}`);
+        }
     }
     const strip = x => (x && 'text' in x ? { ...x, text: undefined } : x);
     const out = {
@@ -140,7 +154,7 @@ export function backupStFiles(stRoot, backupRoot, { cards = [], books = [] } = {
     return dir;
 }
 
-// 素材包复制进本仓的素材包目录：目标已存在且不盖就跳过
+// 素材包复制进调用方提供的数据目录：目标已存在且不盖就跳过
 export function installPack(src, packsDir, { overwrite = false } = {}) {
     if (!packsDir) fail('没有素材包目录');
     const target = path.join(packsDir, path.basename(src));
@@ -155,6 +169,97 @@ function copyDir(src, dst) {
     for (const e of fs.readdirSync(src, { withFileTypes: true })) {
         const s = path.join(src, e.name), d = path.join(dst, e.name);
         if (e.isDirectory()) copyDir(s, d);
-        else if (e.isFile()) fs.copyFileSync(s, d);
+        else if (e.isFile() && e.name.toLowerCase() !== 'secrets.json') fs.copyFileSync(s, d);
     }
+}
+
+export function findOpeningPacks(root) {
+    assertOpeningDirectory(path.resolve(root));
+    const found = [];
+    function walk(dir, depth) {
+        const st = fs.lstatSync(dir); if (!st.isDirectory() || st.isSymbolicLink()) fail('开局包目录不是普通目录');
+        if (MANIFEST.some(n => isFile(path.join(dir, n)))) { found.push(dir); return; }
+        if (depth === 3) return;
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) if (e.isDirectory() && e.name !== '.git' && !e.isSymbolicLink()) walk(path.join(dir, e.name), depth + 1);
+    }
+    walk(path.resolve(root), 0);
+    if (!found.length) fail('包里没有 开局包.json');
+    return found;
+}
+
+export const UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
+const UPLOAD_TTL = 30 * 60 * 1000;
+const execAsync = promisify(execFile);
+const safeLabel = value => {
+    const name = String(value ?? '').trim();
+    if (!name || name.length > 150 || /[\\/:*?"<>|\x00-\x1f]/.test(name) || /[. ]$/.test(name) || name === '.' || name === '..' || name.startsWith('.')) fail('包名不对');
+    return name;
+};
+const plainDir = dir => { if (fs.existsSync(dir) && (!fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink())) fail('开局包目录不是普通目录'); };
+export function httpsPackUrl(value) {
+    let u; try { u = new URL(value); } catch { fail('请贴 HTTPS git 仓库地址'); }
+    if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash) fail('只接受不带账号密码的 HTTPS git 仓库地址');
+    return u.href.replace(/\/$/, '');
+}
+
+// 数据目录的受管入口；测试可传真 Git 的合成本地传输，产品入口仍在 server 严格核 HTTPS。
+export function openingSources(root, { now = Date.now, runGit = null } = {}) {
+    root = path.resolve(root); const temp = path.join(root, '.upload'), stateDir = path.join(root, '.sources'), sessions = new Map();
+    const ensure = () => { plainDir(root); plainDir(temp); plainDir(stateDir); fs.mkdirSync(temp, { recursive: true }); fs.mkdirSync(stateDir, { recursive: true }); };
+    const marker = name => path.join(stateDir, name + '.json');
+    const drop = id => { const s = sessions.get(id); sessions.delete(id); if (s && fs.existsSync(s.file)) fs.unlinkSync(s.file); };
+    function cleanup() {
+        if (!fs.existsSync(temp)) return; plainDir(temp);
+        for (const [id, s] of sessions) if (now() - s.at >= UPLOAD_TTL) drop(id);
+        for (const e of fs.readdirSync(temp, { withFileTypes: true })) if (e.isFile() && /^[a-zA-Z0-9_-]+\.zip$/.test(e.name)) {
+            const file = path.join(temp, e.name); if (now() - fs.statSync(file).mtimeMs >= UPLOAD_TTL) fs.unlinkSync(file);
+        }
+    }
+    const git = runGit ?? (async (args, cwd) => {
+        const r = await execAsync('git', ['-c', 'core.hooksPath=' + path.join(root, '.no-hooks'), ...args], { cwd, timeout: 180000, maxBuffer: 1024 * 1024, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }); return r.stdout.trim();
+    });
+    let busy = false;
+    return { root, cleanup,
+        upload(b) {
+            ensure(); cleanup(); const { id, index, total, data, name } = b;
+            const validId = typeof id === 'string' && /^[a-zA-Z0-9_-]{12,80}$/.test(id);
+            if (b.abort === true && validId) { drop(id); return { aborted: true }; }
+            try {
+                if (!validId || !Number.isInteger(index) || !Number.isInteger(total) || total < 1 || total > Math.ceil(ZIP_MAX_BYTES / UPLOAD_CHUNK_BYTES) || index < 0 || index >= total) fail('上传编号不对');
+                if (typeof data !== 'string' || !data.length || data.length % 4 || data.length > Math.ceil(UPLOAD_CHUNK_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) fail('上传块不是有效 base64');
+                const bytes = Buffer.from(data, 'base64'); if (bytes.toString('base64') !== data) fail('上传块不是有效 base64'); if (bytes.length > UPLOAD_CHUNK_BYTES) fail('上传块太大');
+                if (!/\.zip$/i.test(String(name))) fail('只认 .zip；rar、7z 请先转成 zip');
+                const label = safeLabel(name.slice(0, -4)); let s = sessions.get(id);
+                if (!s) { if (index !== 0) fail('不认识这个上传 id'); if (sessions.size >= 4) fail('正在上传的包太多'); const file = path.join(temp, id + '.zip'); fs.writeFileSync(file, Buffer.alloc(0), { flag: 'wx' }); s = { file, next: 0, total, name, at: now(), size: 0 }; sessions.set(id, s); }
+                if (s.next !== index || s.total !== total || s.name !== name) fail('上传块缺失、重复或顺序不对');
+                s.size += bytes.length; if (s.size > ZIP_MAX_BYTES) fail('包太大'); fs.appendFileSync(s.file, bytes); s.next++; s.at = now();
+                if (s.next < total) return { received: s.next, total };
+                const target = path.join(root, label), staged = path.join(root, '.extract-' + randomUUID());
+                plainDir(target); if (fs.existsSync(target) && (!fs.existsSync(marker(label)) || readJson(marker(label)).kind !== 'zip')) fail('同名目录不是已上传的压缩包，不覆盖');
+                try { extractZip(s.file, staged); if (fs.existsSync(target)) fs.rmSync(target, { recursive: true }); fs.renameSync(staged, target); fs.writeFileSync(marker(label), JSON.stringify({ kind: 'zip' })); }
+                finally { if (fs.existsSync(staged)) fs.rmSync(staged, { recursive: true, force: true }); }
+                drop(id); return { received: total, total, path: target };
+            } catch (e) { if (validId) drop(id); throw e; }
+        },
+        async pull(url) {
+            if (busy) fail('正在拉取，请稍候'); ensure(); busy = true;
+            let created = null;
+            try {
+                const name = safeLabel(decodeURIComponent(String(url).split('/').filter(Boolean).at(-1)).replace(/\.git$/i, '')), target = path.join(root, name);
+                plainDir(target);
+                let operation;
+                if (fs.existsSync(target)) {
+                    if (!fs.existsSync(marker(name)) || readJson(marker(name)).kind !== 'git') fail('同名目录不是本入口拉取的仓库，不覆盖');
+                    if ((await git(['remote', 'get-url', 'origin'], target)).trim() !== url) fail('已有同名仓库的 origin 地址不同，不覆盖');
+                    if ((await git(['status', '--porcelain'], target)).trim()) fail('已有仓库有改动，不更新');
+                    await git(['pull', '--ff-only'], target); operation = 'pull';
+                } else {
+                    created = target; await git(['clone', '--depth', '1', '--', url, target], root);
+                    fs.writeFileSync(marker(name), JSON.stringify({ kind: 'git' })); operation = 'clone'; created = null;
+                }
+                return { path: target, operation };
+            } catch (e) { if (created && fs.existsSync(created)) fs.rmSync(created, { recursive: true, force: true }); throw Object.assign(new Error((e.stderr || e.message) + '\n手机上网络不稳的，可以改用压缩包'), { status: 400 }); }
+            finally { busy = false; }
+        },
+    };
 }

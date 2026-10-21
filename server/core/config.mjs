@@ -196,7 +196,7 @@ export function loadConfig(home) {
             remoteQuiet: Math.max(1, Number(raw.auto?.remoteQuiet ?? 3) || 3) },
         // 局势（core/situation.mjs，Q-8②）：一个剧情日推一次各方的动向、消息怎么传开；默认关。model 不填用叙事组装那档（同一条线路）
         situation: { enabled: raw.situation?.enabled === true, model: typeof raw.situation?.model === 'string' && raw.situation.model ? raw.situation.model : null },
-        fresh: { enabled: raw.fresh?.enabled !== false, ways: raw.fresh?.ways !== false, dropEchoes: raw.fresh?.dropEchoes !== false, voice: raw.fresh?.voice !== false, model: typeof raw.fresh?.model === 'string' && raw.fresh.model ? raw.fresh.model : null,
+        fresh: { enabled: raw.fresh?.enabled !== false, ways: raw.fresh?.enabled !== false, dropEchoes: raw.fresh?.dropEchoes !== false, voice: raw.fresh?.voice !== false, model: typeof raw.fresh?.model === 'string' && raw.fresh.model ? raw.fresh.model : null,
             priceInPerM: raw.fresh?.priceInPerM == null ? null : Number(raw.fresh.priceInPerM), priceOutPerM: raw.fresh?.priceOutPerM == null ? null : Number(raw.fresh.priceOutPerM) },
         strip: Array.isArray(raw.strip) ? raw.strip : DEFAULT_STRIP,
         // 素材包放在哪（相对仓库根目录）；每一局用哪个包在面板上选，存在后台（D-104）
@@ -209,22 +209,22 @@ export function loadConfig(home) {
 // ---------- 各环节的钥匙和模型（D-106：划掉 ComfyUI，改在面板里选） ----------
 // follows：不另外选时跟着谁（面板上说明用）。顺序就是面板上的顺序。
 export const STAGES = [
-    { id: 'extract', name: '记账', follows: '原配置' },
+    { id: 'extract', name: '每条总结', follows: '原配置' },
     { id: 'keys', name: '检索词', follows: '叙事组装那把钥匙' },
-    { id: 'assemble', name: '叙事组装', follows: '记账' },
+    { id: 'assemble', name: '叙事组装', follows: '每条总结' },
     { id: 'judge', name: '转向和节点检查', follows: '叙事组装' },
-    { id: 'plan', name: '规划', follows: '记账' },
-    { id: 'away', name: '离开推演', follows: '记账' },
-    { id: 'advisor', name: '参谋', follows: '记账那把钥匙' },
-    { id: 'setup', name: '开局单', follows: '记账' },
-    { id: 'talk', name: '跟后台说话', follows: '记账' },
+    { id: 'plan', name: '规划', follows: '每条总结' },
+    { id: 'away', name: '离开推演', follows: '每条总结' },
+    { id: 'advisor', name: '参谋', follows: '每条总结那把钥匙' },
+    { id: 'setup', name: '开局单', follows: '每条总结' },
+    { id: 'talk', name: '任意调整', follows: '每条总结' },
     { id: 'setupKeys', name: '前史检索词', follows: '检索词' },
     { id: 'fresh', name: '去复读', follows: '检索词' },
     { id: 'profile', name: '读卡（兴趣和习惯）', follows: '参谋' },
     { id: 'scene', name: '兴头（看场面）', follows: '参谋' },
     { id: 'prep', name: '规划前备料', follows: '参谋' },
     { id: 'lore', name: '世界书谁知道', follows: '参谋' },
-    { id: 'situation', name: '局势（一个剧情日推一次）', follows: '叙事组装' },
+    { id: 'situation', name: '局势（每过一格剧情时间推一次）', follows: '叙事组装' },
     { id: 'embed', name: '向量（按意思找旧事）', follows: `自动：钥匙簿里能调 ${modelData.embedModel} 的那把；都不能就照旧配检索词` },
 ];
 // 常见型号的单价（每百万 token，美元）：换了模型又没填价时用；不认识的按贵的估（15／75）。
@@ -338,3 +338,6 @@ export function extractorReady(config) {
     const e = config.extractor;
     return !!(e.baseUrl && e.model && e.apiKey);
 }
+
+export const MODEL_GROUPS = modelData.stageGroups;
+export const VOICE_GUIDANCE = modelData.voiceGuidance;

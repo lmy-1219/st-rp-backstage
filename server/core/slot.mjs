@@ -2010,7 +2010,7 @@ export function stateBlock(store, { chatKey, name, present = [], userName = null
 // 路数记在他那条回复上，只认记在最近几条之一上的；左滑重来时那条已经换掉了，所以也记着它接的是哪一条（after），接的那条还在就照用。
 export function varyFor(store, { chatKey, speaker, name, userName = null, messages, fresh = null, pace = null }) {
     let ways = [];
-    if (fresh?.ways) {
+    if (fresh?.enabled === true && fresh?.ways && fresh.bound?.({ chatKey, speaker }) === true) {
         let saved = null;
         try { saved = JSON.parse(store.getMeta?.(`fresh_ways:${chatKey}:${speaker}`) ?? 'null'); } catch {}
         if (saved?.ways?.length && messages.slice(-8).some(m => m.fp === saved.fp || (saved.after && m.fp === saved.after))) ways = saved.ways.map(wayOnly).filter(w => w && keepWay(w));

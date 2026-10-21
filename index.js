@@ -228,7 +228,7 @@ async function showEpisodes(run = false) {
     const r = await api('episodes', { chatKey: state.chatKey, ...(run ? { run: true } : {}) }, run ? 300000 : 30000);
     const box = document.createElement('div');
     const upto = r.episodes.length ? r.episodes.at(-1).to + 1 : 0;
-    box.innerHTML = `<h3>一场一场的经过（${r.episodes.length} 场）</h3>
+    box.innerHTML = `<h3>剧情总览（${r.episodes.length} 场）</h3>
         <p><small>后台照原文分场写的经过：以后角色被问起"昨晚""那天"干了什么，就照这个说；只给当时在场的人。那段里删了、改了哪条，这一场作废、重写。
         你改了点"保存"，那几条消息不变就一直用你改的。写到第 ${upto} 条，共 ${r.total} 条（最近几条等一场收尾再写）。</small></p>
         ${r.ran ? `<p><small>${r.ran.off ? '场次摘要没开，或者"兴头（看场面）"那一档没配钥匙。' : `刚补写了 ${r.ran.written} 场。`}</small></p>` : ''}`
@@ -245,7 +245,7 @@ async function showEpisodes(run = false) {
 }
 
 // 名册：这个局里每个人算哪一档，还没出场的人什么情况下会找上门（钩子）。
-const ROLE_NOTES = { 主要: '一直在场；你不在的日子里照样过', 常联系: '会主动关心、有事会来找', 路过: '只在被找时回应，不主动关心', 新面孔: '没有卡、这一局里新长出来的人（规划要用的，或记账里反复出现的）：能牵头、会来找、有亲疏', 可能登场: '还没出场；写了钩子才会找上门', 不用: '不属于这个故事，或是旧版本' };
+const ROLE_NOTES = { 主要: '一直在场；你不在的日子里照样过', 常联系: '会主动关心、有事会来找', 路过: '只在被找时回应，不主动关心', 新面孔: '没有卡、这一局里新长出来的人（规划要用的，或每条总结里反复出现的）：能牵头、会来找、有亲疏', 可能登场: '还没出场；写了钩子才会找上门', 不用: '不属于这个故事，或是旧版本' };
 async function editCast() {
     const { roles, cast } = await api('cast', { chatKey: state.chatKey });
     const box = document.createElement('div');
@@ -261,7 +261,7 @@ async function editCast() {
           <input class="text_pole" data-field="hook" style="flex:1" placeholder="钩子（可空）：什么情况下会来找" value="${escapeHtml(e.hook ?? '')}">
           <label style="flex:0 0 auto"><input type="checkbox" data-field="priority"${e.priority ? ' checked' : ''}> 优先</label>
           ${String(e.avatar).startsWith('face:') ? `<label><input type="checkbox" data-field="group"${e.群体 ? ' checked' : ''}> 一群人</label>` : ''}
-          ${e.promote ? `<small data-promotion>戏份多了，要不要给 TA 建张卡？ <button type="button" class="menu_button" data-dismiss-promotion="${escapeHtml(e.avatar)}">不用</button></small>` : ''}
+          ${e.promote ? `<small data-promotion>戏份多了，要不要给 TA 建张卡？ <button type="button" class="menu_button" data-dismiss-promotion="${escapeHtml(e.avatar)}" title="忽略这次建卡提示，建议确认不需要再点。">不用</button></small>` : ''}
         </div>
         <div style="margin:0 0 .6em 11.5em" data-interests="${escapeHtml(e.avatar)}">
           <textarea class="text_pole" data-field="interests" rows="2" style="width:100%;font-size:.9em" placeholder="兴趣和习惯（读卡写的，可改；空着＝还没读或卡里没写）">${escapeHtml(e.interests ?? '')}</textarea>
@@ -311,7 +311,7 @@ async function showPending() {
     const groups = new Map([['排着', []], ['到了', []], ['过了时候', []], ['等着', []], ['递过', []], ['用上了', []], ['办了', []], ['改了', []], ['黄了', []], ['过去了', []], ['沉了', []], ['过期了', []], ['撤了', []], ['失效', []]]);
     for (const item of r.items ?? []) (groups.get(item.status) ?? groups.get('排着')).push(item);
     const order = ['排着', '到了', '过了时候', '等着', '递过', '用上了', '办了', '改了', '黄了', '过去了', '沉了', '过期了', '撤了', '失效'];
-    const html = `<h3>事账</h3>${order.map(status => {
+    const html = `<h3>约定历史</h3>${order.map(status => {
         const rows = groups.get(status) ?? [];
         if (!rows.length) return '';
         const body = rows.map(x => `<div style="margin:.35em 0"><b>${escapeHtml(x.kind)} · ${escapeHtml(x.status)} @第${escapeHtml(x.statusAt ?? x.since)}条</b> ${escapeHtml(x.text)}${x.why ? ` <small style="opacity:.75">${escapeHtml(x.why)}</small>` : ''}${x.next?.text ? `<br><small style="opacity:.85">${escapeHtml(x.next.label ?? '')}：${escapeHtml(x.next.text)}</small>` : ''}</div>`).join('');
@@ -363,7 +363,7 @@ function driftHtml(d) {
     if (!d?.lines?.length) return '';
     return `<div style="color:var(--warning,#d33)">删回到第 ${d.at} 条以后，后台算出来的和那条当时的样子有 ${d.lines.length} 处对不上（多半是哪一环没跟着撤）：`
         + d.lines.map(l => `<div style="margin-left:.8em">· ${escapeHtml(l)}</div>`).join('')
-        + ` <button class="menu_button" type="button" data-action="drift-clear">知道了</button></div>`;
+        + ` <button class="menu_button" type="button" data-action="drift-clear" title="清除变化预览，建议核对后再用。">知道了</button></div>`;
 }
 
 // 外援队列件数变多了：轻提示一次（后台调模型没响应，活已经写成外援包等 AI 窗口接手）。
@@ -373,7 +373,7 @@ async function refreshHandoffs() {
 }
 function noticeHandoffs(n = 0) {
     if (n) refreshHandoffs();
-    if (n > (state.handoffs ?? 0)) globalThis.toastr?.warning(`后台有 ${n} 件活调模型没响应，已放进外援队列。打开面板的外援队列，复制题目贴给任一个 AI，或在能跑命令的 AI 窗口里说"处理外援"就行。`, 'RP：幕后', { timeOut: 12000 });
+    if (n > (state.handoffs ?? 0)) globalThis.toastr?.warning(`后台有 ${n} 件活调模型没响应，放进了外援队列。打开“此刻 → 外援”，复制题目贴给任何一个 AI（网页版也行），把它的回答贴回来点“交回”。`, 'RP：幕后', { timeOut: 12000 });
     state.handoffs = n;
 }
 
@@ -389,7 +389,7 @@ async function openTalk(first = '') {
     let timer = null, dlg = null;
     const bubble = t => `<div style="margin:.5em 0;text-align:right"><span style="display:inline-block;padding:.3em .6em;border-radius:8px;border:1px solid var(--SmartThemeBorderColor,#666);max-width:85%;text-align:left;white-space:pre-wrap">${escapeHtml(t.text)}</span></div>`;
     const card = (t, ti) => `<div style="margin:.5em 0"><div style="white-space:pre-wrap">${escapeHtml(t.text)}</div>${(t.proposals ?? []).map((p, i) => `<div style="margin:.35em 0;padding:.3em .5em;border-left:3px solid var(--SmartThemeQuoteColor,#e88)"><div>${escapeHtml(p.say)}</div>${p.status === 'proposed'
-        ? `<div class="flex-container" style="gap:4px;margin-top:.2em"><div class="menu_button" data-talk-apply="${ti}:${i}" style="width:auto;white-space:nowrap">记</div><div class="menu_button" data-talk-skip="${ti}:${i}" style="width:auto;white-space:nowrap">不记</div></div>`
+        ? `<div class="flex-container" style="gap:4px;margin-top:.2em"><div class="menu_button" data-talk-apply="${ti}:${i}" style="width:auto;white-space:nowrap" title="写入这项提议，建议逐条核对。">记</div><div class="menu_button" data-talk-skip="${ti}:${i}" style="width:auto;white-space:nowrap" title="拒绝这项提议，建议不合适时点。">不记</div></div>`
         : `<small style="opacity:.7">${p.status === 'done' ? '已记' : '没记'}</small>`}</div>`).join('')}</div>`;
     const draw = () => {
         if (!dlg) return;
@@ -404,10 +404,10 @@ async function openTalk(first = '') {
         clearTimeout(timer);
         if (v.pending && dlg) timer = setTimeout(async () => { try { v = await api('talk', { chatKey }); } catch {} draw(); poll(); }, 2500);
     };
-    const html = `<h3>跟后台说话</h3><p><small>不进聊天记录，角色看不到。问记下的事、指出哪条记错了、商量接下来的方向和口味。要改什么，后台先说它的理解，你点"记"才算。每说一句调一次模型（几美分）。</small></p>
+    const html = `<h3>任意调整</h3><p><small>不进聊天记录，角色看不到。它看不到幕后排着的事，不剧透；提议的改动要你点“记”才写。每说一句会调模型。</small></p><ul><li>问已经记下的事，比如某人知道那封信是谁写的吗。</li><li>指出某条总结记错了，提议改掉或作废。</li><li>定一件以后每轮都算数的事，避免前台总写反。</li><li>说想让剧情往哪走，规划会据此重排一次。</li><li>说这阵子想怎么玩、什么口味。</li></ul>
         <div data-role="talk-log" style="max-height:50vh;overflow-y:auto;text-align:left;border:1px solid var(--SmartThemeBorderColor,#555);border-radius:6px;padding:.4em .6em;margin:.4em 0"></div>
         <textarea class="text_pole" data-role="talk-input" rows="3" style="width:100%" placeholder="比如：第 230 条那里记错了，那天没去码头"></textarea>
-        <div class="flex-container" style="justify-content:flex-end;gap:4px"><div class="menu_button" data-role="talk-clear" style="width:auto;white-space:nowrap">清空对话</div><div class="menu_button" data-role="talk-send" style="width:auto;white-space:nowrap;padding:0 1.2em">说</div></div>`;
+        <div class="flex-container" style="justify-content:flex-end;gap:4px"><div class="menu_button" data-role="talk-clear" style="width:auto;white-space:nowrap" title="清空调整对话，建议保留重要结果。">清空对话</div><div class="menu_button" data-role="talk-send" style="width:auto;white-space:nowrap;padding:0 1.2em" title="向后台提问或提议，会调模型，按需用。">说</div></div>`;
     await c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', {
         okButton: '关闭', wide: true, allowVerticalScrolling: true, leftAlign: true,
         onOpen: popup => {
@@ -458,7 +458,7 @@ async function openSetup() {
     const c = ctx(), chatKey = state.chatKey;
     const s = await api('setup', { chatKey });
     if (s.draft?.status === 'working') { globalThis.toastr?.info('还在分格，好了会提醒。'); watchSetup(chatKey); return; }
-    if (s.draft?.status === 'handoff') { globalThis.toastr?.warning(`调模型分格没响应，${s.draft.error}。打开面板的外援队列，复制题目贴给任一个 AI，或在能跑命令的 AI 窗口里说"处理外援"，交回后再点开局单核对。`); watchSetup(chatKey); return; }
+    if (s.draft?.status === 'handoff') { globalThis.toastr?.warning(`调模型分格没响应，${s.draft.error}。打开“此刻 → 外援”，复制题目贴给任何一个 AI（网页版也行），把回答贴回来点“交回”，然后再核对开局单。`); watchSetup(chatKey); return; }
     if (s.draft?.status === 'failed') globalThis.toastr?.warning(`上次没分成：${s.draft.error}`);
     const draft = !!s.draft?.text, has = draft || !!s.confirmed?.text;
     const status = draft ? `后台分好的草稿还没核对${s.draft.unchecked ? `（${s.draft.unchecked} 条在原文里没找到对应的话）` : ''}。`
@@ -497,7 +497,7 @@ function openRowHtml(r = {}) {
         <select class="text_pole" data-r="类" style="flex:0 0 auto;width:auto">${OPEN_ROW_KINDS.map(([k, label]) => `<option value="${k}" ${k === kind ? 'selected' : ''}>${label}</option>`).join('')}</select>
         <input class="text_pole" data-r="是" placeholder="${escapeHtml(OPEN_ROW_HINT[kind])}" style="flex:1 1 12em" value="${escapeHtml(r.是 ?? '')}">
         <input class="text_pole" data-r="谁知道" placeholder="还有谁知道（、分隔；不写只有他自己）" style="flex:1 1 10em" value="${escapeHtml(knows)}">
-        <div class="menu_button" data-role="row-del" title="删掉这一行" style="flex:0 0 auto">✕</div></div>`;
+        <div class="menu_button" data-role="row-del" title="删此行设定，建议核对后再删。" style="flex:0 0 auto">✕</div></div>`;
 }
 // 开局单填表里挑人（用户 10/12：主要聚焦角色、全剧情必要角色都能从角色卡列表里勾，没建卡的直接填）：
 // 你自己的角色、群里的人、别的卡依次列（旁白卡不列）；列表里没有的写在下面那一格，用、隔开
@@ -553,14 +553,14 @@ async function openSetupForm(s) {
             <input class="text_pole" data-t="第几天" placeholder="开场是第几天" style="flex:0 0 7em" value="${t.第几天 ?? ''}">
             <input class="text_pole" data-t="天气" placeholder="天气：小雨 3 ｜ 阴 2 ｜ 晴 2" style="flex:1 1 100%" value="${escapeHtml((t.天气 ?? []).map(x => `${x.种} ${x.份}`).join(' ｜ '))}">
             <input class="text_pole" data-t="气温" placeholder="气温（一句话）" style="flex:1 1 100%" value="${escapeHtml(t.气温 ?? '')}">
-            <small style="flex:1 1 100%">时间尺度（选填）：这一局一格时间按什么走。一跳几个月、几年的局（远行、几代人）选月或年，"第几天"就成了第几年；不选就是按天、一天八段。</small>
+            <small style="flex:1 1 100%">时间尺度（选填）：这一局一格时间按什么走。一跳几个月、几年的局（远行、几代人）选月或年，"第几天"就成了第几年；不选就是按天、一天八段。时间尺度也决定局势每隔多久推一次。</small>
             <select class="text_pole" data-t="尺度单位" style="flex:0 0 auto;width:auto">${['', '小时', '天', '月', '年'].map(u => `<option value="${u}" ${(t.尺度?.单位 ?? '') === u ? 'selected' : ''}>${u ? `按${u}` : '按天（默认）'}</option>`).join('')}</select>
             <input class="text_pole" data-t="尺度时段" placeholder="一格里分哪几段，用、隔开（按年常写：春、夏、秋、冬；不填用默认）" style="flex:1 1 14em" value="${escapeHtml((t.尺度?.时段 ?? []).join('、'))}">
           </div></details>
         <details style="margin:.5em 0" ${rows.length ? 'open' : ''}><summary>人物开场状态（选填，多条，可自己加行）</summary>
           <small style="display:block;margin:.2em 0">开场那一刻这个人怎么样，之后跟着剧情变：在哪（开场不在场的人，镜头不写他、门上不挂他）、身体（每次都带着，好了、加重了跟着改）、心事（开场那场戏里带着，慢慢淡）、手头的事（时间到了替他推进）、约定（到日子给当事人）、欠账（还了才减）、名声（那个圈子的人照着待他）；住处、家当、车、手上的钱也在这儿填。</small>
           <div data-role="rows">${rows.map(openRowHtml).join('')}</div>
-          <div class="menu_button" data-role="row-add" style="display:inline-block;margin-top:.3em">加一行</div>
+          <div class="menu_button" data-role="row-add" style="display:inline-block;margin-top:.3em" title="增加一行设定，建议只填确认的事实。">加一行</div>
         </details>
         ${field('核心主线', '主线', 2, '这一局的核心主题（只当主题，不排日程）')}
         ${field('必要剧情', '必要剧情', 2, '一定要有的线，每行一条')}
@@ -673,12 +673,12 @@ async function openMaterials() {
             ${x.summary ? `<div><small>${escapeHtml(x.summary)}</small></div>` : ''}
             ${x.kind && x.status === 'ready' ? `<div><small>后台建议：当<b>${escapeHtml(x.kind)}</b>${x.why ? `（${escapeHtml(x.why)}）` : ''}</small></div>` : ''}
             ${x.error ? `<div><small style="color:var(--warning,orange)">没整理成：${escapeHtml(x.error)}</small></div>` : ''}
-            <div class="flex-container" style="gap:4px;margin-top:.2em">${x.status === 'drafted' ? `<div class="menu_button" style="width:auto" data-mat-open="${escapeHtml(x.name)}">打开关系表核对</div>` : ''}
-              ${['ready', 'drafted'].includes(x.status) ? ['开局单', '关系表', '参考资料'].map(k => `<div class="menu_button" style="width:auto${k === x.kind ? ';font-weight:bold' : ''}" data-mat-use="${escapeHtml(x.name)}" data-kind="${k}">当${k}</div>`).join('') : ''}
-              <div class="menu_button" style="width:auto" data-mat-remove="${escapeHtml(x.name)}">删</div></div></div>`).join('') : '<small style="opacity:.7">还没传过素材。</small>';
+            <div class="flex-container" style="gap:4px;margin-top:.2em">${x.status === 'drafted' ? `<div class="menu_button" style="width:auto" data-mat-open="${escapeHtml(x.name)}" title="核对关系表草稿，建议确认后生效。">打开关系表核对</div>` : ''}
+              ${['ready', 'drafted'].includes(x.status) ? ['开局单', '关系表', '参考资料'].map(k => `<div class="menu_button" style="width:auto${k === x.kind ? ';font-weight:bold' : ''}" data-mat-use="${escapeHtml(x.name)}" data-kind="${k}" title="指定素材用途，会调模型，建议先核对。">当${k}</div>`).join('') : ''}
+              <div class="menu_button" style="width:auto" data-mat-remove="${escapeHtml(x.name)}" title="删除本局素材，建议先留备份。">删</div></div></div>`).join('') : '<small style="opacity:.7">还没传过素材。</small>';
     };
     const poll = () => { clearTimeout(timer); if (dlg && items.some(x => x.status === 'looking' || x.status === 'working')) timer = setTimeout(async () => { try { items = (await api('material', { chatKey })).items ?? items; } catch {} draw(); poll(); }, 3000); };
-    const html = `<h3>剧情素材</h3><p><small>txt、md、json、csv 都行（可以一次选几份）。传上来后台先看一眼、说该当什么用，你点了才处理：当开局单会分到各格进草稿；当关系表会整理成格子接在原表后面给你核对（调一次记账那档的模型）；当参考资料就存着，参谋按问题翻相关的几段。</small></p>
+    const html = `<h3>剧情素材</h3><p><small>txt、md、json、csv 都行（可以一次选几份）。传上来后台先看一眼、说该当什么用，你点了才处理：当开局单会分到各格进草稿；当关系表会整理成格子接在原表后面给你核对（调用一次“每条总结”环节的模型）；当参考资料就存着，参谋按问题翻相关的几段。</small></p>
         <input type="file" data-role="mat-file" multiple accept=".txt,.md,.markdown,.json,.csv">
         <div data-role="mat-list" style="text-align:left;max-height:55vh;overflow-y:auto;margin-top:.4em"></div>`;
     await c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', {
@@ -753,16 +753,16 @@ async function openPresets() {
             <p><small>把这一局的开局单、名册、关系表、素材包选择、离开时怎么算存成一份；开新局时一键套上，套完照样能改，和原来那一局互不影响。不带记住的事和规划。预置的无卡人物会保留，剧情里长出来的新面孔保存时可选择带上。不花钱。</small></p>
             <div style="display:flex;gap:.4em;flex-wrap:wrap;margin:.4em 0">
               <input class="text_pole" data-f="name" placeholder="起个名字" style="flex:1 1 12em">
-              <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="save" type="button">把这一局存成预设</button>
-              <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="import" type="button">从文件导入</button>
+              <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="save" type="button" title="保存本局起跑设定，建议新局确认后存。">把这一局存成预设</button>
+              <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="import" type="button" title="导入局预设文件，建议核对后再套。">从文件导入</button>
               <input type="file" accept=".json,application/json" data-f="file" hidden>
             </div>
             ${list.map(p => `<div data-name="${escapeHtml(p.name)}" style="margin:.4em 0;padding:.3em .6em;border-left:3px solid var(--SmartThemeQuoteColor,#888)">
               <b>${escapeHtml(p.name)}</b> <small style="opacity:.8">${escapeHtml(new Date(p.savedAt).toLocaleString())} · ${p.setup ? '有开局单' : '没有开局单'} · 名册 ${p.people} 人 · 关系表 ${p.relations} 人 · 素材包：${escapeHtml(p.pack ?? '不用')}</small>
               <div style="display:flex;gap:.4em;flex-wrap:wrap;margin-top:.3em">
-                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="apply" type="button">套到这一局</button>
-                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="export" type="button">导出成文件</button>
-                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="remove" type="button">删</button>
+                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="apply" type="button" title="替换本局起跑设定，建议新局使用。">套到这一局</button>
+                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="export" type="button" title="导出这份预设，建议分享前查私有内容。">导出成文件</button>
+                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="remove" type="button" title="移除此项，建议确认有备份再点。">删</button>
               </div></div>`).join('') || '<p><small>还没有预设。</small></p>'}`;
     };
     const reload = () => Promise.all([api('pack', { chatKey }).then(p => { state.pack = p; }), api('absence', { chatKey }).then(a => { state.absence = a; })]).catch(() => {}).then(() => render());
@@ -864,7 +864,7 @@ async function openPlaces() {
             <p><small>全局世界书（默认都给旁白；取消勾选规则书后只在角色回合使用）。</small></p>
             ${cameraBookRows}
             <p><small>如果 ST 关闭了“优先角色提示词／优先角色后历史指令”，或预设条目勾选了“禁止覆盖”，卡里的镜头定义不能替掉预设主提示词。</small></p>
-            <div style="display:flex;gap:.4em;flex-wrap:wrap;margin:.5em 0"><button class="menu_button" data-p="camera-fill" type="button">旁白卡补主提示词</button><button class="menu_button" data-p="camera-last" type="button">看旁白这一轮发了什么</button></div>
+            <div style="display:flex;gap:.4em;flex-wrap:wrap;margin:.5em 0"><button class="menu_button" data-p="camera-fill" type="button" title="补旁白主提示词，建议先备份原卡。">旁白卡补主提示词</button><button class="menu_button" data-p="camera-last" type="button" title="查看旁白请求，建议排错时用。">看旁白这一轮发了什么</button></div>
             <h4>后台的五块</h4>
             ${BLOCKS.map(b => {
                 const inPreset = covered.has(b.id.slice(4));
@@ -877,9 +877,9 @@ async function openPlaces() {
                 </div>`;
             }).join('')}
             <div style="display:flex;gap:.4em;flex-wrap:wrap;margin:.6em 0">
-              ${m?.activeCharacter && fallback.length ? '<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="add" type="button">把几块加进当前预设</button>' : ''}
-              ${m?.activeCharacter && covered.size ? '<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="remove" type="button">从当前预设里移除这几块</button>' : ''}
-              ${state.chatKey ? '<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="preview" type="button">看这一轮每块的内容</button>' : ''}
+              ${m?.activeCharacter && fallback.length ? '<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="add" type="button" title="补场记位置，建议先检查当前预设。">把几块加进当前预设</button>' : ''}
+              ${m?.activeCharacter && covered.size ? '<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="remove" type="button" title="移除此项，建议确认有备份再点。">从当前预设里移除这几块</button>' : ''}
+              ${state.chatKey ? '<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="preview" type="button" title="查看本轮供料，建议排错时用。">看这一轮每块的内容</button>' : ''}
             </div>
             <p><small>加进预设以后要永久存进预设文件，在 ST 的预设那里点"更新当前预设"；不存的话换预设就没了。</small></p>
             ${preview ? `<div style="white-space:pre-wrap;font-size:.9em;opacity:.9;max-height:40vh;overflow:auto;border:1px solid var(--SmartThemeBorderColor,#555);padding:.4em">${escapeHtml(preview)}</div>` : ''}`;
@@ -1015,7 +1015,7 @@ async function openTuning() {
             ${groups.map(g => `<h4>${escapeHtml(g)}</h4>${v.knobs.filter(k => k.group === g).map(k => `<div style="display:flex;gap:.5em;align-items:center;flex-wrap:wrap;margin:.3em 0">
                 <span style="flex:1 1 12em">${escapeHtml(k.label)}${k.own ? ' <small style="color:var(--SmartThemeQuoteColor,#e88)">改过</small>' : ''}${k.help ? `<br><small style="opacity:.75">${escapeHtml(k.help)}</small>` : ''}</span>
                 ${input(k)}
-                ${k.own ? `<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-reset="${escapeHtml(k.path)}" type="button">默认</button>` : ''}
+                ${k.own ? `<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-reset="${escapeHtml(k.path)}" type="button" title="恢复此项默认，建议不确定时用。">默认</button>` : ''}
               </div>`).join('')}`).join('')}`;
     };
     box.addEventListener('change', async event => {
@@ -1039,6 +1039,54 @@ async function openTuning() {
 
 // 各环节的模型（D-106）：钥匙簿（存几把钥匙，只显示末四位）；每个环节用哪把钥匙、哪个型号、单价、思考档；今天调了几次、花了多少。
 // 改了立刻生效（后台每次用配置时现读）。钥匙填进来只存在后台，不进 ST 的设置，也不会再显示出来。
+export function stageGroupState(stages, ids) {
+    const rows = ids.map(id => stages.find(s => s.id === id)).filter(Boolean);
+    const same = rows.length > 0 && rows.every(s => (s.key ?? '') === (rows[0].key ?? '') && (s.model ?? '') === (rows[0].model ?? ''));
+    return { same, key: same ? rows[0].key ?? '' : '', model: same ? rows[0].model ?? '' : '', rows };
+}
+export async function saveStageGroup(ids, selection, send) {
+    let value;
+    if (typeof selection.model !== 'string' || selection.model.trim().length > 200) throw new Error('型号不对');
+    for (const id of ids) value = await send('stages', { set: { id, key: selection.key, model: selection.model.trim() } });
+    return value;
+}
+export function stageGroupsHtml(value) {
+    return (value.groups ?? []).map(group => {
+        const selected = stageGroupState(value.stages, group.ids);
+        return `<section data-model-group="${group.id}" style="margin:.6em 0;padding-bottom:.6em;border-bottom:1px solid var(--SmartThemeBorderColor)"><h4>${escapeHtml(group.name)}</h4><small style="display:block">${escapeHtml(group.help)}</small>
+          ${selected.same ? '' : `<small style="display:block">各不相同：${selected.rows.map(s=>`${escapeHtml(s.name)}：${escapeHtml(s.key ?? '原配置')}／${escapeHtml(s.model ?? '未配')}`).join('；')}</small>`}
+          <div style="display:flex;gap:.4em;flex-wrap:wrap;margin-top:.3em"><select style="flex:0 0 8em" data-group-key aria-label="${group.name}钥匙"><option value="">跟原配置</option>${value.keys.map(k=>`<option value="${escapeHtml(k.name)}"${k.name===selected.key?' selected':''}>${escapeHtml(k.name)}</option>`).join('')}</select>
+          <input class="text_pole" style="flex:1 1 14em" data-group-model aria-label="${group.name}型号" placeholder="${selected.same?'型号':'各不相同；填写后保存才覆盖本组'}" value="${escapeHtml(selected.model)}">
+          <button class="menu_button" type="button" style="width:auto;white-space:nowrap;flex:0 0 auto" data-group-save="${group.id}" title="同时保存本组钥匙型号，建议先核对。">保存这一组</button></div>
+          ${group.id==='fast'?`<label><input type="checkbox" data-advisor-enabled${value.advisorEnabled?' checked':''}> 参谋</label><small style="display:block">给原作知识不强的规划模型补原作世界观：翻这一局素材包里的原作资料。同人局用；原创世界、没装素材包的局可以关。</small>`:''}</section>`;
+    }).join('');
+}
+async function openFreshSettings() {
+    const c=ctx(),chatKey=state.chatKey,box=document.createElement('div');
+    let value=await api('fresh-config',{chatKey});
+    const draw=()=>{box.innerHTML=`<h3>去复读（全局）</h3>
+      <label><input type="checkbox" data-fresh-switch="fresh.dropEchoes"${value.dropEchoes?' checked':''}>第一档：去掉复述开头</label><small>程序去复述半句，不花钱，建议保持开启。</small>
+      <label><input type="checkbox" data-fresh-switch="fresh.enabled"${value.enabled?' checked':''}>第二档：按角色改口吻</label><small>${escapeHtml(value.guidance)}</small><small>只改已绑定角色，会调用模型，建议按需开。旧配置开着但没语料时只走第一档。</small>
+      <p>当前窗口名册里有卡的人：<select data-fresh-person>${value.cast.map(a=>`<option value="${escapeHtml(a.avatar)}">${escapeHtml(a.name)}</option>`).join('')}</select></p>
+      ${chatKey?'':'<small>先打开并接入聊天，才能选择本局角色。</small>'}
+      <textarea class="text_pole" data-fresh-text rows="8" placeholder="粘贴角色台词，只用于学习口吻，不会改角色卡。"></textarea><input data-fresh-file type="file" accept=".md,.txt">
+      <button class="menu_button" type="button" style="width:auto;white-space:nowrap" data-voice-act="save" title="绑定所选角色语料，建议挑代表台词。">保存绑定</button>
+      <p data-fresh-warning>${escapeHtml(value.warning??'')}</p><h4>本局已绑定</h4>
+      ${value.cast.filter(a=>a.bound).map(a=>`<p>${escapeHtml(a.name)}（${a.chars}字）<button class="menu_button" type="button" style="width:auto;white-space:nowrap" data-voice-act="read" data-avatar="${escapeHtml(a.avatar)}" title="查看并可替换语料，建议先核对。">看／换</button><button class="menu_button" type="button" style="width:auto;white-space:nowrap" data-voice-act="remove" data-avatar="${escapeHtml(a.avatar)}" title="解除语料绑定，建议确认不再使用。">删</button></p>`).join('')||'<small>还没有绑定；没有语料的角色不调第二档模型。</small>'}`;};
+    draw();
+    box.addEventListener('change',async event=>{try{
+        if(event.target.dataset.freshSwitch){await api('tuning',{set:event.target.dataset.freshSwitch,value:event.target.checked});value=await api('fresh-config',{chatKey});}
+        if(event.target.matches('[data-fresh-file]')){const file=event.target.files?.[0];if(file){if(!/\.(md|txt)$/i.test(file.name))throw Error('请选择md或txt文件');box.querySelector('[data-fresh-text]').value=await file.text();}}
+    }catch(e){globalThis.toastr?.error(e.message);}});
+    box.addEventListener('click',async event=>{const action=event.target.dataset.voiceAct;if(!action)return;try{
+        const avatar=event.target.dataset.avatar??box.querySelector('[data-fresh-person]').value;
+        if(action==='read'){const result=await api('fresh-config',{chatKey,action,avatar});box.querySelector('[data-fresh-person]').value=avatar;box.querySelector('[data-fresh-text]').value=result.text;return;}
+        if(action==='remove'&&!await c.callGenericPopup('删除该角色的口吻语料？第二档将不再改这个角色。',c.POPUP_TYPE.CONFIRM))return;
+        value=await api('fresh-config',{chatKey,action,avatar,text:action==='save'?box.querySelector('[data-fresh-text]').value:undefined});draw();if(value.warning)globalThis.toastr?.warning(value.warning);
+    }catch(e){globalThis.toastr?.error(e.message);}});
+    await c.callGenericPopup(box,c.POPUP_TYPE.TEXT,'',{wide:true,okButton:'关上'});
+}
+
 async function openStages() {
     const box = document.createElement('div');
     box.style.textAlign = 'left';
@@ -1051,30 +1099,30 @@ async function openStages() {
         const effortOpts = s => ['<option value="">默认档</option>', ...v.efforts.map(e => `<option${e === s.effort ? ' selected' : ''}>${e}</option>`)].join('');
         const effortNote = s => (s.effortOk === true ? '' : s.effortOk === 'output_config' ? '（按 Anthropic 的写法传）' : s.effortOk === false ? '（这条线传不过去，用默认档）' : '（没测过）');
         box.innerHTML = `<h3>各环节的模型</h3>
-            <p><small>每个环节用哪把钥匙、哪个型号、按什么单价记账。不选就跟着原来的配置走。改了下一次调用就生效。思考档要先"测一次"（真调一两次极短的，几分钱），传得过去才会发；开了会更慢、更费钱（想的部分按输出算），检索词、检查、去复读这类要快的短活一般别开。</small></p>
+            <p><small>每个环节用哪把钥匙、哪个型号、按什么单价计费。不选就跟着原来的配置走。改了下一次调用就生效。思考档要先"测一次"（真调一两次极短的，几分钱），传得过去才会发；开了会更慢、更费钱（想的部分按输出算），检索词、检查、去复读这类要快的短活一般别开。</small></p>
             <h4>钥匙簿</h4>
             ${!v.keys.length ? '<p><small>先存一把钥匙。只有一把，各环节就都用它；有一把调 Claude、一把调 Gemini 的，名字照写"Claude""Gemini"，各环节照推荐的分。</small></p>' : ''}
             ${v.alone ? `<div style="margin:.3em 0"><small>只有一把钥匙「${escapeHtml(v.alone)}」：各环节都用它，型号照推荐的。它要是调不了某些推荐型号（中转只开了一家、或者是别家的钥匙），比一比再一键换。</small>
-              <button class="menu_button" style="white-space:nowrap" data-st="fit" type="button">看看它调得了推荐的型号吗（不花钱）</button>
+              <button class="menu_button" style="white-space:nowrap" data-st="fit" type="button" title="核对线路可用型号，建议换线路后查。">看看它调得了推荐的型号吗（不花钱）</button>
               ${fitted ? (fitted.missing.length ? `<div style="margin:.3em 0"><small>这几格的型号它调不了：${fitted.missing.map(x => `${escapeHtml(x.name)}（${escapeHtml(x.model)}）`).join('、')}。</small>
                 <div style="display:flex;gap:.4em;flex-wrap:wrap;align-items:center"><select class="text_pole" data-f="fitmodel" style="flex:1 1 14em">${fitted.models.map(m => `<option>${escapeHtml(m)}</option>`).join('')}</select>
-                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="use-model" type="button">调不了的这几格都换成它</button></div></div>` : '<div><small>推荐的型号它都调得了。</small></div>') : ''}</div>` : ''}
-            ${v.keys.map(k => `<div style="display:flex;gap:.5em;align-items:center;margin:.25em 0"><b style="flex:0 0 8em">${escapeHtml(k.name)}</b><small style="flex:1;overflow-wrap:anywhere">${escapeHtml(k.baseUrl)} · ${escapeHtml(k.tail)}</small><button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="remove-key" data-name="${escapeHtml(k.name)}" type="button">删</button></div>`).join('') || '<p><small>还没有。原来配置里的钥匙照样在用（"跟着原配置"）。</small></p>'}
+                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="use-model" type="button" title="统一选用此型号，建议确认适合各环节。">调不了的这几格都换成它</button></div></div>` : '<div><small>推荐的型号它都调得了。</small></div>') : ''}</div>` : ''}
+            ${v.keys.map(k => `<div style="display:flex;gap:.5em;align-items:center;margin:.25em 0"><b style="flex:0 0 8em">${escapeHtml(k.name)}</b><small style="flex:1;overflow-wrap:anywhere">${escapeHtml(k.baseUrl)} · ${escapeHtml(k.tail)}</small><button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="remove-key" data-name="${escapeHtml(k.name)}" type="button" title="删除钥匙，建议确认没有环节需要。">删</button></div>`).join('') || '<p><small>还没有。原来配置里的钥匙照样在用（"跟着原配置"）。</small></p>'}
             ${v.wanted?.length ? `<p style="color:var(--warning,orange)"><small>还缺这几把钥匙：${v.wanted.map(n => `「${escapeHtml(n)}」`).join('、')}。照这个名字存进钥匙簿，用到它的环节就通了。</small></p>` : ''}
             <div style="display:flex;gap:.4em;flex-wrap:wrap;margin:.4em 0">
               <input class="text_pole" data-f="kname" placeholder="名字" style="flex:0 0 7em">
               <input class="text_pole" data-f="kurl" placeholder="地址 https://…/v1" style="flex:1 1 14em">
               <input class="text_pole" data-f="kkey" type="password" autocomplete="off" placeholder="钥匙（改地址时可空，沿用原来那把）" style="flex:1 1 14em">
-              <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="save-key" type="button">存</button>
+              <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="save-key" type="button" title="保存这把钥匙，建议核对地址后存。">存</button>
             </div>
-            <h4>各环节</h4>
+            ${stageGroupsHtml(v)}<details><summary>逐项调（进阶）</summary><h4>各环节</h4>
             ${v.stages.map(s => `<div data-stage="${s.id}" style="margin:.5em 0;padding:.4em .6em;border-left:3px solid var(--SmartThemeQuoteColor,#888)">
-              <div><b>${escapeHtml(s.name)}</b> <small style="opacity:.8">今天 ${s.today.calls} 次，约 ${money(s.today.usd)}${s.chosen ? '' : ` · 没另选（跟着${escapeHtml(s.follows)}）`} · 此刻：${s.off ? '关着' : s.waits ? `${escapeHtml(s.model ?? '（没配）')}，等钥匙「${escapeHtml(s.waits)}」` : `${escapeHtml(s.model ?? '（没配）')}，${escapeHtml(s.auto ? `自动用了"${s.auto}"` : s.key ?? '原配置')} ${escapeHtml(s.tail)}`}</small></div>
+              <div><b>${escapeHtml(s.name)}</b><small data-stage-help="${s.id}">${escapeHtml(stageHelp(s.id))}</small>${s.id==='situation'?'<small>各方在镜头外的动向、消息怎么传开。按开局单的时间尺度：一跳几十年的局，把时间尺度设成“年”。一次跳很久最多补推三次。</small>':''} <small style="opacity:.8">今天 ${s.today.calls} 次，约 ${money(s.today.usd)}${s.chosen ? '' : ` · 没另选（跟着${escapeHtml(s.follows)}）`} · 此刻：${s.off ? '关着' : s.waits ? `${escapeHtml(s.model ?? '（没配）')}，等钥匙「${escapeHtml(s.waits)}」` : `${escapeHtml(s.model ?? '（没配）')}，${escapeHtml(s.auto ? `自动用了"${s.auto}"` : s.key ?? '原配置')} ${escapeHtml(s.tail)}`}</small></div>
               <div style="display:flex;gap:.4em;flex-wrap:wrap;align-items:center;margin-top:.3em">
                 <select class="text_pole" data-f="key" style="flex:0 0 9em">${keyOpts(s.key)}</select>
                 <input class="text_pole" data-f="model" list="rpe-models-${s.id}" value="${escapeHtml(s.model ?? '')}" style="flex:1 1 12em">
                 <datalist id="rpe-models-${s.id}">${(lists[s.id] ?? []).map(m => `<option value="${escapeHtml(m)}">`).join('')}</datalist>
-                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="models" type="button" title="从这把钥匙的地址拉能用的型号">拉型号</button>
+                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="models" type="button" title="读取可用型号，建议先检查连接。">拉型号</button>
                 <label><small>入</small> <input class="text_pole" data-f="in" value="${s.priceInPerM}" style="width:4.5em;display:inline-block"></label>
                 <label><small>出</small> <input class="text_pole" data-f="out" value="${s.priceOutPerM}" style="width:4.5em;display:inline-block"></label>
                 <small>美元／百万</small>
@@ -1082,14 +1130,17 @@ async function openStages() {
               <div style="display:flex;gap:.4em;flex-wrap:wrap;align-items:center;margin-top:.3em">
                 <select class="text_pole" data-f="effort" style="flex:0 0 7em"${s.effortOk === true || s.effortOk === 'output_config' ? '' : ' disabled'}>${effortOpts(s)}</select>
                 <small style="opacity:.8">${effortNote(s)}</small>
-                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="probe" type="button">测一次思考档</button>
-                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="save" type="button">改</button>
-                ${s.chosen ? '<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="reset" type="button">恢复成跟着原配置</button>' : ''}
-                ${s.id === 'embed' ? `<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="${s.off ? 'embed-on' : 'embed-off'}" type="button">${s.off ? '打开向量' : '关掉向量（照旧配检索词）'}</button>` : ''}
+                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="probe" type="button" title="实调一次测思考档，会收费，按需测。">测一次思考档</button>
+                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="save" type="button" title="保存本格选择，建议先核对型号。">改</button>
+                ${s.chosen ? '<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="reset" type="button" title="恢复默认跟随，建议不单独配时用。">恢复成跟着原配置</button>' : ''}
+                ${s.id === 'embed' ? `<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="${s.off ? 'embed-on' : 'embed-off'}" type="button" title="切换向量检索，建议有嵌入模型再开。">${s.off ? '打开向量' : '关掉向量（照旧配检索词）'}</button>` : ''}
               </div>
-            </div>`).join('')}`;
+            </div>`).join('')}</details>`;
     };
+    box.addEventListener('change', async event => { if(event.target.matches('[data-advisor-enabled]')) { try { await api('tuning',{set:'advisor.enabled',value:event.target.checked});v=await api('stages',{});draw(); } catch(e){globalThis.toastr?.error(e.message);} } });
     box.addEventListener('click', async event => {
+        const groupId=event.target.dataset.groupSave;
+        if(groupId){const group=v.groups.find(g=>g.id===groupId),row=event.target.closest('[data-model-group]');try{v=await saveStageGroup(group.ids,{key:row.querySelector('[data-group-key]').value,model:row.querySelector('[data-group-model]').value},api);draw();}catch(e){v=await api('stages',{});draw();globalThis.toastr?.error('本组未全部保存：'+e.message);}return;}
         const act = event.target?.dataset?.st;
         if (!act) return;
         const row = event.target.closest('[data-stage]');
@@ -1157,7 +1208,7 @@ function watchSetup(chatKey, tries = 0) {
         try {
             const s = await api('setup', { chatKey });
             if (s.draft?.status === 'working' || s.draft?.status === 'handoff') {
-                if (s.draft.status === 'handoff' && !state.setupHandoffTold) { state.setupHandoffTold = true; globalThis.toastr?.warning(`调模型分格没响应，${s.draft.error}。打开面板的外援队列，复制题目贴给任一个 AI，或在能跑命令的 AI 窗口里说"处理外援"。`); }
+                if (s.draft.status === 'handoff' && !state.setupHandoffTold) { state.setupHandoffTold = true; globalThis.toastr?.warning(`调模型分格没响应，${s.draft.error}。打开“此刻 → 外援”，复制题目给任何一个 AI，把回答贴回来点“交回”。`); }
                 if (tries < 720) watchSetup(chatKey, tries + 1);
                 return;
             }
@@ -1375,7 +1426,7 @@ async function offerJoin(epoch) {
     asked.add(key);
     const label = currentGroup(c)?.name ?? c.characters?.[c.characterId]?.name ?? '这个窗口';
     const answer = await c.callGenericPopup(
-        `<h3>「${escapeHtml(label)}」这个新窗口接入 RP：幕后吗？</h3><p>接入后，后台记住这个窗口里发生的事，每个角色发言前拿到他该知道的那一格；离开、有人来找、规划这些也跟着这一局走。</p><p>只是开个窗玩一小段的，可以不接。以后想接，在扩展面板里点"接入这个窗口"。</p>`,
+        `<h3>「${escapeHtml(label)}」这个新窗口接入 RP：幕后吗？</h3><p>接入后，后台记住这个窗口里发生的事，每个角色发言前拿到他该知道的那一格；离开、有人来找、规划这些也跟着这一局走。</p><p>只是开个窗玩一小段的，可以不接。以后想接，到扩展面板“设置”里勾选“本窗口接入”。</p>`,
         c.POPUP_TYPE.TEXT, '', { okButton: '接入', cancelButton: '这次不用', customButtons: [{ text: '这个窗口别再问', result: c.POPUP_RESULT.CUSTOM1 }] });
     if (epoch !== state.epoch) return;
     if (answer === c.POPUP_RESULT.AFFIRMATIVE) return join(epoch);
@@ -1502,11 +1553,11 @@ async function loadExtensionRelease() {
 export function contentControlsHtml(content) {
     return !content ? '' : `<b>口味</b>
             ${content.tiers.length > 1 ? `<label>档位：<select data-content="tier"><option value=""${content.ownTier ? '' : ' selected'}>跟全局默认（当前 ${escapeHtml(content.tier)}）</option>${content.tiers.map(t => `<option${content.ownTier === t ? ' selected' : ''}>${escapeHtml(t)}</option>`).join('')}</select></label>` : ''}
-            <div class="rpe-pace" role="group" aria-label="节奏">${['快', '中', '慢'].map(p => `<button type="button" class="menu_button" data-pace="${p}" aria-pressed="${content.pace === p}">${p}</button>`).join('')}</div>
+            <div class="rpe-pace" role="group" aria-label="节奏">${['快', '中', '慢'].map(p => `<button type="button" class="menu_button" title="调整事件疏密，建议先用中档。" data-pace="${p}" aria-pressed="${content.pace === p}">${p}</button>`).join('')}</div>
             ${content.tier === 'SFW' ? '<p>SFW 档不用亲密线</p>' : ''}
             ${content.pureIntimateInactive ? '<small>纯NSFW 要开局单里有亲密线才起作用，现在和剧情向一样。</small>' : ''}
             ${content.pureNoPack && !content.pureIntimateInactive ? '<small>纯NSFW 的口味文字在单独的口味包里：在“高级 → 口味 → 看／改口味包”里导入，再选它。没导入时和剧情向一样。</small>' : ''}
-            ${content.intimate.map(r => `<label class="checkbox_label"><input type="checkbox" data-content-adult="${r.index}"${r.adult ? ' checked' : ''}${content.tier === 'SFW' ? ' disabled' : ''}> 这一条里的人都已成年：${escapeHtml(r.people.join('、'))}</label>${r.error && content.tier !== 'SFW' ? `<small>${escapeHtml(r.error)}</small>` : ''}${r.progress ? `<p>现在：${escapeHtml(r.progress.current)}${r.progress.day != null ? `（第${r.progress.day + 1}天更新）` : '（开局原文）'} <label>改回：<select data-intimate-progress="${r.index}">${r.progress.choices.map(v => `<option value="${escapeHtml(v)}"${v === r.progress.current ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select></label></p>` : ''}`).join('')}`;
+            ${content.intimate.map(r => `<label class="checkbox_label"><input type="checkbox" data-content-adult="${r.index}"${r.adult ? ' checked' : ''}${content.tier === 'SFW' ? ' disabled' : ''}> 这一条里的人都已成年：${escapeHtml(r.people.join('、'))}<small>确认本线均成年，建议逐人核对。</small></label>${r.error && content.tier !== 'SFW' ? `<small>${escapeHtml(r.error)}</small>` : ''}${r.progress ? `<p>现在：${escapeHtml(r.progress.current)}${r.progress.day != null ? `（第${r.progress.day + 1}天更新）` : '（开局原文）'} <label>改回：<select data-intimate-progress="${r.index}">${r.progress.choices.map(v => `<option value="${escapeHtml(v)}"${v === r.progress.current ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select></label></p>` : ''}`).join('')}`;
 }
 
 
@@ -1539,9 +1590,9 @@ async function openPromptPack() {
         const value = state.content;
         box.innerHTML = `<h3>口味包</h3><p>${escapeHtml(value.packs.find(p => p.id === value.pack)?.manifest.名字 ?? '系统默认')} · ${escapeHtml(value.tier)}</p>
             <p><small>默认文字随系统保留；要改先另存一份。固定格式和边界不能改。纯NSFW 的默认文字暂同剧情向，可另存自己的口味。</small></p>
-            <button class="menu_button" type="button" data-prompt-action="export">导出包</button><button class="menu_button" type="button" data-prompt-action="import">导入包</button>
+            <button class="menu_button" type="button" data-prompt-action="export" title="导出口味包，建议修改前先备份。">导出包</button><button class="menu_button" type="button" data-prompt-action="import" title="导入口味包，建议核对来源再用。">导入包</button>
             <input type="file" accept=".json,application/json" data-role="prompt-file" hidden>
-            ${value.slots.map(s => `<div style="padding:.4em;border-bottom:1px solid var(--SmartThemeQuoteColor,#888)"><button class="menu_button" type="button" data-prompt-slot="${escapeHtml(s.id)}">${s.editable && s.active ? '看／改' : '查看'}</button> <code>${escapeHtml(s.id)}</code> · ${escapeHtml(s.stage)} <small>${s.editable ? '可改' : '固定，不可改'}${s.active ? '' : '；当前档位不用'}</small></div>`).join('')}`;
+            ${value.slots.map(s => `<div style="padding:.4em;border-bottom:1px solid var(--SmartThemeQuoteColor,#888)"><button class="menu_button" type="button" data-prompt-slot="${escapeHtml(s.id)}" title="查看或编辑口味片段，建议先备份。">${s.editable && s.active ? '看／改' : '查看'}</button> <code>${escapeHtml(s.id)}</code> · ${escapeHtml(s.stage)} <small>${s.editable ? '可改' : '固定，不可改'}${s.active ? '' : '；当前档位不用'}</small></div>`).join('')}`;
     };
     draw();
     box.addEventListener('click', async event => {
@@ -1567,7 +1618,7 @@ async function openPromptPack() {
             const pack = state.content.packs.find(p => p.id === state.content.pack);
             let text = slot.text, restore = false;
             const ok = await c.callGenericPopup(`<h3>${escapeHtml(slot.stage)}</h3><p><code>${escapeHtml(id)}</code></p>${slot.contracts.length ? `<p><small>这段里有固定格式，保存时会核对：${slot.contracts.map(escapeHtml).join('；')}</small></p>` : ''}
-                <textarea class="text_pole" data-role="prompt-text" rows="16" style="width:100%">${escapeHtml(text)}</textarea><button type="button" class="menu_button" data-role="prompt-reset">恢复默认</button>`, c.POPUP_TYPE.CONFIRM, '', {
+                <textarea class="text_pole" data-role="prompt-text" rows="16" style="width:100%">${escapeHtml(text)}</textarea><button type="button" class="menu_button" data-role="prompt-reset" title="还原默认口味，建议放弃自改时用。">恢复默认</button>`, c.POPUP_TYPE.CONFIRM, '', {
                 okButton: '保存', cancelButton: '取消', wide: true,
                 onOpen: popup => {
                     const input = popup.dlg.querySelector('[data-role="prompt-text"]');
@@ -1604,7 +1655,7 @@ export function savePanelTab(value, write) {
 export function pendingTasks({ status = null, release = null, planStatus = null } = {}) {
     const rows = [], ex = status?.extract;
     if (status?.leaveUnjudged > 0) rows.push({ kind: 'leave', text: `有 ${status.leaveUnjudged} 人离场待判`, action: 'board-edit', label: '看场面 ›', note: '下一次同步时后台会再看一眼' });
-    if (ex?.failing > 0 || ex?.skipped?.length) rows.push({ kind: 'extract', text: ex.failing > 0 ? '记账没成功' : `有 ${ex.skipped.length} 条记账被跳过`, action: ex.failing > 0 ? 'extract-retry' : 'extract-retry-skipped', label: '重记 ›' });
+    if (ex?.failing > 0 || ex?.skipped?.length) rows.push({ kind: 'extract', text: ex.failing > 0 ? '每条总结没成功' : `有 ${ex.skipped.length} 条总结被跳过`, action: ex.failing > 0 ? 'extract-retry' : 'extract-retry-skipped', label: '重记 ›' });
     const planning = status?.planning ?? planStatus?.planning;
     if (planning?.failure || planStatus?.last?.status === 'failed') rows.push({ kind: 'plan', text: planning?.message || '规划没成功', action: 'plan-reroll', label: '重新规划 ›' });
     if (status?.handoffs > 0) rows.push({ kind: 'handoff', text: `有 ${status.handoffs} 份外援待处理`, action: 'handoffs-open', label: '处理外援 ›' });
@@ -1612,7 +1663,7 @@ export function pendingTasks({ status = null, release = null, planStatus = null 
     return rows;
 }
 export function pendingTasksHtml(rows) {
-    return rows.map(r => `<div class="rpe-task"><span>${escapeHtml(r.text)}${r.note ? `<small>${escapeHtml(r.note)}</small>` : ''}</span><button type="button" class="menu_button" data-action="${escapeHtml(r.action)}">${escapeHtml(r.label)}</button></div>`).join('');
+    return rows.map(r => `<div class="rpe-task"><span>${escapeHtml(r.text)}${r.note ? `<small>${escapeHtml(r.note)}</small>` : ''}</span><button type="button" class="menu_button" data-action="${escapeHtml(r.action)}" title="打开这项待办，建议看清原因再处理。">${escapeHtml(r.label)}</button></div>`).join('');
 }
 export function sceneCardHtml(board, roster = [], date = null) {
     if (!board) return '<p>场面还没算好</p>';
@@ -1641,23 +1692,38 @@ export function rosterGroups(cast) {
     return { cards: cast.filter(e => e.role !== '不用' && !String(e.avatar).startsWith('face:')),
         faces: cast.filter(e => e.role !== '不用' && String(e.avatar).startsWith('face:')), other: cast.filter(e => e.role === '不用') };
 }
+export function handoffLabel(h) {
+    return h.kind === 'extract' ? '每条总结（从一小段对话里记下事实）' : h.title;
+}
+export function panelHelp(key) {
+    return ({"fresh-settings":"分两档去重复，建议先用免费第一档。","drift-clear":"清除变化预览，建议核对后再用。","extract-retry":"重试失败总结，建议先检查错误。","extract-retry-skipped":"补回跳过消息，建议核对后用。","handoff-cancel":"收起未交回答，建议暂不交时用。","handoff-copy":"复制完整题目，建议交给其他AI。","handoff-paste":"粘贴AI回答，建议核对后交回。","handoff-retry":"重调原模型，建议先检查连接。","handoff-submit":"提交并核对回答，建议保留完整内容。","pending-tab":"打开待办详情，建议按需查看。",'board-edit':'改正谁在哪，识别有误时用。','camera-now':'让旁白接一段，建议需要时用。','plan-reroll':'重排未用候选，建议失败或跑偏时用。','plan-reveal':'查看已排事件，介意剧透别打开。',setup:'填写本局设定，建议开局先核对。',cast:'管理本局人物，建议开局核对。',relations:'管理初始关系，建议开局核对。',presets:'保存或套用局设定，建议新局用。','opening-pack':'整套导入并建新群，建议先预览。',lore:'修改世界书知情，建议判错时用。',records:'看每条总结的来源，建议疑错时查。',ledger:'查看钱与家当，建议涉及交易时查。',pending:'查看约定的进展，建议按需查。',episodes:'按场回看经过，建议回顾时用。',talk:'问事或提改动，点记才写入。',stages:'选择钥匙和型号，建议先配好。',advanced:'打开更多选项，建议需要时再改。','advanced-back':'回到常用设置，建议平时用。','prompt-pack':'调整口味文字，建议先导出备份。','prompt-preview':'查看规划题目，建议先核对。',camera:'配置旁白载体，建议群聊需要时用。','plan-request':'请求下一份规划，建议确有需要再用。',places:'调整场记位置，建议先用默认。',tuning:'调整开关和参数，建议先用默认。',extract:'控制每条总结，建议保持开启。',backfill:'补总结接入前消息，建议先看估算。',sync:'同步当前采用稿，建议状态落后时用。',update:'检查代码版本，建议提示更新时用。',preview:'查看角色拿到的场记，建议排错时用。',timings:'查看本轮耗时，建议卡顿时用。','plan-attempts':'查看规划尝试，建议失败时查。',rejected:'查看被拦的内容，建议排错时查。',confirm:'确认大量删稿，建议核对后再点。',absencePaused:'暂停离开计时，建议离线不推进时开。',windowConnected:'让本窗口使用系统，建议按局开。',dailyBudget:'设置后台预算，建议先设上限。',pack:'选择本局素材，建议没有就留空。',awayMode:'选择离开怎么算，建议按玩法选。',speakFirst:'回来让角色先说，建议按需开。',cameraJoin:'让旁白接没卡人物，建议群聊开。',historyRounds:'限制送出的历史，建议先用默认。',digestOld:'把旧回复换成大意，建议按需开。',digestKeep:'保留近期原文，建议先用默认。',loreFilter:'按人物筛世界书，建议需要隔离时开。',newChats:'设置新窗口接入方式，建议先问。',testSlot:'检查注入接线，建议平时关闭。',enabled:'控制系统供料，建议按需启用。'})[key] ?? '';
+}
+export function stageHelp(id) {
+    return ({extract:'逐条总结事实与知情，推荐可靠模型。',keys:'为旧事配检索词，推荐快速模型。',assemble:'把旧事串成回忆，建议按需开启。',judge:'判断转向与节点，推荐快速可靠模型。',plan:'安排下个节点，推荐较强创作模型。',away:'推离开后的动向，推荐较强模型。',advisor:'查资料作参谋，推荐阅读可靠模型。',setup:'拆分开局大纲，推荐长文可靠模型。',talk:'问事或提改动，推荐可靠模型。',setupKeys:'给前史配词，推荐快速模型。',fresh:'换掉重复写法，推荐快速模型。',profile:'读角色资料，推荐阅读可靠模型。',scene:'看场面起头，推荐快速模型。',prep:'整理规划备料，推荐阅读可靠模型。',lore:'判断世界书知情，推荐可靠模型。',situation:'推各方动向，有资料再启用。',embed:'按含义找旧事，需要嵌入模型。'})[id] ?? '';
+}
+export function onboardingHtml({ hasChat = false, joined = false } = {}) {
+    if (joined) return '';
+    const steps = ['先到“设置 → 钥匙和模型”填好钥匙。','在酒馆新建群聊并加入角色，单聊也可以。','打开聊天，若弹出接入确认就点“接入”；没弹时到“设置”勾选“本窗口接入”。','三选一：有局预设就套上；没有就填开局单或贴大纲、核对后确认生效；有整套开局包就点“导入开局包”，它会自动建群、接入和套设定，可跳过前面的第2～4步。','发第一句话开玩。第一次有人开口时开始规划，需几分钟、约一两美元；规划好之前角色照常说话。'];
+    const start = hasChat ? 3 : 1;
+    return `<section class="rpe-card" data-guide-start="${start}"><h4>开一局的顺序</h4><ol start="${start}">${steps.slice(start-1).map(s=>`<li>${s}</li>`).join('')}</ol></section>`;
+}
 export function panelPageHtml(page) {
-    const button = (action, text) => `<button class="menu_button" data-action="${action}" type="button">${text}</button>`;
+    const button = (action, text) => `<button class="menu_button" data-action="${action}" type="button" title="${panelHelp(action)}">${text}</button>`;
     const card = (title, html) => `<section class="rpe-card"><h4>${title}</h4>${html}</section>`;
-    if (page === 'now') return `<div data-joined>${card('此刻的场面', '<div data-role="board-row"></div><div class="rpe-grid">' + button('board-edit', '纠正场面') + button('camera-now', '旁白来一段') + '</div>')}
+    if (page === 'now') return `<div data-role="start-guide"></div><div data-joined>${card('此刻的场面', '<div data-role="board-row"></div><div class="rpe-grid">' + button('board-edit', '纠正场面') + button('camera-now', '旁白来一段') + '</div>')}
         <section class="rpe-card" data-role="tasks-card" hidden><h4>待处理</h4><div data-role="tasks"></div></section>
         ${card('幕后', '<p data-role="plan"></p><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + button('plan-reveal', '看幕后（剧透）') + '</div>')}
-        <details class="rpe-card" data-role="handoff-details"><summary>外援与记账详情</summary><div data-role="handoffs" hidden></div><div data-role="extract-alert"></div></details></div>`;
-    if (page === 'story') return `<div data-joined>${card('这一局', '<div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
-        <div class="rpe-grid">${button('setup', '开局单')}${button('cast', '名册')}${button('relations', '关系表')}${button('presets', '局预设')}${button('opening-pack', '导入开局包')}${button('lore', '世界书谁知道')}</div></div>`;
-    if (page === 'ledger') return `<div data-joined class="rpe-stack">${button('records', '看看记住了什么')}${button('ledger', '账本')}${button('pending', '事账')}${button('episodes', '一场一场的经过')}${button('talk', '跟后台说话 <small>几美分一句</small>')}</div>`;
-    if (page === 'settings') return `${card('设置', '<label class="checkbox_label"><input type="checkbox" data-opt="windowConnected"> 本窗口接入</label><label>每天最多花（美元）<input class="text_pole" type="number" min="0" max="500" step="0.1" data-opt="dailyBudget" aria-label="每天最多花（美元）"></label>' + button('stages', '钥匙和模型') + '<small data-role="edition"></small><a data-role="release" data-action="update" hidden href="#">检查更新</a>')}${button('advanced', '高级（创作者用）›')}`;
+        <details class="rpe-card" data-role="handoff-details"><summary>外援</summary><small>把未完成任务交给其他AI，建议按题目交回。</small><div data-role="handoffs" hidden></div><div data-role="extract-alert"></div></details></div>`;
+    if (page === 'story') return `<div data-joined>${card('这一局', '<p><small>有局预设：套上就行。没有：填开局单，或贴大纲让后台拆，核对确认后可保存、导出为局预设。开局包是作者用 skill 生成的整套卡、书和设定，点“导入开局包”会新建群。</small></p><div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
+        <div class="rpe-grid">${button('setup', '开局单')}${button('cast', '名册')}${button('relations', '关系表')}${button('presets', '局预设')}${button('opening-pack', '导入开局包')}</div></div>`;
+    if (page === 'ledger') return `<div data-joined class="rpe-stack">${button('records', '总结详情')}${button('ledger', '账本')}${button('pending', '约定历史')}${button('episodes', '剧情总览')}${button('talk', '任意调整 <small>几美分一句</small>')}</div>`;
+    if (page === 'settings') return `${card('设置', '<label class="checkbox_label"><input type="checkbox" data-opt="windowConnected"> 本窗口接入</label><label>每天最多花（美元）<input class="text_pole" type="number" min="0" max="500" step="0.1" data-opt="dailyBudget" aria-label="每天最多花（美元）"></label>' + button('stages', '钥匙和模型') + '<small data-role="edition"></small><a data-role="release" data-action="update" hidden href="#">检查更新</a>')}${card('去复读', '<small>先用免费第一档；第二档只改绑定角色。</small>' + button('fresh-settings', '去复读两档与口吻语料'))}${button('advanced', '高级（创作者用）›')}`;
     if (page !== 'advanced') return '';
     return `${button('advanced-back', '‹ 返回设置')}
         ${card('口味', '<div data-role="prompt-pack-controls"></div>' + button('prompt-pack', '看／改口味包 · 导入／导出') + button('prompt-preview', '预览规划题目（不花钱）'))}
-        ${card('这一局的细节', '<label data-role="pack-row">素材包：<select data-opt="pack"></select></label><label data-role="away-row">离开时这一局：<select data-opt="awayMode"><option value="">跟着默认</option><option value="real">照现实过</option><option value="pause">世界等你</option></select></label><label class="checkbox_label"><input type="checkbox" data-opt="speakFirst"> 离开回来时由角色先开口</label><label class="checkbox_label"><input type="checkbox" data-opt="cameraJoin"> 有卡的人在场时旁白也接没卡的人的戏</label>' + button('camera', '一个人时的旁白') + button('plan-request', '要下一个节点的规划（约一两美元）'))}
+        ${card('这一局的细节', '<label data-role="pack-row">素材包：<select data-opt="pack"></select></label><label data-role="away-row">离开时这一局：<select data-opt="awayMode"><option value="">跟着默认</option><option value="real">照现实过</option><option value="pause">世界等你</option></select></label><label class="checkbox_label"><input type="checkbox" data-opt="speakFirst"> 离开回来时由角色先开口</label><label class="checkbox_label"><input type="checkbox" data-opt="cameraJoin"> 有卡的人在场时旁白也接没卡的人的戏</label>' + button('camera', '一个人时的旁白') + button('plan-request', '要下一个节点的规划（约一两美元）') + button('lore', '世界书谁知道') + '<small>后台自动判每条世界书谁该知道（要打开“世界书按开口的人筛”）；判错了在这里改。一般不用动。</small>')}
         ${card('送给前台的', '<label>每轮只送最近：<select data-opt="historyRounds"><option value="0">不限（ST 默认）</option><option value="10">10 轮</option><option value="15">15 轮</option><option value="20">20 轮</option><option value="30">30 轮</option></select> 聊天</label><label class="checkbox_label"><input type="checkbox" data-opt="digestOld"> 较早的回复换成大意，最近 <select data-opt="digestKeep"><option>4</option><option>6</option><option>8</option><option>12</option><option>20</option></select> 条照原文</label><label class="checkbox_label"><input type="checkbox" data-opt="loreFilter"> 世界书按开口的人筛</label>' + button('places', '提示词位置'))}
-        ${card('后台', '<p data-role="ledger"></p><div class="rpe-grid">' + button('stages', '各环节的模型') + button('tuning', '调参') + button('extract', '暂停记账') + button('backfill', '补记接入以前的消息') + button('sync', '立即同步') + button('update', '检查更新') + '</div><label>新开的窗口：<select data-opt="newChats"><option value="ask">问我</option><option value="auto">直接接入</option><option value="off">不接入</option></select></label>')}
+        ${card('后台', '<p data-role="ledger"></p><div class="rpe-grid">' + button('stages', '各环节的模型') + button('tuning', '调参') + button('extract', '暂停每条总结') + button('backfill', '补记接入以前的消息') + button('sync', '立即同步') + button('update', '检查更新') + '</div><label>新开的窗口：<select data-opt="newChats"><option value="ask">问我</option><option value="auto">直接接入</option><option value="off">不接入</option></select></label>')}
         <details class="rpe-card"><summary>排查用（平时不用开）</summary><p data-role="status"></p><span data-role="leave-retries"></span><small data-role="waiting"></small><p data-role="warn" hidden></p>${button('confirm', '确认，是我删的')}
         <div data-role="preview-row"><select class="text_pole" data-role="preview-who"></select>${button('preview', '预览所选角色此刻的场记')}</div><div class="rpe-grid">${button('timings', '这一轮各步耗时')}${button('plan-attempts', '最近 20 次规划尝试')}${button('rejected', '被拦下的')}</div><label class="checkbox_label"><input type="checkbox" data-opt="testSlot"> 接线测试（仅测试用）</label><label class="checkbox_label"><input type="checkbox" data-opt="enabled"> 总开关</label></details>`;
 }
@@ -1675,8 +1741,8 @@ export function panelShellHtml() {
     #rp_emergence_panel .rpe-pace{display:flex;gap:.3em;margin:.5em 0}#rp_emergence_panel [aria-pressed=true],#rp_emergence_panel [aria-selected=true]{border-color:var(--SmartThemeQuoteColor);box-shadow:inset 0 -2px var(--SmartThemeQuoteColor)}
     #rp_emergence_panel summary{cursor:pointer;min-height:40px}#rp_emergence_panel input[type=number]{width:100%}
     @media(max-width:420px){#rp_emergence_panel .rpe-grid{grid-template-columns:1fr}#rp_emergence_panel .rpe-task{flex-wrap:wrap}}
-    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><div class="rpe-topbar"><span class="rpe-dot" data-role="connection-dot" aria-label="未接入"></span><b>RP：幕后</b><small data-role="spend"></small><button class="menu_button" type="button" data-action="pending-tab" data-role="pending-badge" hidden></button></div><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
-    <div class="inline-drawer-content"><div data-role="installation-hint" role="status" hidden></div><nav class="rpe-tabs" role="tablist" aria-label="RP：幕后">${[['now','此刻'],['story','这一局'],['ledger','账'],['settings','设置']].map(([id,text])=>`<button type="button" class="menu_button" role="tab" data-tab="${id}" aria-controls="rpe-page-${id}">${text}</button>`).join('')}</nav>${['now','story','ledger','settings','advanced'].map(id=>`<div id="rpe-page-${id}" data-page="${id}" role="tabpanel">${panelPageHtml(id)}</div>`).join('')}<small data-role="note"></small></div></div>`;
+    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><div class="rpe-topbar"><span class="rpe-dot" data-role="connection-dot" aria-label="未接入"></span><b>RP：幕后</b><small data-role="spend"></small><button class="menu_button" type="button" data-action="pending-tab" data-role="pending-badge" hidden title="打开待办详情，建议按需查看。"></button></div><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    <div class="inline-drawer-content"><div data-role="installation-hint" role="status" hidden></div><nav class="rpe-tabs" role="tablist" aria-label="RP：幕后">${[['now','此刻'],['story','这一局'],['ledger','剧情现状'],['settings','设置']].map(([id,text])=>`<button type="button" class="menu_button" role="tab" data-tab="${id}" aria-controls="rpe-page-${id}" title="切换面板栏目，建议按需要查看。">${text}</button>`).join('')}</nav>${['now','story','ledger','settings','advanced'].map(id=>`<div id="rpe-page-${id}" data-page="${id}" role="tabpanel">${panelPageHtml(id)}</div>`).join('')}<small data-role="note"></small></div></div>`;
 }
 
 function mountPanel() {
@@ -1753,6 +1819,12 @@ function mountPanel() {
         $('[data-role="leave-retries"]').innerHTML=s.enabled&&state.chatKey?leaveRetry.html:'';
         $('[data-role="note"]').textContent = state.note;
         const joinedNow = !!state.chatKey && s.enabled;
+        const openChat = chatIds(ctx()).stChatId;
+        $('[data-role="start-guide"]').innerHTML = onboardingHtml({hasChat:openChat != null && openChat !== '',joined:!!state.chatKey});
+        for(const input of panel.querySelectorAll('[data-opt]')){
+            const help=panelHelp(input.dataset.opt),label=input.closest('label');
+            if(help&&label&&!label.querySelector('[data-help-opt="'+input.dataset.opt+'"]')){const small=document.createElement('small');small.dataset.helpOpt=input.dataset.opt;small.textContent=help;label.append(small);}
+        }
         const content = state.content?.chatKey === state.chatKey ? state.content : null;
         $('[data-role="content-controls"]').innerHTML = contentControlsHtml(joinedNow ? content : null);
         $('[data-role="prompt-pack-controls"]').innerHTML = !joinedNow || !content ? '' : `<label>这一局的包：<select data-content="pack"><option value=""${content.ownPack ? '' : ' selected'}>跟全局默认</option>${content.packs.map(p => `<option value="${escapeHtml(p.id)}"${content.ownPack === p.id ? ' selected' : ''}>${escapeHtml(p.manifest.名字)}</option>`).join('')}</select></label>
@@ -1775,28 +1847,28 @@ function mountPanel() {
         const waiting = state.status?.handoffs ?? 0;
         const hu = state.handoffUi;
         $('[data-role="handoffs"]').hidden = !waiting;
-        $('[data-role="handoffs"]').innerHTML = !waiting ? '' : `外援队列：${waiting} 件等着（后台调模型没响应的活）。点“复制题目”贴给任一个 AI（Claude、ChatGPT、Gemini、DeepSeek、Grok 都行），把它的回答贴回来交上；或者在能跑命令的 AI 窗口（Codex、Antigravity、DeepSeek Harness、Claude Code……）里说“处理外援”；也可以在这里再试一次 API。`
-            + (hu?.pending ?? []).map(h => `<div style="margin:.2em 0">· ${escapeHtml(h.title)}<small style="opacity:.8">（${escapeHtml(h.why)}）</small>${h.retry
-                ? ` <button class="menu_button" type="button" data-action="handoff-retry" data-id="${h.id}" ${h.busy ? 'disabled' : ''}>${h.busy ? '正在重试…' : h.kind === 'plan' ? '再试一次（调规划模型写一整个节点，约一两美元）' : '再试一次'}</button>` : ''}
-                <button class="menu_button" type="button" data-action="handoff-copy" data-id="${h.id}">复制题目（约 ${h.chars ?? '?'} 字）</button>
-                <button class="menu_button" type="button" data-action="handoff-paste" data-id="${h.id}">贴回答</button>
-                ${state.handoffDrafts?.[h.id] ? `<div><textarea data-handoff-answer="${h.id}" rows="8" style="width:100%" aria-label="外援回答">${escapeHtml(state.handoffDrafts[h.id].text)}</textarea><button class="menu_button" type="button" data-action="handoff-submit" data-id="${h.id}">交回</button><button class="menu_button" type="button" data-action="handoff-cancel" data-id="${h.id}">取消</button><div role="status">${escapeHtml(state.handoffDrafts[h.id].why ?? '')}</div></div>` : ''}</div>`).join('')
-            + `<label class="checkbox_label"><input type="checkbox" data-opt="handoffAuto" ${hu?.auto ? 'checked' : ''}> 每 5 分钟自动再试，直到成了</label>`;
+        $('[data-role="handoffs"]').innerHTML = !waiting ? '' : `外援队列：${waiting} 件等着。复制题目贴给任何一个 AI（网页版也行），把回答贴回来点“交回”；也可以重试 API。`
+            + (hu?.pending ?? []).map(h => `<div style="margin:.2em 0">· ${escapeHtml(handoffLabel(h))}<small style="opacity:.8">（${escapeHtml(h.why)}）</small>${h.retry
+                ? ` <button class="menu_button" type="button" data-action="handoff-retry" data-id="${h.id}" ${h.busy ? 'disabled' : ''} title="重调原模型，建议先检查连接。">${h.busy ? '正在重试…' : h.kind === 'plan' ? '再试一次（调规划模型写一整个节点，约一两美元）' : '再试一次'}</button>` : ''}
+                <button class="menu_button" type="button" data-action="handoff-copy" data-id="${h.id}" title="复制完整题目，建议交给其他AI。">复制题目（约 ${h.chars ?? '?'} 字）</button>
+                <button class="menu_button" type="button" data-action="handoff-paste" data-id="${h.id}" title="粘贴AI回答，建议核对后交回。">贴回答</button>
+                ${state.handoffDrafts?.[h.id] ? `<div><textarea data-handoff-answer="${h.id}" rows="8" style="width:100%" aria-label="外援回答">${escapeHtml(state.handoffDrafts[h.id].text)}</textarea><button class="menu_button" type="button" data-action="handoff-submit" data-id="${h.id}" title="提交并核对回答，建议保留完整内容。">交回</button><button class="menu_button" type="button" data-action="handoff-cancel" data-id="${h.id}" title="收起未交回答，建议暂不交时用。">取消</button><div role="status">${escapeHtml(state.handoffDrafts[h.id].why ?? '')}</div></div>` : ''}</div>`).join('')
+            + `<label class="checkbox_label"><input type="checkbox" data-opt="handoffAuto" ${hu?.auto ? 'checked' : ''}> 每 5 分钟自动再试，直到成了<small>重试未完成的任务，建议先检查模型连接。</small></label><small>能跑命令的 AI 窗口也可以说“处理外援”。</small>`;
         // 记账是一切的上游（D-174 第 5 步）：连败就亮红、能一键再试；判了"跳过"的能重记；落后几条也说一声
         const ex = st?.extract;
         $('[data-role="extract-alert"]').innerHTML = !ex ? '' : [
-            ex.failing >= 2 ? `<div style="color:var(--warning,#d33)">记账停了：连败 ${ex.failing} 次（最后一次：${escapeHtml(ex.lastError ?? '没说原因')}）；下游的检查、局势、口袋都在等它。 <button class="menu_button" type="button" data-action="extract-retry">再试一次</button>${ex.skipped?.length ? ` <button class="menu_button" type="button" data-action="extract-retry-skipped">重记跳过的 ${ex.skipped.length} 条</button>` : ''}</div>` : '',
-            ex.failing < 2 && ex.skipped?.length ? `<div style="color:var(--SmartThemeQuoteColor,#888)">有 ${ex.skipped.length} 条记账时被跳过了（第 ${ex.skipped.join('、')} 条）。 <button class="menu_button" type="button" data-action="extract-retry-skipped">重记它们</button></div>` : '',
-            ex.pendingMessages >= 4 ? `<div style="color:var(--SmartThemeQuoteColor,#888)">记账落后 ${ex.pendingMessages} 条</div>` : '',
+            ex.failing >= 2 ? `<div style="color:var(--warning,#d33)">每条总结停了：连败 ${ex.failing} 次（最后一次：${escapeHtml(ex.lastError ?? '没说原因')}）；下游的检查、局势、口袋都在等它。 <button class="menu_button" type="button" data-action="extract-retry" title="重试失败总结，建议先检查错误。">再试一次</button>${ex.skipped?.length ? ` <button class="menu_button" type="button" data-action="extract-retry-skipped" title="补回跳过消息，建议核对后用。">重记跳过的 ${ex.skipped.length} 条</button>` : ''}</div>` : '',
+            ex.failing < 2 && ex.skipped?.length ? `<div style="color:var(--SmartThemeQuoteColor,#888)">有 ${ex.skipped.length} 条消息在总结时被跳过了（第 ${ex.skipped.join('、')} 条）。 <button class="menu_button" type="button" data-action="extract-retry-skipped" title="补回跳过消息，建议核对后用。">重记它们</button></div>` : '',
+            ex.pendingMessages >= 4 ? `<div style="color:var(--SmartThemeQuoteColor,#888)">每条总结落后 ${ex.pendingMessages} 条</div>` : '',
         ].filter(Boolean).join('') + driftHtml(st?.drift);
         const plan = state.plan, joined = !!state.chatKey && s.enabled;
         for (const sel of ['[data-role="ledger"]', '[data-action="extract"]', '[data-action="backfill"]', '[data-action="records"]', '[data-action="rejected"]', '[data-action="ledger"]', '[data-action="cast"]', '[data-action="setup"]', '[data-action="relations"]', '[data-action="presets"]']) $(sel).hidden = !joined || !plan;
         if (joined && plan) {
             const cost = `约 ${plan.estimate.calls} 次调用、约 $${plan.estimate.usd.toFixed(2)}`;
-            $('[data-role="ledger"]').textContent = !plan.configured ? '后台记账：还没配置模型（在后台的 config.json 里填）。'
-                : plan.enabled ? `后台记账：开着（${plan.model}）。${plan.pendingMessages ? `还有 ${plan.pendingMessages} 条待记，${cost}。` : '都记完了。'}今天已花约 $${plan.spentTodayUsd.toFixed(2)} / 上限 $${plan.dailyBudgetUsd}。${plan.lastError ? ` 上次出错：${plan.lastError}` : ''}`
-                : `后台记账：关着。这个窗口有 ${plan.pendingMessages} 条待记，全记一遍${cost}（${plan.model}）。`;
-            $('[data-action="extract"]').textContent = plan.enabled ? '暂停记账' : '开始记账（会花钱）';
+            $('[data-role="ledger"]').textContent = !plan.configured ? '后台每条总结：还没配置模型（在后台的 config.json 里填）。'
+                : plan.enabled ? `后台每条总结：开着（${plan.model}）。${plan.pendingMessages ? `还有 ${plan.pendingMessages} 条待记，${cost}。` : '都记完了。'}今天已花约 $${plan.spentTodayUsd.toFixed(2)} / 上限 $${plan.dailyBudgetUsd}。${plan.lastError ? ` 上次出错：${plan.lastError}` : ''}`
+                : `后台每条总结：关着。这个窗口有 ${plan.pendingMessages} 条待记，全记一遍${cost}（${plan.model}）。`;
+            $('[data-action="extract"]').textContent = plan.enabled ? '暂停每条总结' : '开始每条总结（会花钱）';
             $('[data-action="extract"]').disabled = !plan.configured;
             // 接入时自动开的记账只记接入以后的（D-100）；以前的旧消息要不要补记，给个估价由你点。
             const older = plan.olderMessages ?? 0;
@@ -1908,7 +1980,7 @@ function mountPanel() {
                 const turningOn = !state.plan.enabled, c = ctx();
                 if (turningOn && state.plan.pendingMessages) {
                     const p = state.plan;
-                    const ok = await c.callGenericPopup(`这个窗口有 ${p.pendingMessages} 条消息待记账，用 ${escapeHtml(p.model)} 全记一遍预计约 ${p.estimate.calls} 次调用、约 $${p.estimate.usd.toFixed(2)}（按配置里的单价估）。今天的花费上限是 $${p.dailyBudgetUsd}，到了会自动停。开始吗？`, c.POPUP_TYPE.CONFIRM);
+                    const ok = await c.callGenericPopup(`这个窗口有 ${p.pendingMessages} 条消息待每条总结，用 ${escapeHtml(p.model)} 全记一遍预计约 ${p.estimate.calls} 次调用、约 $${p.estimate.usd.toFixed(2)}（按配置里的单价估）。今天的花费上限是 $${p.dailyBudgetUsd}，到了会自动停。开始吗？`, c.POPUP_TYPE.CONFIRM);
                     if (ok !== c.POPUP_RESULT.AFFIRMATIVE) return;
                 }
                 await api('extract-enable', { chatKey: state.chatKey, enabled: turningOn });
@@ -1916,7 +1988,7 @@ function mountPanel() {
             }
             if (action === 'backfill' && state.plan?.olderMessages) {
                 const p = state.plan, c = ctx();
-                const ok = await c.callGenericPopup(`接入以前的 ${p.olderMessages} 条消息还没记账。用 ${escapeHtml(p.model)} 补记一遍预计约 ${p.olderEstimate.calls} 次调用、约 ${p.olderEstimate.usd.toFixed(2)}（按配置里的单价估）。今天的花费上限是 ${p.dailyBudgetUsd}，到了会自动停、第二天接着记。补记吗？`, c.POPUP_TYPE.CONFIRM);
+                const ok = await c.callGenericPopup(`接入以前的 ${p.olderMessages} 条消息还没每条总结。用 ${escapeHtml(p.model)} 补记一遍预计约 ${p.olderEstimate.calls} 次调用、约 ${p.olderEstimate.usd.toFixed(2)}（按配置里的单价估）。今天的花费上限是 ${p.dailyBudgetUsd}，到了会自动停、第二天接着记。补记吗？`, c.POPUP_TYPE.CONFIRM);
                 if (ok !== c.POPUP_RESULT.AFFIRMATIVE) return;
                 await api('extract-enable', { chatKey: state.chatKey, enabled: true, backfill: true });
                 await refreshPlan();
@@ -1945,6 +2017,7 @@ function mountPanel() {
             if (action === 'presets') await openPresets();
             if (action === 'opening-pack') await openOpeningPack();
             if (action === 'camera') await setUpCamera();
+            if (action === 'fresh-settings') await openFreshSettings();
             if (action === 'stages') await openStages();
             if (action === 'places') await openPlaces();
             if (action === 'tuning') await openTuning();
@@ -2105,25 +2178,60 @@ function packConflicts(r) {
     const books = new Set(stWorldNames());
     return { cards: r.cards.filter(x => have.has(x.name)).map(x => x.name), books: r.books.filter(b => books.has(b.name)).map(b => b.name) };
 }
+export async function uploadOpeningZip(file, send, progress = () => {}) {
+    if (!/\.zip$/i.test(file.name)) throw new Error('只认 .zip；rar、7z 请先转成 zip');
+    const chunkSize = 4 * 1024 * 1024, total = Math.ceil(file.size / chunkSize), id = crypto.randomUUID();
+    if (!total) throw new Error('压缩包是空的');
+    try {
+        let result;
+        for (let index = 0; index < total; index++) {
+            const bytes = new Uint8Array(await file.slice(index * chunkSize, (index + 1) * chunkSize).arrayBuffer());
+            let binary = ''; for (let at = 0; at < bytes.length; at += 32768) binary += String.fromCharCode(...bytes.subarray(at, at + 32768));
+            progress(index + 1, total); result = await send('opening-pack-upload', { id, index, total, name: file.name, data: btoa(binary) }, 180000);
+        }
+        return result.path;
+    } catch (e) { try { await send('opening-pack-upload', { id, abort: true }); } catch {} throw e; }
+}
 async function openOpeningPack() {
     const c = ctx();
     const box = document.createElement('div');
     box.style.textAlign = 'left';
     box.innerHTML = `<h3>导入开局包</h3>
-        <p><small>一个文件夹：根目录有 开局包.json（卡、user 卡、开场在场、世界书、局预设、素材包）。填本机路径，先看一眼再导。导完就开局：建群、留开场白、接入、套局预设，你说第一句。格式见仓里 _dev/开局包格式-20261017.md。</small></p>
-        <div style="display:flex;gap:.4em"><input class="text_pole" data-f="path" placeholder="局包所在的文件夹" style="flex:1" value="${escapeHtml(settings().lastOpeningPack ?? '')}"><button class="menu_button" data-p="check" type="button" style="white-space:nowrap">看一眼</button></div>
+        <p><small>先选来源，再看一眼、核对并导入；会新建群、接入并套局预设，原窗口不套。</small></p>
+        <label><input type="radio" name="rpe-opening-source" value="zip" checked>选压缩包（推荐）</label>
+        <div><input type="file" data-f="zip" accept=".zip" hidden><button class="menu_button" data-p="zip" type="button" style="width:auto;white-space:nowrap" title="打开系统文件选择器，建议选下载的zip。">选压缩包</button><small style="display:block">QQ、微信里收到的，先点“保存到手机”或“用其他应用打开”存到下载里再选。只认 .zip；rar、7z 请先转成 zip。</small></div>
+        <label><input type="radio" name="rpe-opening-source" value="git">贴 git 地址</label>
+        <div style="display:flex;gap:.4em"><input class="text_pole" data-f="git" placeholder="https://… 仓库地址" style="flex:1"><button class="menu_button" data-p="git" type="button" style="width:auto;white-space:nowrap" title="拉取或更新仓库，建议先核对来源。">拉取／更新</button></div>
+        <details><summary>本机文件夹（电脑进阶）</summary><label><input type="radio" name="rpe-opening-source" value="folder">本机文件夹</label><div style="display:flex;gap:.4em"><input class="text_pole" data-f="path" placeholder="局包所在的文件夹" style="flex:1" value="${escapeHtml(settings().lastOpeningPack ?? '')}"><button class="menu_button" data-p="check" type="button" style="white-space:nowrap" title="预览开局包资源，建议导入前先核对。">看一眼</button></div></details>
+        <small data-f="source-progress"></small>
         <div data-f="preview" style="margin-top:.6em"></div>`;
     const preview = box.querySelector('[data-f="preview"]');
-    let looked = null;
+    let looked = null, pathIn = '';
+    box.querySelector('[data-f="zip"]').addEventListener('change', async event => {
+        const file = event.target.files?.[0]; if (!file) return;
+        box.querySelector('[value="zip"]').checked = true; looked = null; preview.innerHTML = '';
+        try { pathIn = await uploadOpeningZip(file, api, (i,n) => { box.querySelector('[data-f="source-progress"]').textContent = `上传中 ${i}/${n}`; }); box.querySelector('[data-f="source-progress"]').textContent = '上传完成'; box.querySelector('[data-p="check"]').click(); }
+        catch(e) { preview.textContent = e.message; }
+    });
     box.addEventListener('click', async event => {
         const act = event.target?.dataset?.p;
         if (!act) return;
-        const pathIn = box.querySelector('[data-f="path"]').value.trim();
         try {
-            if (act === 'check') {
+            if (act === 'zip') { box.querySelector('[data-f="zip"]').click(); return; }
+            if (act === 'git') {
+                box.querySelector('[value="git"]').checked = true; looked = null; preview.innerHTML = '';
+                box.querySelector('[data-f="source-progress"]').textContent = '正在拉取／更新……';
+                const source = await api('opening-pack-git', { url: box.querySelector('[data-f="git"]').value.trim() }, 190000);
+                pathIn = source.path; box.querySelector('[data-f="source-progress"]').textContent = source.operation === 'pull' ? '仓库更新完成' : '仓库拉取完成';
+            }
+            if (act === 'choose') pathIn = event.target.dataset.path;
+            if (['check', 'git', 'choose'].includes(act)) {
+                if (act === 'check' && box.querySelector('[name="rpe-opening-source"]:checked').value === 'folder') pathIn = box.querySelector('[data-f="path"]').value.trim();
+                looked = null;
                 preview.innerHTML = '<small>在看……</small>';
                 looked = await api('opening-pack', { path: pathIn }, 60000);
-                settings().lastOpeningPack = pathIn; saveExtensionSettings();
+                if (looked.choices) { preview.innerHTML = '<p>包里有多份开局包，请选一份：</p>' + looked.choices.map(x=>`<button class="menu_button" type="button" data-p="choose" data-path="${escapeHtml(x.path)}" title="选择这份开局包，建议核对名称。">${escapeHtml(x.name)}</button>`).join(''); looked = null; return; }
+                if (box.querySelector('[name="rpe-opening-source"]:checked').value === 'folder') { settings().lastOpeningPack = pathIn; saveExtensionSettings(); }
                 const clash = packConflicts(looked);
                 const li = s => `<li>${s}</li>`;
                 preview.innerHTML = `<p><b>${escapeHtml(looked.manifest.名)}</b>（群名：${escapeHtml(looked.manifest.群名)}）</p><ul>
@@ -2137,7 +2245,8 @@ async function openOpeningPack() {
                     ${clash.cards.length || clash.books.length ? `<p>你的 ST 里已经有同名的：${clash.cards.length ? `卡 ${clash.cards.map(escapeHtml).join('、')}` : ''}${clash.cards.length && clash.books.length ? '；' : ''}${clash.books.length ? `书 ${clash.books.map(escapeHtml).join('、')}` : ''}。默认用你 ST 里现在那份，不动。</p>
                         <label class="checkbox_label"><input type="checkbox" data-f="overwrite"> 用包里的覆盖这几份（原件先备份到后台的 backups）</label>` : ''}
                     ${looked.warnings.length ? `<p style="color:var(--SmartThemeQuoteColor,#f90)">${looked.warnings.map(escapeHtml).join('<br>')}</p>` : ''}
-                    <button class="menu_button" data-p="go" type="button">就这样，导进来并开局</button>`;
+                    <small>局预设文件夹里的“窗口书”“剧情种子书”“开场.txt”是给没装本系统的人用的，导入时不读。</small>
+                    <button class="menu_button" data-p="go" type="button" style="width:auto;white-space:nowrap" title="导资源并建新群，建议确认清单后点。">就这样，导进来并开局</button>`;
             }
             if (act === 'go') {
                 if (!looked) return;
@@ -2319,7 +2428,7 @@ async function importOpeningPack(pathIn, say, { overwrite = false, together = nu
         // 6. 接入这个窗口；局预设、窗口书、ST 预设
         await join();
         for (let i = 0; i < 20 && !state.chatKey; i++) await sleep(300);
-        if (!state.chatKey) throw new Error('接入没成：面板里点"接入这个窗口"，再在"局预设"里套上');
+        if (!state.chatKey) throw new Error('接入没成：在面板“设置”勾选“本窗口接入”，再在“局预设”里套上');
         await verifyOpeningChat(group, openingMessageStamp(kept));
         if (r.preset) {
             await api('preset', { import: r.preset.data });
@@ -2954,7 +3063,7 @@ async function openLore() {
     const rows = state.lore?.rows ?? [];
     if (!rows.length) { globalThis.toastr?.info('后台还没见过这一局的世界书条目（开口生成一次就会收到）。'); return; }
     const line = r => `- 〔${r.world}〕${r.title || r.key} ｜ ${r.verdict ? (r.verdict.all !== false ? '所有人' : r.verdict.who.join('、')) : '所有人'} ｜ ${r.source === 'user' ? '你定的' : r.source === 'model' ? '判的' : '还没判'}`;
-    const note = `每条：书 · 条目 ｜ 谁知道（所有人，或者名字用、隔开） ｜ 是判的还是你定的。开口的人不在名单里，这一条这一轮就不给他。改了第二段点"保存"，你改的算数。${state.lore?.pending ? `还有 ${state.lore.pending} 条在等判。` : ''}`;
+    const note = `后台自动判每条世界书谁该知道（要打开“世界书按开口的人筛”）；判错了在这里改。一般不用动。每条：书 · 条目 ｜ 谁知道（所有人，或者名字用、隔开） ｜ 是判的还是你定的。开口的人不在名单里，这一条这一轮就不给他。改了第二段点"保存"，你改的算数。${state.lore?.pending ? `还有 ${state.lore.pending} 条在等判。` : ''}`;
     const { result, text } = await textPopup('世界书谁知道', note, rows.map(line).join('\n'), { ok: '保存', cancel: '关闭' });
     if (result !== c.POPUP_RESULT.AFFIRMATIVE) return;
     const set = [];
@@ -3139,10 +3248,10 @@ async function pickBoard(id) {
     const html = `<h3>场面纠正</h3><p>系统现在认的：镜头在 ${escapeHtml(l?.place ?? '？')}${l?.home ? `（${escapeHtml(l.home)}的家）` : ''}</p>
         <div style="text-align:left">
           <b>镜头在哪</b>（留空＝不纠正）<br><input class="text_pole" data-role="rpe-board-place" value="${escapeHtml(current.place ?? '')}" placeholder="比如：楼下便利店、他的公寓">
-          ${known.length ? `<div style="margin:.3em 0"><small>认得的地方：</small>${known.map(p => `<button type="button" class="menu_button" data-role="rpe-board-pick" style="margin:.1em .2em;padding:.1em .5em">${escapeHtml(p)}</button>`).join('')}</div>` : ''}
+          ${known.length ? `<div style="margin:.3em 0"><small>认得的地方：</small>${known.map(p => `<button type="button" class="menu_button" data-role="rpe-board-pick" style="margin:.1em .2em;padding:.1em .5em" title="选择已知地点，建议核对实际场面。">${escapeHtml(p)}</button>`).join('')}</div>` : ''}
           <b>谁在不在</b><table style="margin-top:.3em">${cards.map(row).join('')}</table>
         </div>
-        <button type="button" class="menu_button" data-role="rpe-board-reset">清除此条场面纠正</button>
+        <button type="button" class="menu_button" data-role="rpe-board-reset" title="撤销本条纠正，建议确认识别无误再用。">清除此条场面纠正</button>
         <p><small>你定的算数，排在后台自己认的前面；从这条往后，直到之后又有人走了、来了、换了地方。存在这条消息里，跟着聊天文件走，也同步给后台。</small></p>`;
     let picked = null, clear = false;
     const ok = await c.callGenericPopup(html, c.POPUP_TYPE.CONFIRM, '', {
@@ -3245,7 +3354,7 @@ function registerCommands() {
         const r = await api('ask', { chatKey: state.chatKey, q: String(text ?? '') });
         await ctx().callGenericPopup(`<h3>账</h3><pre style="white-space:pre-wrap">${escapeHtml(r.lines.join('\n'))}</pre>`, ctx().POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
         return '';
-    }, ['rp-ask'], '查后台记下的事和账（程序查，不进聊天记录）。例：/账 那笔欠款后来怎样了；只写 /账 看总览');
+    }, ['rp-ask'], '查后台记下的事和账（剧情现状；程序查，不进聊天记录）。例：/账 那笔欠款后来怎样了；只写 /账 看总览');
     const note = (kind, done) => async (_named, text) => {
         const t = String(text ?? '').trim();
         if (!need() || !t) return '';
@@ -3299,7 +3408,7 @@ function registerCommands() {
         if (!need()) return '';
         if (await openTalk(String(text ?? '').trim()) === false) return oneWay(named, text);
         return '';
-    }, ['rp-talk'], '跟后台说话：问记下的事、指出记错的、商量方向（不给角色看）。例：/聊 这几天想轻松点，别总围着伤病转');
+    }, ['rp-talk'], '任意调整：问记下的事、指出记错的、商量方向（不给角色看）。例：/聊 这几天想轻松点，别总围着伤病转');
 }
 
 function refreshPlanStatus() {

@@ -1,12 +1,13 @@
 // 本机后台的 HTTP 接口。只听 127.0.0.1；浏览器不直接连它，经 ST 里的转发插件过来（plugin/）。
 import http from 'node:http';
+import path from 'node:path';
 import { buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
 import { labelsOf, sinceWord, dateIn, dayNumber } from './timeline.mjs';
 import { validMark, planFailure } from './store.mjs';
 import { digests } from './digest.mjs';
 import { parsePlan } from './planner.mjs';
 import { snapshot, applyPreset } from './presets.mjs';
-import { readOpeningPack, installPack, backupStFiles } from './pack-import.mjs';   // 一键导入开局包（_dev/开局包格式-20261017.md）
+import { readOpeningPack, installPack, backupStFiles, findOpeningPacks, openingSources, httpsPackUrl } from './pack-import.mjs';   // 一键导入开局包（_dev/开局包格式-20261017.md）
 import { profileHash } from './profile.mjs';
 import { toText, fromText, advisorContext, parseSetup, SETUP_SYSTEM, setupPrompt, KEYS_SYSTEM, keysPrompt, parseBackstoryKeys, withKeys, formMerge, formMissing, receiptLines, formRows, mustCastOf, checkIntimate, intimateRows } from './setup.mjs';
 import { ensureOpening } from './opening.mjs';
@@ -21,7 +22,8 @@ import { talksMoney } from './pricing.mjs';
 import { buildLedger } from './money.mjs';
 import { autoRoster, mentionedIn, ROLES, addFaces, promotionCandidates } from './cast.mjs';
 import { sameName } from './setup.mjs';
-import { CAST_PROMOTION_DEFAULTS } from './config.mjs';
+import { CAST_PROMOTION_DEFAULTS, MODEL_GROUPS, VOICE_GUIDANCE } from './config.mjs';
+import { voiceLibrary, voiceName } from './fresh.mjs';
 import { planRoster, normalizeRelations, toText as relationsText, fromText as relationsFromText, currentLines, personOf } from './relations.mjs';
 import { boardFor } from './board.mjs';
 import { pendingFor } from './pending.mjs';
@@ -74,6 +76,15 @@ function readMessages(messages) {
 // settings()＝每次现读的设置；packOf(chatKey)＝这一局的素材包（价表、时事、年表），没选包就是空的（D-104）。
 // withPack：把这一局的价表和时事并进给那一格的设置。
 export function createRoutes(store, { worker = null, records = null, assembler = null, keyMaker = null, advisor = null, setupMaker = null, keysMaker = null, handoffs = null, settings = () => ({}) } = {}) {
+    let sourceManager = null;
+    const sources = () => {
+        const backups = settings().backupsDir;
+        if (!backups) bad('开局包数据目录未配置');
+        const root = path.resolve(backups, '..', '开局包');
+        if (!sourceManager || sourceManager.root !== root) sourceManager = openingSources(root);
+        return sourceManager;
+    };
+    const sourceTimer = setInterval(() => { try { sourceManager?.cleanup(); } catch {} }, 60000); sourceTimer.unref();
     const contentView = chatKey => {
         const options = promptOptionsFor(store, chatKey), env = promptEnvironmentFor(store);
         const rows = intimateRows(options.setup, { names: setupNames(store.requireChat(chatKey).story_id) });
@@ -629,11 +640,12 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/stages': b => {
             const s = settings().stages;
             if (!s) bad('stages_unavailable');
-            if (b.saveKey) return s.saveKey({ name: b.saveKey.name, baseUrl: b.saveKey.baseUrl, apiKey: b.saveKey.apiKey ?? null });
-            if (b.removeKey !== undefined) return s.removeKey(str(b.removeKey, 'removeKey', { max: 40 }));
-            if (b.set) return s.setStage(str(b.set.id, 'id', { max: 40 }), b.set);
-            if (b.reset !== undefined) return s.resetStage(str(b.reset, 'reset', { max: 40 }));
-            return s.view();
+            const view = value => ({ ...value, groups: MODEL_GROUPS, advisorEnabled: settings().tuning?.view().controls?.advisorEnabled ?? false });
+            if (b.saveKey) return view(s.saveKey({ name: b.saveKey.name, baseUrl: b.saveKey.baseUrl, apiKey: b.saveKey.apiKey ?? null }));
+            if (b.removeKey !== undefined) return view(s.removeKey(str(b.removeKey, 'removeKey', { max: 40 })));
+            if (b.set) return view(s.setStage(str(b.set.id, 'id', { max: 40 }), b.set));
+            if (b.reset !== undefined) return view(s.resetStage(str(b.reset, 'reset', { max: 40 })));
+            return view(s.view());
         },
         // 只有一把钥匙时：它调得了推荐的型号吗（拉型号列表比一比，不花钱）；调不了的几格一键换成同一个它调得了的
         'POST /v1/stages-fit': async b => {
@@ -839,11 +851,22 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             }
             return { presets: p.list() };
         },
-        // 开局包（_dev/开局包格式-20261017.md）：path＝本机的局包目录；不带 go 只看一眼（不带正文）；go＝素材包复制进本仓、卡／书／局预设的正文交给扩展往 ST 里导
+        // 三种来源汇入现有预览／导入：新素材进数据目录，卡书预设交给扩展往 ST 导。
+        'POST /v1/opening-pack-upload': b => sources().upload(b),
+        'POST /v1/opening-pack-git': async b => sources().pull(httpsPackUrl(str(b.url, 'url', { max: 2000 }))),
         'POST /v1/opening-pack': b => {
             const p = str(b.path, 'path', { max: 500 });
             const go = b.go === true;
-            const r = readOpeningPack(p, { full: go });
+            const options = findOpeningPacks(p);
+            if (options.length > 1) {
+                if (go) bad('请先选择一份开局包');
+                return { choices: options.map(dir => ({ path: dir, name: path.relative(p, dir) })) };
+            }
+            const root = options[0];
+            const managed = settings().backupsDir ? sources().root : null;
+            const inManaged = managed && (path.resolve(root) === managed || path.resolve(root).startsWith(managed + path.sep));
+            const boundary = inManaged ? path.join(managed, path.relative(managed, path.resolve(root)).split(path.sep)[0]) : null;
+            const r = readOpeningPack(root, { full: go, ...(boundary ? { boundary } : {}) });
             if (go && r.pack) r.pack.installed = installPack(r.pack.dir, settings().packsDir?.() ?? null, { overwrite: b.overwrite === true });
             // 扩展要覆盖 ST 里的同名卡、书：先备份原件
             if (go && b.backup && typeof b.backup === 'object') r.backedUp = backupStFiles(settings().stRoot ?? null, settings().backupsDir ?? null, { cards: strings(b.backup.cards, 200, 300), books: strings(b.backup.books, 50, 300) });
@@ -862,6 +885,26 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         // 打开窗口时问一声：用户是不是离开很久刚回来。是就记下这次离开、开始推各人这些天（后台跑），并说由谁先开口。
         // 再问一次拿推演的进度（working｜ready｜failed）。离开记在离开前最后那条上：那之后已经有新消息了，就不算"刚回来"。
         // 去复读：他刚说完的这条里和前几条重样的说法换成新的（core/fresh.mjs）。没开就原样返回。
+        'POST /v1/fresh-config': b => {
+            const cfg = settings().fresh;
+            if (!cfg?.dir) bad('fresh_unavailable');
+            const lib = voiceLibrary(cfg.dir);
+            const cast = b.chatKey ? store.getCast(store.requireChat(str(b.chatKey, 'chatKey')).story_id).filter(e => e.role !== '不用' && e.avatar && !e.avatar.startsWith('face:')) : [];
+            let warning = '';
+            if (b.action) {
+                const actor = cast.find(e => e.avatar === b.avatar);
+                if (!actor) bad('只能选这一局名册里有卡的人');
+                if (cast.filter(e => voiceName(e.name).toLowerCase() === voiceName(actor.name).toLowerCase()).length !== 1) bad('同名口吻无法区分，请先核对名册');
+                try {
+                    if (b.action === 'save') warning = lib.write(actor.name, str(b.text, 'text', { max: 500000 })).warning;
+                    else if (b.action === 'remove') lib.remove(actor.name);
+                    else if (b.action === 'read') return { text: lib.read(actor.name) };
+                    else bad('没有这个口吻操作');
+                } catch (e) { bad(e.message); }
+            }
+            return { enabled: !!cfg.enabled, dropEchoes: cfg.dropEchoes !== false, guidance: VOICE_GUIDANCE, warning,
+                cast: cast.map(e => { let text = ''; try { text = lib.read(e.name); } catch {} return { avatar: e.avatar, name: e.name, bound: !!text.trim(), chars: [...text].length }; }) };
+        },
         'POST /v1/fresh': async b => {
             const chatKey = str(b.chatKey, 'chatKey'), speaker = str(b.speaker, 'speaker');
             const text = typeof b.text === 'string' ? b.text.slice(0, 20000) : bad('text');

@@ -63,6 +63,7 @@ export function staleRate(text, previous, opts) {
 // 所以每条都请模型看一眼：程序找到的一定换，模型再补上换了说法的同一个套路。
 // 换整句，不换几个词：实测只换词，新词和前后文接不上（"破破主机壳""就就给老子"），还把地名换成了不知所云的话。
 export const FRESH_SYSTEM = [
+    '绑定语料的这一档还照顾两类口吻：条件式威胁和本条里反复套用的固定台词结构，读着像模型惯性、不像这个人。照语料换成这个角色此刻会说的另一种说法，意思和硬事实不变，不照抄语料。第一条回复没有前文可比时，只看这两类；没有就不改。属于这两类的替换在该项标"口吻":true；其余仍按下面的复读证据核对。',
     "下面是一部长篇角色扮演里某个角色刚说的一条回复，和〔当事人〕前面几条回复。写这些回复的模型很爱照着自己的上文抄：同一个比喻、同一个意象、同一句狠话、同一种动作描写、同一种开头和收尾的句式，一轮轮重复，读着像复读。",
     '请找出这条回复里和前几条重样的句子：用⟦⟧括起来的，是程序找到的原样重复，一定要换；换了几个字、但还是同一个比喻、同一个意象、同一句狠话、同一种动作描写、同一种句式的，也算，但它得在前几条里出现过两回以上：把前几条里那两处（或更多处）各逐字抄一小段（至少四五个字）放进"前面"，程序会核对；抄不出两处的，就不是复读，别换。',
     // 用户 10/3：Gemini 的新比喻挺好，被当成复读换成了大白话。头一回出现的不动，换上去的也不能更平
@@ -134,6 +135,7 @@ function parseAnswer(raw) {
     }
     return null;
 }
+export const freshAnswerValid = raw => parseAnswer(raw) !== null;
 
 // 真在问的不点；拿对方的话反问一句再数落的，是路数（用户 9/30 在自己的规则里也禁了"先反问、后调侃"）
 const ASKING = /询问|追问|问句|提问|发问|问话|问题(作结|收尾|结尾)|以问/;
@@ -187,14 +189,49 @@ export function withTags(to, inside) {
 // 选段是原作的台词，只留在本机数据目录，不进仓。按他的名字、再按头像名找，至多 VOICE_MAX 字。
 export const VOICE_MAX = 4000;
 export function voiceOf(dir, names = []) {
+    try { if (!fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink()) return ''; } catch { return ''; }
     for (const raw of names) {
         const n = String(raw ?? '').replace(/\.(png|webp|jpe?g|gif)$/i, '').replace(/[\\/:*?"<>|]/g, '').trim();
         if (!n) continue;
         for (const ext of ['.md', '.txt']) {
-            try { const t = fs.readFileSync(path.join(dir, n + ext), 'utf8').trim(); if (t) return t.slice(0, VOICE_MAX); } catch {}
+            try { const file = path.join(dir, n + ext), st = fs.lstatSync(file); if (!st.isFile() || st.isSymbolicLink()) continue; const t = fs.readFileSync(file, 'utf8').trim(); if (t) return t.slice(0, VOICE_MAX); } catch {}
         }
     }
     return '';
+}
+
+export const voiceName = name => String(name ?? '').replace(/\.(png|webp|jpe?g|gif)$/i, '').replace(/[\\/:*?"<>|]/g, '').trim();
+
+// 沿用旧文件名；只接受数据目录内的普通文件，不跟随目录或文件链接。
+export function voiceLibrary(dir) {
+    const checkDir = () => { if (fs.existsSync(dir) && (!fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink())) throw new Error('口吻目录不是普通目录'); };
+    const files = name => {
+        checkDir(); const n = voiceName(name);
+        if (!n || n === '.' || n === '..') throw new Error('角色名不能作为口吻文件名');
+        return ['.md', '.txt'].map(ext => path.join(dir, n + ext));
+    };
+    const read = name => {
+        for (const file of files(name)) if (fs.existsSync(file)) {
+            const st = fs.lstatSync(file); if (!st.isFile() || st.isSymbolicLink()) throw new Error('口吻文件不是普通文件');
+            const text = fs.readFileSync(file, 'utf8'); if (text.trim()) return text;
+        }
+        return '';
+    };
+    return { read, write(name, text) {
+        read(name); if (typeof text !== 'string' || !text.trim() || text.length > 500000) throw new Error('语料不能为空，且最多50万字');
+        fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(files(name)[0], text, 'utf8');
+        return { warning: [...text].length > 20000 ? '太长了，挑有代表性的几十段就够' : '' };
+    }, remove(name) { read(name); for (const file of files(name)) if (fs.existsSync(file)) fs.unlinkSync(file); } };
+}
+
+// 只给新增的两类目标放行；普通事实句不能靠一个模型标记绕过复读核对。
+export function styleCandidate(text, from) {
+    if (!String(text).includes(from)) return false;
+    if (/(?:要是|如果|你敢|再)[^。！？!?\n]{1,100}我就[^。！？!?\n]+/.test(from)) return true;
+    const sentences = String(text).split(/(?<=[。！？!?])/).map(x => x.trim()).filter(Boolean);
+    if (!sentences.includes(from)) return false;
+    const head = from.match(/^[一-鿿]{4,}/)?.[0]?.slice(0, 4);
+    return !!head && sentences.filter(x => x.startsWith(head)).length >= 2;
 }
 // 新句子里有连续这么多字和选段一模一样的，算照抄，不收。
 const COPY_RUN = 8;
@@ -236,7 +273,7 @@ export function seenTwice(item, prevs) {
     return hit.size >= 2;
 }
 
-export function applyFresh(text, spans, raw, previous = [], { voice = '', said = '' } = {}) {
+export function applyFresh(text, spans, raw, previous = [], { voice = '', said = '', styleOnly = false } = {}) {
     const answer = parseAnswer(raw);
     if (!answer) return { text, changes: [], ways: [], fixed: 0 };
     const list = answer.list;
@@ -251,6 +288,7 @@ export function applyFresh(text, spans, raw, previous = [], { voice = '', said =
     for (const item of list.slice(0, 6)) {
         const from = String(item?.['原'] ?? '').replace(/[⟦⟧]/g, '').trim();
         let to = String(item?.['新'] ?? '').replace(/[⟦⟧]/g, '').trim();
+        if (styleOnly && !(voice && item?.['口吻'] === true && styleCandidate(text, from))) continue;
         // 开头复述对方的话：只去掉那半句，模型写的新句子不用
         const head = echoes.find(e => from.includes(e)) ?? echoes.find(e => e.includes(from)) ?? echoHead(from, said);
         const echo = !!head;
@@ -261,7 +299,8 @@ export function applyFresh(text, spans, raw, previous = [], { voice = '', said =
         }
         if ((cjkCount(from) < 4 && !echo) || cjkCount(from) < 1 || from.length > 300) continue;
         // 程序找到的原样重复一定换；模型自己认的，得在前几条里真出现过两回
-        if (!echo && !stale.some(x => from.includes(x) || x.includes(from)) && !seenTwice(item, prevs)) continue;
+        if (!echo && !stale.some(x => from.includes(x) || x.includes(from)) && !seenTwice(item, prevs)
+            && !(voice && item?.['口吻'] === true && styleCandidate(text, from))) continue;
         if (!to && !echo && (dropped >= 2 || from.length > 120)) continue;
         if (to === from || to.length > from.length * 2 + 30 || new RegExp(TAGS.source).test(to)) continue;
         if (!echo && changesPose(from, to)) continue;
@@ -283,7 +322,7 @@ export function applyFresh(text, spans, raw, previous = [], { voice = '', said =
     }
     // 和写着的对不上的硬事实（N-279）：改成一致的说法，改得少；不删句子，不改得比原句长出一截。至多三处
     let fixed = 0;
-    for (const item of (answer.fix ?? []).slice(0, 3)) {
+    for (const item of (styleOnly ? [] : answer.fix ?? []).slice(0, 3)) {
         const from = String(item?.['原'] ?? '').replace(/[⟦⟧]/g, '').trim(), to = String(item?.['新'] ?? '').replace(/[⟦⟧]/g, '').trim();
         if (!from || !to || to === from || cjkCount(from) < 2 || from.length > 300 || to.length > from.length * 1.5 + 20 || new RegExp(TAGS.source).test(to)) continue;
         const at = locate(out, from);
