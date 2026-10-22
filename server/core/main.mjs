@@ -63,7 +63,7 @@ import { LORE_SYSTEM, lorePrompt, parseLore, LORE_VERSION, loreBatch, loreTried,
 import { createMaterials, LOOK_SYSTEM, lookPrompt, parseLook, RELATIONS_SYSTEM } from './materials.mjs';
 import { weekOf, rollLong, activeLong, LONG_SYSTEM, longPrompt, parseLong } from './drift.mjs';
 import { briefSection } from './setup.mjs';
-import { clockFor, requestPlanNow, stateBlock, timelineFor, timeMarksFor, settledBy, CAMERA_NAME, scaleFor, paceFor, pastNodesOf, RECENT_NODES, sofarOf } from './slot.mjs';
+import { playModeOf, playStop, clockFor, requestPlanNow, stateBlock, timelineFor, timeMarksFor, settledBy, CAMERA_NAME, scaleFor, paceFor, pastNodesOf, RECENT_NODES, sofarOf } from './slot.mjs';
 import { paceCap } from './tempo.mjs';
 import { withTaste } from './taste.mjs';   // 模型口味层：规划、检查的通用底后面按型号补几句口味（用户 10/15）
 import { planSystem } from './planner.mjs';
@@ -166,7 +166,7 @@ const applyPlan = (planId, text, { strict = true, attempt = null } = {}) => {
         throw error;
     }
 };
-const planPacket = ({ id, chatKey, brief }, why) => handoffs.request({
+const planPacket = ({ id, chatKey, brief }, why) => playStop(store, chatKey, getConfig()) ?? handoffs.request({
     kind: 'plan', key: String(id), chatKey, why, system: planSystemFor(chatKey, 'claude', getConfig()), user: brief,
     task: '当规划者：读【输入】里这一局此刻的账，按【系统提示】规划一个主线节点（局面、节点、这个节点里的事、往后），只输出它要的那个 JSON。这是长规划，要全面：值得起一个子代理慢慢想',
     checks: '"谁"必须是名册或关系表里的人、各格不能缺（用意、触发、时效、前提缺一不收）、露面应答知情来由里不能有写给后台的话，不合格的那件会被丢掉；"旧件"里答了留、撤、换的照办；一件都没过就退回；年份对不上年表的退回',
@@ -189,7 +189,7 @@ const refreshPlanPackets = () => {
     for (const handoff of store.pendingHandoffs().filter(h => h.kind === 'plan')) {
         try {
             const plan = store.planById(handoff.payload.meta?.planId);
-            if (!plan || plan.status !== 'requested') continue;
+            if (!plan || plan.status !== 'requested' || playStop(store, plan.chat_key, getConfig())) continue;
             const payload = { ...handoff.payload, system: planSystemFor(plan.chat_key, 'claude', getConfig()), user: freshBrief(plan.id) };
             if (payload.system === handoff.payload.system && payload.user === handoff.payload.user) continue;
             store.db.prepare("update handoffs set payload = ? where id = ? and status = 'pending'").run(JSON.stringify(payload), handoff.id);
@@ -207,6 +207,7 @@ for (const p of store.pendingPlans()) {
 refreshPlanPackets();
 // 调规划模型写一个节点的规划（api 模式；面板"再试一次"也走这里）。成了就落账，没成抛错。长规划输出多，给足长度和时间。
 async function planViaApi({ id, chatKey, brief, attempt = null, entry = 'auto' }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), e = cfg.extractor, p = cfg.planner, s = cfg.stages.plan;
     const thinks = !!(s.extraBody?.reasoning_effort || s.extraBody?.output_config?.effort);
     attempt ??= store.beginPlanAttempt(id, { entry, model: s.model ?? p.model, thinks, briefChars: brief.length });
@@ -262,6 +263,7 @@ handoffs.register('plan', {
 });
 // force：这一次不管配置怎么设都走外援包（本机工具导一份写好的规划用，不花钱）
 const onRequest = ({ id, chatKey, brief, reason, verdict = null, thread = null, force = null, rebrief = null, entry = 'auto' }) => {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), s = cfg.stages.plan;
     const queue = force === 'queue' || cfg.planner.provider !== 'api';
     const attempt = store.beginPlanAttempt(id, { entry, model: queue ? 'window' : s.model ?? cfg.planner.model, thinks: !queue && !!(s.extraBody?.reasoning_effort || s.extraBody?.output_config?.effort), briefChars: brief.length });
@@ -272,6 +274,7 @@ const onRequest = ({ id, chatKey, brief, reason, verdict = null, thread = null, 
     // 转向：不问用户，直接重新规划；面板上给一句不剧透的提示，证明系统在转（用户 9/27 定）。
     if (reason === 'turn' || reason === 'shift') store.setMeta(`notice:${chatKey}`, JSON.stringify({ id: `plan-${id}`, text: '剧情迎来了意外的展开' }));
     const go = b => {
+        const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
         requirePlanAttempt(attempt);
         if (force === 'queue' || getConfig().planner.provider !== 'api') { const packet = planPacket({ id, chatKey, brief: b }, force === 'queue' ? '要一份新的节点规划（本机工具要的，交回写好的那份）' : '要一份新的节点规划（设成了交给窗口写，不走 API）'); store.finishPlanAttempt(attempt, { status: 'queued', stage: '等外援', briefChars: b.length }); return packet; }
         planViaApi({ id, chatKey, brief: b, attempt }).catch(error => {
@@ -299,6 +302,7 @@ const onRequest = ({ id, chatKey, brief, reason, verdict = null, thread = null, 
 
 // 规划前备料：用"备料"那一环节（默认跟着参谋），读得多、便宜；这一局选了素材包就按最近的原文挑一叠资料一起给。
 async function prepMemo({ chatKey }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), s = cfg.stages.prep;
     if (!s?.baseUrl || !s.apiKey || !s.model || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return null;
     const pack = packOf(chatKey);
@@ -318,6 +322,7 @@ async function prepMemo({ chatKey }) {
 }
 
 async function turnMemo({ chatKey, verdict, thread }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const setup = store.setupOf(store.requireChat(chatKey).story_id)?.data ?? null;
     const line = thread ? [...(setup?.储备线 ?? []), ...(setup?.主线 ?? [])].find(x => x.名 === thread) : null;
     const question = [
@@ -339,6 +344,7 @@ async function turnMemo({ chatKey, verdict, thread }) {
 // 下一次开口时重新规划（needsPlan → 'turn'）。不排外援：调不通就算了，下一个想法再看；/聊 和面板也能手动要。
 // changes：这份规划之后新记下的关系变化、一直算数的改变（谁的都算）——看规划设想的局面还成不成立（用户 10/4）。
 async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [], acts = [], outside = [] }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), a = cfg.stages.judge, p = cfg.planner;
     if (!p.judge || !a.baseUrl || !a.apiKey || !p.judgeModel || !(ideas.length || others.length || changes.length || acts.length || outside.length)) return;
     if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) return;
@@ -395,9 +401,11 @@ async function supplement({ chatKey, planId, idea, at }) {
 }
 // 剧情走到了开局单里某条储备线写明的地方（N-293）：展开那条线，给眼下这个节点补几件此刻就能用上的；同一份规划至多两回（同一条线一个剧情日一回，slot 那边管）
 async function placeSupplement({ chatKey, planId, line, place, at }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     return addToPlan({ chatKey, planId, at, counter: `plan_place:${planId}`, max: SUPPLEMENTS, reason: 'place', verdict: `储备线「${line}」写明的地方到了：${place}`, thread: line, line, label: `at ${place}（${line}）` });
 }
 async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, thread = null, line, label }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const key = counter, done = Number(store.getMeta(key) ?? 0);
     if (done >= max) return;
     const cfg = getConfig(), e = cfg.extractor, p = cfg.planner, s = cfg.stages.plan;
@@ -626,6 +634,7 @@ async function leaveNow({ chat, chatKey, who, avatar, msgs, last, how = null }) 
 // unanswered（waiting.mjs，用户 10/9）：他找过玩家、门上一直没人接——这回专为它结算（不受"一个时段一回"管，次数由 waiting 管）
 const settling = new Set();
 async function settleAway({ chatKey, who, avatar = null, reason = '换时段', unanswered = null }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const chat = store.requireChat(chatKey), messages = store.currentMessages(chatKey), last = messages.at(-1);
     if (!last) return { ok: true, skipped: true };
     // 人名认成名册里的写法（试玩 10/12：等着没人接那条路用短名记下"要来联系"，名册里是全名——后来他进了场、用掉了都认不出，那条一直挂着）
@@ -765,6 +774,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
 // 在场的有卡的人隔着消息、电话问不在场的有卡的人（advanceWorld ③丙 认出来的），替那人照他知道的回一句；问和答记成两条，两边都知道；
 // 回话挂在问的人身上，他下一回开口带上。便宜模型（兴头那一档）。
 async function askAway({ chatKey, pos, fp, asker, askerAvatar, target, targetAvatar, way, text }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), s = cfg.stages.scene;
     if (!cfg.offstage?.enabled || !cfg.offstage?.ask || !s?.baseUrl || !s.apiKey || !s.model || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return { ok: true, skipped: true };
     const chat = store.requireChat(chatKey);
@@ -846,6 +856,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
             if (item) offer = { who: item.who, avatar: item.avatar, why: item.reason ?? '', way: '', from: item.source?.type === 'contact' ? 'settle' : item.source?.type ?? 'user', lines: item.lines ?? [], sent: item.sent ?? null, earlier: item.earlier ?? null };
         } catch {}
     }
+    if (playModeOf(store,chatKey,getConfig()) === 'memory' && ['pocket','settle','reach'].includes(offer?.from)) offer=null;
     if (!offer && mode !== 'come') offer = { who, avatar, why: '', way: '', from: 'user', lines: [] };
     // 玩家去找他：他在原地；远程：说好了是消息还是电话，模型答"上门"也不算
     if (offer && mode === 'go') offer = { ...offer, why: [`玩家去找${who}`, offer.lines?.[0], offer.from === 'settle' ? '' : offer.why].filter(Boolean).join('；'), way: '' };
@@ -866,7 +877,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     try {
         const boardPerson = board?.people?.find(p => sameName(p.name, who, roster));
         const left = boardPerson?.since ?? lastLeave(JSON.parse(chat.anchors ?? 'null'), avatar, (msgs.at(-1)?.pos ?? 0) + 1);
-        if (left != null) {
+        if (left != null && playModeOf(store,chatKey,getConfig()) === 'full') {
             const tlNow = timelineFor(store, records, chatKey, msgs);
             const rows = new Map(tlNow.rows.map(r => [r.pos, r]));
             const visible = records.visible(chatKey).filter(r => r.holder_name === who || (r.audience ?? []).includes(who));
@@ -1074,6 +1085,7 @@ async function materialRelations({ chatKey, name }) {
 // 掷过的周记下（不管起没起）；写失败的那周下次同步再试，三次不成就算这周没有。存在 long_events:<局>。
 const longBusy = new Set();
 async function runLong({ chatKey }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), s = cfg.stages.situation;
     const chat = store.requireChat(chatKey);
     if (!chat.enabled || longBusy.has(chat.story_id)) return;
@@ -1169,6 +1181,7 @@ async function runLore({ chatKey }) {
 
 // 兴头：备料（看到哪了、空当隔够没、刚换了地方、场面材料）和收结果分开写——单独调（runScene）和并进"看一眼"（runGlance）共用同一份
 function prepareScene({ chatKey }) {
+    if (playStop(store, chatKey, getConfig())) return null;
     const cfg = getConfig(), sc = cfg.scene, s = cfg.stages.scene;
     if (!sc.enabled || !s?.baseUrl || !s.apiKey || !s.model || sceneBusy.has(chatKey)) return null;
     const chat = store.requireChat(chatKey);
@@ -1222,6 +1235,7 @@ function prepareScene({ chatKey }) {
     return { s, last, user, apply };
 }
 async function runScene({ chatKey, prepared = null }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const p = prepared ?? prepareScene({ chatKey });
     if (!p) return;
     sceneBusy.add(chatKey);
@@ -1279,6 +1293,7 @@ const thinking = new Map();
 // 只改一次；后台跑，不等（这一轮照旧，下一轮起用改过的）。said＝离开之后到眼下的几条（含玩家说的）。
 const revising = new Map();
 function reviseAway({ chatKey, absenceId }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return Promise.resolve(stopped);
     if (revising.has(absenceId)) return revising.get(absenceId);
     const job = (async () => {
         const a = store.absences(chatKey).find(x => x.id === absenceId);
@@ -1320,6 +1335,7 @@ function reviseAway({ chatKey, absenceId }) {
 }
 
 function thinkAway({ chatKey, absenceId }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return Promise.resolve(stopped);
     if (thinking.has(absenceId)) return thinking.get(absenceId);
     const job = (async () => {
         const a = store.absences(chatKey).find(x => x.id === absenceId);
@@ -1481,6 +1497,7 @@ async function extendSofar(chatKey) {
 // 节点检查（每个剧情日一次，便宜模型）：这个节点算成或明显落空了没有。判定记进 meta，下一次开口时据此叫规划者（N-88）。
 // 不排外援：调不通就算了，第二天再看；面板上也能手动要下一份规划。
 async function checkNode({ chatKey, planId }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), a = cfg.stages.judge, p = cfg.planner;
     if (!p.judge || !a.baseUrl || !a.apiKey || !p.judgeModel) return;
     if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) return;
@@ -1508,6 +1525,7 @@ async function checkNode({ chatKey, planId }) {
 
 // 局势推演（situation.mjs，Q-8②）：新的剧情日第一次要那一格时顺手跑一次，不等；上次之后没记下新的事就不调模型。
 async function loudSituation({ chatKey, ids, why }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const msgs = store.currentMessages(chatKey);
     const tl = timelineFor(store, records, chatKey, msgs);
     const row = tl.rows.at(-1) ?? null;
@@ -1522,6 +1540,7 @@ async function loudSituation({ chatKey, ids, why }) {
 // 同一局的局势一次只跑一个：换天那次和闹大了那次前后脚时，后一个等前一个跑完再跑（看得到前一个的结果）
 const situationRuns = new Map();
 function runSituation(args) {
+    const stopped = playStop(store, args.chatKey, getConfig()); if (stopped) return Promise.resolve(stopped);
     const prev = situationRuns.get(args.chatKey) ?? Promise.resolve();
     const next = prev.then(() => situationOnce(args));
     situationRuns.set(args.chatKey, next.catch(() => {}));
@@ -1529,6 +1548,7 @@ function runSituation(args) {
 }
 // skip：玩家交代跳过的一段里补跑的那一次（slot.advanceWorld 排的，skip.mjs）：带上这是空白里第几天、玩家交代了什么
 async function situationOnce({ chatKey, day, loud = null, skip = null }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), a = cfg.stages.situation;
     if (!cfg.situation.enabled) return;
     const { baseUrl, apiKey, model } = a;
@@ -1860,7 +1880,7 @@ async function autoAnswer({ chatKey, who, answer }) {
 
 const settings = () => {
     const config = loadConfig(home);
-    return { code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
+    return { playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
 };
 const server = createServer(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
 server.on('error', error => {

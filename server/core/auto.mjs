@@ -16,7 +16,7 @@ import { normalizeRelations } from './relations.mjs';
 import { boardFor } from './board.mjs';
 import { doorFor } from './door.mjs';
 import { pendingFor } from './pending.mjs';
-import { timelineFor, paceFor } from './slot.mjs';
+import { timelineFor, paceFor, playModeOf } from './slot.mjs';
 import { isOpenMatter, INTENT, closeIntents } from './matters.mjs';
 import { sameName } from './setup.mjs';
 import { hasCard } from './arrival.mjs';
@@ -35,7 +35,8 @@ const live = messages => messages.filter(m => !m.hidden);
 const rowsOf = tl => pos => tl.rows.filter(r => r.pos <= pos).at(-1) ?? { day: tl.today, part: tl.part };
 
 export const knocksOf = (store, chatKey) => read(store, KNOCKS(chatKey), []).filter(k => k && k.who && num(k.at) != null);
-export const pendingKnock = (store, chatKey) => read(store, PENDING(chatKey), null);
+const blockedKnock = (store, chatKey, k) => playModeOf(store, chatKey) === 'memory' && ['pocket','contact','reach'].includes(k?.source?.type);
+export const pendingKnock = (store, chatKey) => { const k=read(store,PENDING(chatKey),null); return blockedKnock(store,chatKey,k) ? null : k; };
 export const writeKnocks = (store, chatKey, knocks) => write(store, KNOCKS(chatKey), knocks.slice(-KEEP));
 
 // 门上那一项他怎么来：说好了消息、电话的照说的；约好的、结算写的"他过来"、玩家叫的上门；在外头办事的照他去向里说的回法；其余发消息（最不扰人）
@@ -176,6 +177,8 @@ function lapseKnock(store, records, chatKey, k, { chat, messages, names, userNam
 export async function knockAdvance(store, records, chatKey, { arrive = null, judge = null, config = null, present = [] } = {}) {
     const auto = config?.auto ?? {};
     const out = { finalized: null, entered: [], lapsed: [], gone: [] };
+    const rawPending=read(store,PENDING(chatKey),null);
+    if (blockedKnock(store,chatKey,rawPending)) { write(store,PENDING(chatKey),null); dropKnockArrival(store,chatKey,rawPending); }
     const ctx = context(store, records, chatKey, { present });
     const { chat, messages, tl, rowAt, roster, relations, names, userName } = ctx;
     let knocks = knocksOf(store, chatKey);
@@ -200,7 +203,7 @@ export async function knockAdvance(store, records, chatKey, { arrive = null, jud
     const stateOf = k => (k.forced ? { state: k.forced, why: '玩家点了按钮', decided: k.forcedAt ?? { pos: messages.at(-1)?.pos, fp: messages.at(-1)?.fp }, asks: [] } : knockState(k, opts));
     const keep = [];
     for (const k of knocks) {
-        if (k.entered || k.lapsed) { keep.push(k); continue; }
+        if (k.entered || k.lapsed || blockedKnock(store,chatKey,k)) { keep.push(k); continue; }
         let s = stateOf(k);
         // 认不出是不是在回他的那几句：问一次便宜模型，判了写回，状态机再看一遍
         // 两句没回里有认不出的，也先问：第二句其实是在回他，就该进场不该作废
@@ -236,7 +239,7 @@ export function waitingKnock(store, records, chatKey) {
     const ctx = context(store, records, chatKey);
     const knocks = knocksOf(store, chatKey);
     for (const k of [...knocks].reverse()) {
-        if (k.entered || k.lapsed || k.forced) continue;
+        if (k.entered || k.lapsed || k.forced || blockedKnock(store,chatKey,k)) continue;
         const s = knockState(k, { messages: ctx.messages, knocks, userName: ctx.userName, roster: ctx.roster, relations: ctx.relations, rowAt: ctx.rowAt, parts: ctx.tl.parts });
         if (s.state === '候着' && s.message) return { who: k.who, avatar: k.avatar ?? null, way: k.way, at: k.at, unanswered: s.unanswered };
     }

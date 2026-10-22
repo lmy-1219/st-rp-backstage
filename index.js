@@ -1599,8 +1599,11 @@ async function loadExtensionRelease() {
     } catch { /* 开发安装没有发布清单，沿用开发流程。 */ }
     render();
 }
+export function playNoticeHtml(reason) {
+    return reason === '要先开每条总结' ? '<p role="status"><b>规划停了：这一局没开每条总结</b></p><button class="menu_button" type="button" data-action="play-extract-enable" title="打开本局总结，建议先核对调用估算。">打开每条总结</button>' : reason ? '<p role="status">这一局是只记忆，规划和推演已停。</p>' : '';
+}
 export function contentControlsHtml(content) {
-    return !content ? '' : `<b>口味</b>
+    return !content ? '' : `<label>玩法：<select data-content="play"><option value=""${content.ownPlay ? '' : ' selected'}>跟全局（当前 ${content.globalPlay === 'memory' ? '只记忆' : '完整'}）</option>${['完整','只记忆'].map(v=>`<option${content.ownPlay === v ? ' selected' : ''}>${v}</option>`).join('')}</select></label><small>${escapeHtml(content.playReason ?? '')}</small><b>口味</b>
             ${content.tiers.length > 1 ? `<label>档位：<select data-content="tier"><option value=""${content.ownTier ? '' : ' selected'}>跟全局默认（当前 ${escapeHtml(content.tier)}）</option>${content.tiers.map(t => `<option${content.ownTier === t ? ' selected' : ''}>${escapeHtml(t)}</option>`).join('')}</select></label>` : ''}
             <div class="rpe-pace" role="group" aria-label="节奏">${['快', '中', '慢'].map(p => `<button type="button" class="menu_button" title="调整事件疏密，建议先用中档。" data-pace="${p}" aria-pressed="${content.pace === p}">${p}</button>`).join('')}</div>
             ${content.tier === 'SFW' ? '<p>SFW 档不用亲密线</p>' : ''}
@@ -1745,7 +1748,7 @@ export function handoffLabel(h) {
     return h.kind === 'extract' ? '每条总结（从一小段对话里记下事实）' : h.title;
 }
 export function panelHelp(key) {
-    return ({"fresh-settings":"分两档去重复，建议先用免费第一档。","drift-clear":"清除变化预览，建议核对后再用。","extract-retry":"重试失败总结，建议先检查错误。","extract-retry-skipped":"补回跳过消息，建议核对后用。","handoff-cancel":"收起未交回答，建议暂不交时用。","handoff-copy":"复制完整题目，建议交给其他AI。","handoff-paste":"粘贴AI回答，建议核对后交回。","handoff-retry":"重调原模型，建议先检查连接。","handoff-submit":"提交并核对回答，建议保留完整内容。","pending-tab":"打开待办详情，建议按需查看。",'board-edit':'改正谁在哪，识别有误时用。','camera-now':'让旁白接一段，建议需要时用。','plan-reroll':'重排未用候选，建议失败或跑偏时用。','plan-reveal':'查看已排事件，介意剧透别打开。',setup:'填写本局设定，建议开局先核对。',cast:'管理本局人物，建议开局核对。',relations:'管理初始关系，建议开局核对。',presets:'保存或套用局设定，建议新局用。','opening-pack':'整套导入并建新群，建议先预览。',lore:'修改世界书知情，建议判错时用。',records:'看每条总结的来源，建议疑错时查。',ledger:'查看钱与家当，建议涉及交易时查。',pending:'查看约定的进展，建议按需查。',episodes:'按场回看经过，建议回顾时用。',talk:'问事或提改动，点记才写入。',stages:'选择钥匙和型号，建议先配好。',advanced:'打开更多选项，建议需要时再改。','advanced-back':'回到常用设置，建议平时用。','prompt-pack':'调整口味文字，建议先导出备份。','prompt-preview':'查看规划题目，建议先核对。',camera:'配置旁白载体，建议群聊需要时用。','plan-request':'请求下一份规划，建议确有需要再用。',places:'调整场记位置，建议先用默认。',tuning:'调整开关和参数，建议先用默认。',extract:'控制每条总结，建议保持开启。',backfill:'补总结接入前消息，建议先看估算。',sync:'同步当前采用稿，建议状态落后时用。',update:'检查代码版本，建议提示更新时用。',preview:'查看角色拿到的场记，建议排错时用。',timings:'查看本轮耗时，建议卡顿时用。','plan-attempts':'查看规划尝试，建议失败时查。',rejected:'查看被拦的内容，建议排错时查。',confirm:'确认大量删稿，建议核对后再点。',absencePaused:'暂停离开计时，建议离线不推进时开。',windowConnected:'让本窗口使用系统，建议按局开。',dailyBudget:'设置后台预算，建议先设上限。',pack:'选择本局素材，建议没有就留空。',awayMode:'选择离开怎么算，建议按玩法选。',speakFirst:'回来让角色先说，建议按需开。',cameraJoin:'让旁白接没卡人物，建议群聊开。',historyRounds:'限制送出的历史，建议先用默认。',digestOld:'把旧回复换成大意，建议按需开。',digestKeep:'保留近期原文，建议先用默认。',loreFilter:'按人物筛世界书，建议需要隔离时开。',newChats:'设置新窗口接入方式，建议先问。',testSlot:'检查注入接线，建议平时关闭。',enabled:'控制系统供料，建议按需启用。'})[key] ?? '';
+    return ({playMode:'选择全局默认玩法，每局可以单独改。',"fresh-settings":"分两档去重复，建议先用免费第一档。","drift-clear":"清除变化预览，建议核对后再用。","extract-retry":"重试失败总结，建议先检查错误。","extract-retry-skipped":"补回跳过消息，建议核对后用。","handoff-cancel":"收起未交回答，建议暂不交时用。","handoff-copy":"复制完整题目，建议交给其他AI。","handoff-paste":"粘贴AI回答，建议核对后交回。","handoff-retry":"重调原模型，建议先检查连接。","handoff-submit":"提交并核对回答，建议保留完整内容。","pending-tab":"打开待办详情，建议按需查看。",'board-edit':'改正谁在哪，识别有误时用。','camera-now':'让旁白接一段，建议需要时用。','plan-reroll':'重排未用候选，建议失败或跑偏时用。','plan-reveal':'查看已排事件，介意剧透别打开。',setup:'填写本局设定，建议开局先核对。',cast:'管理本局人物，建议开局核对。',relations:'管理初始关系，建议开局核对。',presets:'保存或套用局设定，建议新局用。','opening-pack':'整套导入并建新群，建议先预览。',lore:'修改世界书知情，建议判错时用。',records:'看每条总结的来源，建议疑错时查。',ledger:'查看钱与家当，建议涉及交易时查。',pending:'查看约定的进展，建议按需查。',episodes:'按场回看经过，建议回顾时用。',talk:'问事或提改动，点记才写入。',stages:'选择钥匙和型号，建议先配好。',advanced:'打开更多选项，建议需要时再改。','advanced-back':'回到常用设置，建议平时用。','prompt-pack':'调整口味文字，建议先导出备份。','prompt-preview':'查看规划题目，建议先核对。',camera:'配置旁白载体，建议群聊需要时用。','plan-request':'请求下一份规划，建议确有需要再用。',places:'调整场记位置，建议先用默认。',tuning:'调整开关和参数，建议先用默认。',extract:'控制每条总结，建议保持开启。',backfill:'补总结接入前消息，建议先看估算。',sync:'同步当前采用稿，建议状态落后时用。',update:'检查代码版本，建议提示更新时用。',preview:'查看角色拿到的场记，建议排错时用。',timings:'查看本轮耗时，建议卡顿时用。','plan-attempts':'查看规划尝试，建议失败时查。',rejected:'查看被拦的内容，建议排错时查。',confirm:'确认大量删稿，建议核对后再点。',absencePaused:'暂停离开计时，建议离线不推进时开。',windowConnected:'让本窗口使用系统，建议按局开。',dailyBudget:'设置后台预算，建议先设上限。',pack:'选择本局素材，建议没有就留空。',awayMode:'选择离开怎么算，建议按玩法选。',speakFirst:'回来让角色先说，建议按需开。',cameraJoin:'让旁白接没卡人物，建议群聊开。',historyRounds:'限制送出的历史，建议先用默认。',digestOld:'把旧回复换成大意，建议按需开。',digestKeep:'保留近期原文，建议先用默认。',loreFilter:'按人物筛世界书，建议需要隔离时开。',newChats:'设置新窗口接入方式，建议先问。',testSlot:'检查注入接线，建议平时关闭。',enabled:'控制系统供料，建议按需启用。'})[key] ?? '';
 }
 export function stageHelp(id) {
     return ({extract:'逐条总结事实与知情，推荐可靠模型。',keys:'为旧事配检索词，推荐快速模型。',assemble:'把旧事串成回忆，建议按需开启。',judge:'判断转向与节点，推荐快速可靠模型。',plan:'安排下个节点，推荐较强创作模型。',away:'推离开后的动向，推荐较强模型。',advisor:'查资料作参谋，推荐阅读可靠模型。',setup:'拆分开局大纲，推荐长文可靠模型。',talk:'问事或提改动，推荐可靠模型。',setupKeys:'给前史配词，推荐快速模型。',fresh:'换掉重复写法，推荐快速模型。',profile:'读角色资料，推荐阅读可靠模型。',scene:'看场面起头，推荐快速模型。',prep:'整理规划备料，推荐阅读可靠模型。',lore:'判断世界书知情，推荐可靠模型。',situation:'推各方动向，有资料再启用。',embed:'按含义找旧事，需要嵌入模型。'})[id] ?? '';
@@ -1766,7 +1769,7 @@ export function panelPageHtml(page) {
     if (page === 'story') return `<div data-joined>${card('这一局', '<p><small>有局预设：套上就行。没有：填开局单，或贴大纲让后台拆，核对确认后可保存、导出为局预设。开局包是作者用 skill 生成的整套卡、书和设定，点“导入开局包”会新建群。</small></p><div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
         <div class="rpe-grid">${button('setup', '开局单')}${button('cast', '名册')}${button('relations', '关系表')}${button('presets', '局预设')}${button('opening-pack', '导入开局包')}</div></div>`;
     if (page === 'ledger') return `<div data-joined class="rpe-stack">${button('records', '总结详情')}${button('ledger', '账本')}${button('pending', '约定历史')}${button('episodes', '剧情总览')}${button('talk', '任意调整 <small>几美分一句</small>')}</div>`;
-    if (page === 'settings') return `${card('设置', '<label class="checkbox_label"><input type="checkbox" data-opt="windowConnected"> 本窗口接入</label><label>每天最多花（美元）<input class="text_pole" type="number" min="0" max="500" step="0.1" data-opt="dailyBudget" aria-label="每天最多花（美元）"></label>' + button('stages', '钥匙和模型') + '<small data-role="edition"></small><a data-role="release" data-action="update" hidden href="#">检查更新</a>')}${card('去复读', '<small>先用免费第一档；第二档只改绑定角色。</small>' + button('fresh-settings', '去复读两档与口吻语料'))}${button('advanced', '高级（创作者用）›')}`;
+    if (page === 'settings') return `${card('设置', '<label>玩法（全局默认）：<select data-opt="playMode"><option value="full">完整</option><option value="memory">只记忆</option></select></label><small>只记忆：只留记性（总结、召回、不串知），不排剧情、不推演，省钱；角色主动性会弱一些。</small><label class="checkbox_label"><input type="checkbox" data-opt="windowConnected"> 本窗口接入</label><label>每天最多花（美元）<input class="text_pole" type="number" min="0" max="500" step="0.1" data-opt="dailyBudget" aria-label="每天最多花（美元）"></label>' + button('stages', '钥匙和模型') + '<small data-role="edition"></small><a data-role="release" data-action="update" hidden href="#">检查更新</a>')}${card('去复读', '<small>先用免费第一档；第二档只改绑定角色。</small>' + button('fresh-settings', '去复读两档与口吻语料'))}${button('advanced', '高级（创作者用）›')}`;
     if (page !== 'advanced') return '';
     return `${button('advanced-back', '‹ 返回设置')}
         ${card('口味', '<div data-role="prompt-pack-controls"></div>' + button('prompt-pack', '看／改口味包 · 导入／导出') + button('prompt-preview', '预览规划题目（不花钱）'))}
@@ -1838,7 +1841,7 @@ function mountPanel() {
         for (const button of panel.querySelectorAll('[data-action="plan-reroll"]')) button.disabled = !state.chatKey || ps?.provider === 'off';
         $('[data-role="plan-row"]').hidden = !state.chatKey;
         const planning = st?.planning ?? ps?.planning;
-        $('[data-role="plan"]').textContent = !state.chatKey || !ps ? '' : ps.provider === 'off' ? '规划关着'
+        $('[data-role="plan"]').textContent = !state.chatKey || !ps ? '' : ps.playReason ? ps.playReason + '，规划已停' : ps.provider === 'off' ? '规划关着'
             : (planning?.running || ps.last?.status === 'requested' ? '在规划' : planning?.failure || ps.last?.status === 'failed' ? '没成功（' + (planning?.message || '上次没写成') + '）' : ps.last?.status === 'ready' ? '规划好了' : '还没有规划')
               + ' · 口袋 ' + (ps.counts?.pocket ?? 0) + ' 件 · 等着 ' + (ps.counts?.waiting ?? 0) + ' 件';
         $('[data-opt="windowConnected"]').checked = !!state.chatKey && st?.enabled !== false;
@@ -1910,6 +1913,10 @@ function mountPanel() {
             ex.failing < 2 && ex.skipped?.length ? `<div style="color:var(--SmartThemeQuoteColor,#888)">有 ${ex.skipped.length} 条消息在总结时被跳过了（第 ${ex.skipped.join('、')} 条）。 <button class="menu_button" type="button" data-action="extract-retry-skipped" title="补回跳过消息，建议核对后用。">重记它们</button></div>` : '',
             ex.pendingMessages >= 4 ? `<div style="color:var(--SmartThemeQuoteColor,#888)">每条总结落后 ${ex.pendingMessages} 条</div>` : '',
         ].filter(Boolean).join('') + driftHtml(st?.drift);
+        const playReason = state.planStatus?.playReason ?? state.content?.playReason ?? '';
+        $('[data-role="content-controls"]').insertAdjacentHTML('beforeend', playNoticeHtml(playReason));
+        const playSelect=$('[data-opt="playMode"]'); if(playSelect) playSelect.value=state.globalPlay ?? state.content?.globalPlay ?? 'full';
+        for(const el of panel.querySelectorAll('[data-action="plan-request"], [data-action="plan-reroll"], [data-opt="awayMode"], [data-opt="speakFirst"]')) { el.disabled=!!playReason; el.title=playReason || '按需使用'; }
         const plan = state.plan, joined = !!state.chatKey && s.enabled;
         for (const sel of ['[data-role="ledger"]', '[data-action="extract"]', '[data-action="backfill"]', '[data-action="records"]', '[data-action="rejected"]', '[data-action="ledger"]', '[data-action="cast"]', '[data-action="setup"]', '[data-action="relations"]', '[data-action="presets"]']) $(sel).hidden = !joined || !plan;
         if (joined && plan) {
@@ -1951,7 +1958,7 @@ function mountPanel() {
         const target = event.target.closest('button,a');
         if (target?.dataset.tab) {
             showPage(target.dataset.tab, true);
-            if (target.dataset.tab === 'settings') try { const t = await api('tuning', {}); state.dailyBudget = t.knobs.find(k => k.path === 'extractor.dailyBudgetUsd')?.value; render(); } catch {}
+            if (target.dataset.tab === 'settings') try { const t = await api('tuning', {}); state.dailyBudget = t.knobs.find(k => k.path === 'extractor.dailyBudgetUsd')?.value; state.globalPlay = t.knobs.find(k => k.path === 'play.mode')?.value ?? 'full'; render(); } catch {}
             return;
         }
         if (target?.dataset.pace) {
@@ -2025,15 +2032,20 @@ function mountPanel() {
                 await refreshPlan();
                 state.status = await api('status', { chatKey: state.chatKey });
             }
-            if (action === 'extract' && state.plan) {
-                const turningOn = !state.plan.enabled, c = ctx();
+            if ((action === 'extract' || action === 'play-extract-enable') && state.plan) {
+                const turningOn = action === 'play-extract-enable' || !state.plan.enabled, c = ctx();
+                let fromNow = false;
                 if (turningOn && state.plan.pendingMessages) {
                     const p = state.plan;
-                    const ok = await c.callGenericPopup(`这个窗口有 ${p.pendingMessages} 条消息待每条总结，用 ${escapeHtml(p.model)} 全记一遍预计约 ${p.estimate.calls} 次调用、约 $${p.estimate.usd.toFixed(2)}（按配置里的单价估）。今天的花费上限是 $${p.dailyBudgetUsd}，到了会自动停。开始吗？`, c.POPUP_TYPE.CONFIRM);
-                    if (ok !== c.POPUP_RESULT.AFFIRMATIVE) return;
+                    // 默认"从现在开始"：已有的不补、不花钱；要全补是另一个按钮，写清次数和钱
+                    const pick = await c.callGenericPopup(`这个窗口已经有 ${p.pendingMessages} 条消息没总结过。<br><b>从现在开始</b>：只总结以后的新消息，旧的不补，不花钱；以后想补，点"补记接入以前的消息"。<br><b>全补</b>：用 ${escapeHtml(p.model)} 把这 ${p.pendingMessages} 条都总结一遍，预计约 ${p.estimate.calls} 次调用、约 $${p.estimate.usd.toFixed(2)}（按配置里的单价估）；今天的花费上限是 $${p.dailyBudgetUsd}，到了会自动停。`, c.POPUP_TYPE.TEXT, '', { okButton: '从现在开始', cancelButton: '取消', customButtons: [{ text: '全补', result: c.POPUP_RESULT.CUSTOM1 }] });
+                    if (pick === c.POPUP_RESULT.AFFIRMATIVE) fromNow = true;
+                    else if (pick !== c.POPUP_RESULT.CUSTOM1) return;
                 }
-                await api('extract-enable', { chatKey: state.chatKey, enabled: turningOn });
+                await api('extract-enable', { chatKey: state.chatKey, enabled: turningOn, ...(fromNow ? { fromNow: true } : {}) });
                 await refreshPlan();
+                await refreshPlanStatus();
+                await refreshContent();
             }
             if (action === 'backfill' && state.plan?.olderMessages) {
                 const p = state.plan, c = ctx();
@@ -2144,6 +2156,10 @@ function mountPanel() {
         }
         const opt = event.target?.dataset?.opt;
         if (!opt) return;
+        if (opt === 'playMode') {
+            try { const t=await api('tuning',{set:'play.mode',value:event.target.value}); state.globalPlay=t.knobs.find(k=>k.path==='play.mode')?.value; await refreshContent(); await refreshPlanStatus(); render(); }
+            catch(error){globalThis.toastr?.error(error.message);render();} return;
+        }
         if (opt === 'windowConnected') {
             try {
                 if (!state.chatKey) { if (event.target.checked) await join(); }

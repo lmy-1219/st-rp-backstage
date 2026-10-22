@@ -22,6 +22,7 @@ const FRESH_KNOBS = [
     {path:'advisor.enabled',type:'bool',label:'参谋'},
 ];
 export const KNOBS = [
+    { path: 'play.mode', group: '玩法', type: 'enum', options: [['full', '完整'], ['memory', '只记忆']], label: '全局默认玩法', help: '选择默认玩法，每局可以单独改。' },
     { path: 'cast.promoteRecords', group: '名册', type: 'int', min: 1, max: 10000, label: "无卡人物多少条记录后提示建卡", help: "建卡提示的记录门槛，建议先用默认。" },
     { path: 'cast.promoteWeight', group: '名册', type: 'int', min: 1, max: 3, label: "提示建卡的关系变化分量", help: "建卡提示的关系门槛，建议先用默认。" },
     { path: 'content.defaultTier', group: '口味', type: 'enum', options: CONTENT_TIERS.map(t => [t, t]), label: "新局默认档位", help: "新局内容档位，建议按玩法选。" },

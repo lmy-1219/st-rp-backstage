@@ -1,7 +1,7 @@
 // 本机后台的 HTTP 接口。只听 127.0.0.1；浏览器不直接连它，经 ST 里的转发插件过来（plugin/）。
 import http from 'node:http';
 import path from 'node:path';
-import { buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
+import { playModeOf, playStop, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
 import { labelsOf, sinceWord, dateIn, dayNumber } from './timeline.mjs';
 import { validMark, planFailure } from './store.mjs';
 import { digests } from './digest.mjs';
@@ -89,7 +89,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         const options = promptOptionsFor(store, chatKey), env = promptEnvironmentFor(store);
         const rows = intimateRows(options.setup, { names: setupNames(store.requireChat(chatKey).story_id) });
         const progress = intimateProgressFor(store, records, chatKey);
-        return { tier: options.tier, tiers: allowedTiers(options.config), ownTier: options.setup.档位 ?? '', pace: options.setup.节奏 ?? '中',
+        return { playMode: playModeOf(store, chatKey, options.config), globalPlay: options.config.play?.mode ?? 'full', ownPlay: options.setup.玩法 ?? '', playReason: playStop(store, chatKey, options.config)?.reason ?? '', tier: options.tier, tiers: allowedTiers(options.config), ownTier: options.setup.档位 ?? '', pace: options.setup.节奏 ?? '中',
             selected: options.selected, pack: options.pack, globalPack: options.config.content?.pack ?? DEFAULT_PACK, warning: options.warning,
             ownPack: store.getMeta(`prompt_pack:${store.requireChat(chatKey).story_id}`) ?? '', packs: env?.packs?.list() ?? [], slots: slotTable(options),
             pureIntimateInactive: options.tier === '纯NSFW' && !rows.some(r => r.ok),
@@ -221,7 +221,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             return result;
         },
         'POST /v1/extract-plan': b => needWorker().plan({ chatKey: str(b.chatKey, 'chatKey') }),
-        'POST /v1/extract-enable': b => needWorker().setEnabled({ chatKey: str(b.chatKey, 'chatKey'), enabled: !!b.enabled, backfill: b.backfill === true }),
+        'POST /v1/extract-enable': b => needWorker().setEnabled({ chatKey: str(b.chatKey, 'chatKey'), enabled: !!b.enabled, backfill: b.backfill === true, fromNow: b.fromNow === true }),
         'POST /v1/extract-run': b => needWorker().run({ chatKey: str(b.chatKey, 'chatKey'), maxWindows: Math.min(200, Math.max(1, Number(b.maxWindows) || 1)) }),
         'POST /v1/extract-retry-skipped': b => needWorker().retrySkipped({ chatKey: str(b.chatKey, 'chatKey') }),
         'POST /v1/records': b => {
@@ -241,11 +241,12 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 if (!line || !current || !current.choices.includes(b.value)) bad('只能改回这一条已走过的阶梯或开局原文');
                 store.putIntimateProgress(chatKey, [{ 谁和谁: line.谁, 现在: b.value, 依据: '用户手动修改' }], { storyDay: storyContext(store, records, chatKey).today, source: 'user' });
             } else if (b.action === 'settings') {
+                if (b.play !== undefined && !['', '完整', '只记忆'].includes(b.play)) bad('玩法要选完整或只记忆');
                 if (b.tier !== undefined && b.tier !== '' && !allowedTiers(options.config).includes(b.tier)) bad('系统没有开放这个档位');
                 if (b.pace !== undefined && !['快', '中', '慢'].includes(b.pace)) bad('节奏要选快、中或慢');
                 const current = store.setupOf(storyId);
                 if (!current && store.setupDraft(storyId)) bad('请先保存开局单，再改这一局的口味');
-                const form = { ...(b.tier !== undefined ? { 档位: b.tier } : {}), ...(b.pace !== undefined ? { 节奏: b.pace } : {}) };
+                const form = { ...(b.play !== undefined ? { 玩法: b.play } : {}), ...(b.tier !== undefined ? { 档位: b.tier } : {}), ...(b.pace !== undefined ? { 节奏: b.pace } : {}) };
                 const data = formMerge(current?.data, form);
                 if (b.adult !== undefined) {
                     if (!Number.isInteger(b.adult?.index) || typeof b.adult?.value !== 'boolean' || !data.亲密线?.[b.adult.index]) bad('没有这条亲密线');
@@ -696,6 +697,8 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const chatKey = str(b.chatKey, 'chatKey');
             store.requireChat(chatKey);
             const planner = settings().planner;
+            const stopped = playStop(store, chatKey);
+            if ((b.request || b.reroll) && stopped) return { ...stopped, message: stopped.reason + '，规划已停' };
             // provider: 'queue'：这一次只出外援包、不调 API（本机工具把写好的规划交回来用；转发插件不传这个）
             if (b.reroll && !planner) bad('规划目前关闭');
             if (b.reroll && planner) requestPlanNow(store, records, chatKey, planner, { reason: 'reroll' });
@@ -704,7 +707,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const menu = store.menuOf(chatKey);
             const count = st => menu.filter(m => m.status === st).length;
             return {
-                planning: store.planningState(chatKey),
+                playMode: playModeOf(store,chatKey), playReason: playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey),
                 provider: planner?.provider ?? 'off', last: last ? { id: last.id, status: last.status, reason: last.reason, createdAt: last.created_at, readyAt: last.ready_at } : null,
                 counts: { waiting: count('waiting'), pocket: count('pocket'), used: count('used'), sunk: count('sunk') + count('sunk_told'), void: count('void'), expired: count('expired') },
                 ...(b.reveal ? (ready => ({ goal: ready?.goal ?? null, node: ready?.node ? JSON.parse(ready.node) : null, menu }))(store.lastReadyPlan(chatKey)) : {}),
@@ -917,6 +920,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/return': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             const absence = settings().absence ?? {};
+            if (playStop(store,chatKey)) { noteAbsence(store,chatKey,absence); return {away:false,...playStop(store,chatKey)}; }
             if (absenceModeOf(store, chatKey, absence) === 'pause') return { away: false };
             noteAbsence(store, chatKey, absence);
             const lastPos = store.currentMessages(chatKey).at(-1)?.pos;
@@ -944,7 +948,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/status': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             const extract = worker ? worker.plan({ chatKey }) : null;
-            return { ...store.status({ chatKey }), planning: store.planningState(chatKey), intimateStopped: intimateStopped(store, records, chatKey), extract, leaveUnjudged: settings?.().auto?.unjudged?.({ chatKey }) ?? 0, handoffs: handoffs?.list().length ?? 0, notice: JSON.parse(store.getMeta(`notice:${chatKey}`) ?? 'null'), drift: JSON.parse(store.getMeta(`drift:${chatKey}`) ?? 'null'), cut: settings?.().modelTally?.() ?? null };
+            return { ...store.status({ chatKey }), playMode:playModeOf(store,chatKey), playReason:playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), intimateStopped: intimateStopped(store, records, chatKey), extract, leaveUnjudged: settings?.().auto?.unjudged?.({ chatKey }) ?? 0, handoffs: handoffs?.list().length ?? 0, notice: JSON.parse(store.getMeta(`notice:${chatKey}`) ?? 'null'), drift: JSON.parse(store.getMeta(`drift:${chatKey}`) ?? 'null'), cut: settings?.().modelTally?.() ?? null };
         },
         // 外援队列面板：复制题目、贴回答案、再试 API、自动重试开关。
         'POST /v1/handoff-ui': async b => {

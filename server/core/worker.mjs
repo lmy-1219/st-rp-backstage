@@ -84,10 +84,12 @@ export function createWorker({ store, records, getConfig, clientFactory = create
         };
     }
 
-    function setEnabled({ chatKey, enabled, backfill = false }) {
+    function setEnabled({ chatKey, enabled, backfill = false, fromNow = false }) {
         store.requireChat(chatKey);
         records.setExtract(chatKey, !!enabled);
         if (backfill) store.db.prepare('update chats set extract_from = 0 where key = ?').run(chatKey);   // 补记接入以前的旧消息
+        // 从现在开始（用户 10/22：老窗口一开就全补，钱包吃不消）：已有的消息不补，以后面板上"补记接入以前的消息"还能补
+        else if (enabled && fromNow) { const last = store.currentMessages(chatKey).at(-1)?.pos; store.db.prepare('update chats set extract_from = ? where key = ?').run(Number.isInteger(last) ? last + 1 : 0, chatKey); }
         if (enabled) kick();
         return { ok: true };
     }

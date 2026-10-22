@@ -17,7 +17,7 @@ import { paceCell, paceWords } from './tempo.mjs';
 import { HOLD_KEYS, holdOf, isHeld } from './held.mjs';
 
 // 主角团（章程 K1）：故事围着转的那几个人（名字，含玩家的角色）→ 规划简报；规划围着他们排（crewOf）
-export const SECTIONS = ['基调', '类别', '主角团', '玩家性别', '档位', '开场', '时间', '节奏', '钱', '生活现状', '开场状态', '原则', '前史', '走向', '口径', '主线', '储备线', '亲密线', '意向', '其他'];
+export const SECTIONS = ['基调', '类别', '主角团', '玩家性别', '档位', '玩法', '开场', '时间', '节奏', '钱', '生活现状', '开场状态', '原则', '前史', '走向', '口径', '主线', '储备线', '亲密线', '意向', '其他'];
 const LAYERS = ['原作', '本局私设', '某人记得的版本'];
 
 // 人物开场状态（用户 10/9）：开场那一刻"这个人此刻怎么样"，每行：谁｜哪一类｜是什么｜还有谁知道。各类接到哪儿见 opening.mjs。
@@ -96,6 +96,7 @@ export function mergeSetups(results) {
         if (data.主角团?.length) out.主角团 = [...new Set([...(out.主角团 ?? []), ...data.主角团])];
         if (!out.玩家性别 && genderOf(data.玩家性别)) out.玩家性别 = data.玩家性别;
         if (!out.档位 && CONTENT_TIERS.includes(data.档位)) out.档位 = data.档位;
+        if (!out.玩法 && ['完整','只记忆'].includes(data.玩法)) out.玩法 = data.玩法;
         out.时间 ??= data.时间 ?? null;
         if (!out.节奏 && data.节奏) out.节奏 = data.节奏;
         for (const k of ['钱', '生活现状', '开场状态', '原则', '前史', '走向', '口径', '主线', '储备线', '意向']) {
@@ -207,6 +208,7 @@ export function parseSetup(text, { source = '', names: roster = null } = {}) {
         ...(crewCell(raw.主角团).length ? { 主角团: crewCell(raw.主角团) } : {}),   // 写了才有这一格（老开局单一个字不变）
         ...(genderOf(raw.玩家性别) ? { 玩家性别: raw.玩家性别 } : {}),
         ...(CONTENT_TIERS.includes(raw.档位) ? { 档位: raw.档位 } : {}),
+        ...(['完整','只记忆'].includes(raw.玩法) ? { 玩法: raw.玩法 } : {}),
         钱: list(raw.钱).map(x => item(x, { 谁: str, 多少: v => parseAmount(v), 谁知道: v => names(v).filter(n => n !== '所有人') })).filter(x => x.谁 && x.多少),
         生活现状: list(raw.生活现状).map(x => item(x, { 谁: str, 类: str, 是: str, 在哪: str, 谁知道: v => names(v).filter(n => n !== '所有人') })).filter(x => x.谁 && x.是 && LIFE_KINDS.includes(x.类)),
         开场状态: list(raw.开场状态).map(x => item(x, { 谁: str, 类: kindOf, 是: str, 谁知道: names, 跟谁: names, 多少: v => parseAmount(v), 圈子: str })).filter(x => x.谁 && x.是 && x.类).map(openExtras),
@@ -272,6 +274,7 @@ export function toText(data) {
     out.push(`【主角团】（${HINT.主角团}）${(data.主角团 ?? []).join('、')}`, '');
     if (genderOf(data.玩家性别)) out.push(`【玩家性别】${data.玩家性别}`, '');
     if (CONTENT_TIERS.includes(data.档位)) out.push(`【档位】${data.档位}`, '');
+    if (['完整','只记忆'].includes(data.玩法)) out.push(`【玩法】${data.玩法}`, '');
     block('开场', [data.开场 ?? '']);
     const t = data.时间 ?? {};
     block('时间', TIME_KEYS.map(k => `${k}：${k === '天气' ? (t.天气 ?? []).map(x => `${x.种} ${x.份}`).join(' ｜ ') : k === '尺度' ? scaleText(t.尺度) : k === '纪年' ? eraCell(t.纪年).map(x => `${x.名} ${x.起}`).join(' ｜ ') : t[k] ?? ''}`));
@@ -305,6 +308,7 @@ export function fromText(text, { names: roster = null } = {}) {
             if (section === '节奏') setPace(data, head[2].replace(/^（[^）]*）/, ''));
             if (section === '玩家性别') setGender(data, head[2].replace(/^（[^）]*）/, ''));
             if (section === '档位') setContentTier(data, head[2]);
+            if (section === '玩法') setPlay(data, head[2]);
             if (section === '主角团') setCrew(data, head[2].replace(/^（[^）]*）/, ''));
             continue;
         }
@@ -313,6 +317,7 @@ export function fromText(text, { names: roster = null } = {}) {
         if (section === '主角团') { setCrew(data, rawLine.replace(/^\s*[-·•]\s*/, ''), { add: true }); continue; }
         if (section === '玩家性别') { if (rawLine.trim()) setGender(data, rawLine); continue; }
         if (section === '档位') { if (rawLine.trim()) setContentTier(data, rawLine); continue; }
+        if (section === '玩法') { if (rawLine.trim()) setPlay(data, rawLine); continue; }
         if (section === '节奏') { if (rawLine.trim()) setPace(data, rawLine); continue; }
         if (section === '时间') {
             const kv = rawLine.match(/^\s*[-·•]?\s*(日期|时段|从哪天算|第几天|天气|气温|尺度|纪年)\s*[：:]\s*(.*)$/);
@@ -400,6 +405,7 @@ function setCrew(d, v, { add = false } = {}) {
 // 全剧情必要角色写成一条原则（"这一局必须有的角色：……"，有了就换）。
 export const MUST_CAST = '这一局必须有的角色：';
 function setGender(data, value) { if (genderOf(value)) data.玩家性别 = value; else delete data.玩家性别; }
+function setPlay(data, value) { const v=String(value ?? '').trim(); if (['完整','只记忆'].includes(v)) data.玩法=v; else delete data.玩法; }
 function setContentTier(data, value) { const tier = String(value ?? '').replace(/\s/g, ''); if (CONTENT_TIERS.includes(tier)) data.档位 = tier; else delete data.档位; }
 const blankSetup = () => ({ 基调: '', 类别: [], 开场: '', 时间: null, 钱: [], 生活现状: [], 开场状态: [], 原则: [], 前史: [], 走向: [], 口径: [], 主线: [], 储备线: [], 意向: [], 其他: '' });
 const linesOf = v => String(v ?? '').split(/\r?\n/).map(s => s.replace(/^\s*[-·•]\s*/, '').trim()).filter(Boolean);
@@ -427,6 +433,7 @@ export function formMerge(data, form = {}) {
     // 主角团（章程 K1）：名字数组或"、"隔开的字符串，整个替换；空的＝清空；没带这一格（旧版扩展）＝原样留着
     if (form.玩家性别 !== undefined) setGender(d, form.玩家性别);
     if (form.档位 !== undefined) setContentTier(d, form.档位);
+    if (form.玩法 !== undefined) setPlay(d, form.玩法);
     if (form.主角团 !== undefined) setCrew(d, Array.isArray(form.主角团) ? form.主角团 : String(form.主角团 ?? '').replace(/\n/g, '、'));
     for (const l of linesOf(form.主线)) if (!d.主线.some(x => x.内容 === l || x.名 === l)) d.主线.push({ 名: '', 内容: l });
     const must = (l, 名) => { if (!d.储备线.some(x => x.内容 === l)) d.储备线.push({ 名, 内容: l, 可选: false, 条件: '', 露法: '', 门槛: '', 终局: false, 拉扯: '' }); };

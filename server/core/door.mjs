@@ -10,7 +10,7 @@ import { absentPeople, pickContact } from './contacts.mjs';
 import { sharedMatter } from './matters.mjs';
 import { narrationOf, PARTS } from './timeline.mjs';
 // slot.mjs 也 import 这里（旁白那一格读名单）：两边都只在调用时用对方，循环引用没事
-import { timelineFor } from './slot.mjs';
+import { timelineFor, playModeOf } from './slot.mjs';
 import { enteredSince } from './landing.mjs';
 
 // 旁白留的记号"（该来：名字／方式）"：方式可缺；不一定在最末（模型常在后面又补一句），几处都有就认最后一个、全剥掉
@@ -35,6 +35,7 @@ const rank = c => (c.sent ? 0.5 : priority[c.source.type]);
 // input：board、pending、roster、menu、relations、userName、recentUser、holds、timeline、messages、reach、request、anchors（隔离区间）、arrivals（进场记录）、members（群里的卡）。
 export function doorAt(input = {}) {
     const { board = {}, pending = {}, roster = [], menu = [], userName = '玩家', recentUser = '', timeline = {}, messages = [], reach = null, request = null } = input;
+    const memory = input.playMode === 'memory';
     const names = roster.map(e => e.name);
     const rel = input.relations ? normalizeRelations(input.relations) : null;
     const same = (a, b) => !!a && !!b && (sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names)));
@@ -47,21 +48,21 @@ export function doorAt(input = {}) {
         if (['present', 'remote'].includes(person.status) || (input.present ?? []).some(n => same(n, who))) continue;
         if ((input.holds ?? []).some(h => same(h.who, who) && h.at <= last && partsBetween(rowAt(h.at), rowAt(last), timeline.parts ?? PARTS) <= 0)) continue;
         const own = list(pending.items).filter(p => same(p.owner, who) || (p.who ?? []).some(n => same(n, who)));
-        const contacts = own.filter(p => p.kind === '联系' && !['办了', '用上了', '失效'].includes(p.status));
+        const contacts = (memory ? [] : own).filter(p => p.kind === '联系' && !['办了', '用上了', '失效'].includes(p.status));
         // 他牵头、已经拿出来了、后半截还等他自己说的（status shown）也在门上：别人不替他交后半截（slot.menuFor）
         // 拿出来那条以后他自己进了场（landing.enteredSince）：这件门上不再挂——他来过了，后半截他在场时自己说（slot.menuFor 照旧给他）
         const pocketAt = m => (m.status === 'shown' ? m.settled_pos ?? m.pocket_pos : m.pocket_pos);
-        const pockets = menu.filter(m => same(m.who, who) && (m.status === 'pocket' || m.status === 'shown') && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
+        const pockets = (memory ? [] : menu).filter(m => same(m.who, who) && (m.status === 'pocket' || m.status === 'shown') && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
             && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivals ?? [] }));
-        const reached = reach && same(reach.person ?? reach.who, who);
+        const reached = !memory && reach && same(reach.person ?? reach.who, who);
         const called = callsFor(narrationOf(recentUser), [who, ...(rel ? personOf(rel, who, names)?.又名 ?? [] : [])]);
         const requested = request && same(request.who, who) && last >= request.at && last - request.at <= 8;
-        // 这局从没出场的：后台排了他（口袋、来联系、结算的联系）或者玩家叫他，才进名单
-        if (person.status === 'never' && !contacts.length && !pockets.length && !reached && !called && !requested) continue;
         const promises = list(pending.items).filter(p => p.kind === '约定' && ['到了', '排着'].includes(p.status)
             && (person.since == null || p.since >= person.since - 3)
             && [...(p.who ?? []), ...(p.with ?? [])].some(n => same(n, who))
             && [...(p.who ?? []), ...(p.with ?? [])].some(n => same(n, userName)));
+        // 这局从没出场的：后台排了他（口袋、来联系、结算的联系）或者玩家叫他，才进名单
+        if (person.status === 'never' && !contacts.length && !pockets.length && !reached && !called && !requested && !(memory && promises.length)) continue;
         const errands = own.filter(p => p.kind === '去办' && same(p.owner, who) && (person.since == null || p.since >= person.since - 3));
         const place = person.place || errands.find(e => concrete(e.place))?.place || promises.find(p => concrete(p.place))?.place;
         // 时机由玩家定（D-175）：刚走的、还在外头办事的也给"他过来"；"去找他"只要他在这局出现过（进场那份照他的去向写他在哪），或者知道他在哪
@@ -156,7 +157,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const justBack = store.absences?.(chatKey)?.at(-1)?.from_pos;
     const reach = contacts?.enabled === false || !recentUser || (justBack != null && lastPos - justBack <= 8) ? null
         : already ? reachable.find(p => p.person === already.person) : pickContact({ people: reachable, dayOf, lastPos, offers, minGap: contacts?.minGap ?? 16 });
-    const input = { board, pending, roster, relations, menu, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, members };
+    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, members };
     const key = `${chatKey}:${createHash('sha1').update(JSON.stringify(input)).digest('hex')}`;
     let cache = caches.get(store);
     if (!cache) caches.set(store, cache = new Map());

@@ -101,6 +101,7 @@ export function loadConfig(home) {
     const plannerModel = typeof pl.model === 'string' && pl.model ? pl.model : (extractor.model || 'claude-fable-5-1');
     const castInt = (v, fallback, max) => Number.isInteger(v) && v >= 1 && v <= max ? v : fallback;
     const config = {
+        play: { mode: raw.play?.mode === 'memory' ? 'memory' : 'full' },
         cast: { promoteRecords: castInt(raw.cast?.promoteRecords, CAST_PROMOTION_DEFAULTS.promoteRecords, 10000), promoteWeight: castInt(raw.cast?.promoteWeight, CAST_PROMOTION_DEFAULTS.promoteWeight, 3) },
         extractor,
         assembler: {
