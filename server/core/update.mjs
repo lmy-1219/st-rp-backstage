@@ -44,7 +44,7 @@ export async function checkRelease({ repo, follow = 'origin/main', fetch = true 
     const remote = await git(repo, ['remote', 'get-url', 'origin']);
     const releaseRepository = remote.ok && isReleaseOrigin(remote.out);
     const info = readReleaseInfo(repo), published = follow === 'origin/main' && releaseRepository && !!info;
-    const channel = { follow, releaseRepository, version: published ? info.version : null, layout: info?.layout ?? 1,
+    const channel = { follow, releaseRepository, version: published ? info.version : null, label: published && /^\d+(\.\d+)?$/.test(String(info.label ?? '')) ? String(info.label) : null, layout: info?.layout ?? 1,
         edition: published || follow === 'origin/release' ? '正式版' : follow === 'origin/main' ? '开发版（跟 main）' : '开发版' };
     const fetched = fetch && follow.includes('/') ? await git(repo, ['fetch', '--quiet', follow.split('/')[0]], 30000) : null;
     channel.fetchFailed = fetched?.ok === false;

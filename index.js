@@ -1013,7 +1013,7 @@ async function openTuning() {
         box.innerHTML = `<h3>调参</h3>
             <p><small>后台的开关和数字。改了立刻存，下一轮就用新的；带"改过"的可以点"默认"恢复。钥匙和型号在"各环节的模型"里。</small></p>
             ${groups.map(g => `<h4>${escapeHtml(g)}</h4>${v.knobs.filter(k => k.group === g).map(k => `<div style="display:flex;gap:.5em;align-items:center;flex-wrap:wrap;margin:.3em 0">
-                <span style="flex:1 1 12em">${escapeHtml(k.label)}${k.own ? ' <small style="color:var(--SmartThemeQuoteColor,#e88)">改过</small>' : ''}${k.help ? `<br><small style="opacity:.75">${escapeHtml(k.help)}</small>` : ''}</span>
+                <span style="flex:1 1 12em">${escapeHtml(k.label)}${k.own ? ' <small style="color:var(--SmartThemeQuoteColor,#e88)">改过</small>' : ''}${k.help ? `<br><small style="opacity:.75">${escapeHtml(k.help)}</small>` : ''}${k.note?`<br><small>${escapeHtml(k.note)}</small>`:''}</span>
                 ${input(k)}
                 ${k.own ? `<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-reset="${escapeHtml(k.path)}" type="button" title="恢复此项默认，建议不确定时用。">默认</button>` : ''}
               </div>`).join('')}`).join('')}`;
@@ -1050,14 +1050,36 @@ export async function saveStageGroup(ids, selection, send) {
     for (const id of ids) value = await send('stages', { set: { id, key: selection.key, model: selection.model.trim() } });
     return value;
 }
-export function stageGroupsHtml(value) {
+export function matchListedModel(name, list) {
+    if (typeof name !== 'string') return null;
+    if (list.includes(name)) return name;
+    const normalize = s => s.toLowerCase().replace(/[._ ]/g, '-');
+    const exact = list.filter(s => normalize(s) === normalize(name));
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) return null;
+    const bare = s => normalize(s).replace(/^[^/]+\//, '');
+    const hits = list.filter(s => bare(s) === bare(name));
+    return hits.length === 1 ? hits[0] : null;
+}
+export function modelPickerHtml(model, result = {}, recommended = '', group = false) {
+    const list = result.models ?? [], hit = matchListedModel(recommended, list);
+    const ordered = hit ? [hit, ...list.filter(m => m !== hit)] : list;
+    const missing = model && !list.includes(model);
+    return `<span data-model-picker style="flex:1 1 14em;min-width:12em"><input class="text_pole" data-model-search placeholder="搜索型号" aria-label="搜索型号"${list.length ? '' : ' hidden'}>
+      <select class="text_pole" data-model-select aria-label="选择型号"${list.length ? '' : ' hidden'}><option value="">选择型号</option>${ordered.map(m=>`<option value="${escapeHtml(m)}"${m===model?' selected':''}>${escapeHtml(m)}${m===hit?' · 推荐':''}</option>`).join('')}${missing?`<option value="${escapeHtml(model)}" selected>${escapeHtml(model)}（列表里没有）</option>`:''}<option value="__manual__">手填……</option></select>
+      <input class="text_pole" ${group?'data-group-model':'data-f="model"'} data-model-input aria-label="手填型号" value="${escapeHtml(model ?? '')}"${list.length?' hidden':''}>
+      <small data-model-error>${escapeHtml(result.error ?? (list.length ? '' : '还没有型号列表，可先手填。'))}</small><span data-model-suggestion></span>
+      <button class="menu_button" style="width:auto;white-space:nowrap" type="button" data-model-refresh title="重新读取渠道型号，拉不到仍可手填。">刷新列表</button></span>`;
+}
+export function stageGroupsHtml(value, lists = {}) {
     return (value.groups ?? []).map(group => {
         const selected = stageGroupState(value.stages, group.ids);
         return `<section data-model-group="${group.id}" style="margin:.6em 0;padding-bottom:.6em;border-bottom:1px solid var(--SmartThemeBorderColor)"><h4>${escapeHtml(group.name)}</h4><small style="display:block">${escapeHtml(group.help)}</small>
           ${selected.same ? '' : `<small style="display:block">各不相同：${selected.rows.map(s=>`${escapeHtml(s.name)}：${escapeHtml(s.key ?? '原配置')}／${escapeHtml(s.model ?? '未配')}`).join('；')}</small>`}
           <div style="display:flex;gap:.4em;flex-wrap:wrap;margin-top:.3em"><select style="flex:0 0 8em" data-group-key aria-label="${group.name}钥匙"><option value="">跟原配置</option>${value.keys.map(k=>`<option value="${escapeHtml(k.name)}"${k.name===selected.key?' selected':''}>${escapeHtml(k.name)}</option>`).join('')}</select>
-          <input class="text_pole" style="flex:1 1 14em" data-group-model aria-label="${group.name}型号" placeholder="${selected.same?'型号':'各不相同；填写后保存才覆盖本组'}" value="${escapeHtml(selected.model)}">
+          ${modelPickerHtml(selected.model,lists[group.ids[0]],value.stages.find(s=>s.id===group.ids[0])?.recommended,true)}
           <button class="menu_button" type="button" style="width:auto;white-space:nowrap;flex:0 0 auto" data-group-save="${group.id}" title="同时保存本组钥匙型号，建议先核对。">保存这一组</button></div>
+          ${group.ids.includes('extract')?`<label>每几条总结一次 <input class="text_pole" data-summary-batch type="number" min="1" max="8" step="1" value="${value.batch??1}" style="width:5em;display:inline-block"></label><small style="display:block">攒几条一起总结，省一点钱；后台记住的事会晚几条。</small><small style="display:block">攒不够的话，最早那条等满 30 分钟也会总结；已设等待时间的照原值。</small>`:''}
           ${group.id==='fast'?`<label><input type="checkbox" data-advisor-enabled${value.advisorEnabled?' checked':''}> 参谋</label><small style="display:block">给原作知识不强的规划模型补原作世界观：翻这一局素材包里的原作资料。同人局用；原创世界、没装素材包的局可以关。</small>`:''}</section>`;
     }).join('');
 }
@@ -1092,6 +1114,8 @@ async function openStages() {
     box.style.textAlign = 'left';
     let v = await api('stages', {});
     const lists = {};   // 拉到的型号列表：环节 → [型号]
+    const hydrate = async () => { await Promise.all(v.stages.map(async s => { lists[s.id] = await api('stage-models', { stage:s.id }); })); };
+    await hydrate();
     let fitted = null;   // 只有一把钥匙时比过的结果：{ models, missing }
     const money = n => `$${Number(n).toFixed(n >= 1 ? 2 : 3)}`;
     const draw = () => {
@@ -1115,14 +1139,12 @@ async function openStages() {
               <input class="text_pole" data-f="kkey" type="password" autocomplete="off" placeholder="钥匙（改地址时可空，沿用原来那把）" style="flex:1 1 14em">
               <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="save-key" type="button" title="保存这把钥匙，建议核对地址后存。">存</button>
             </div>
-            ${stageGroupsHtml(v)}<details><summary>逐项调（进阶）</summary><h4>各环节</h4>
+            ${stageGroupsHtml(v, lists)}<details><summary>逐项调（进阶）</summary><h4>各环节</h4>
             ${v.stages.map(s => `<div data-stage="${s.id}" style="margin:.5em 0;padding:.4em .6em;border-left:3px solid var(--SmartThemeQuoteColor,#888)">
               <div><b>${escapeHtml(s.name)}</b><small data-stage-help="${s.id}">${escapeHtml(stageHelp(s.id))}</small>${s.id==='situation'?'<small>各方在镜头外的动向、消息怎么传开。按开局单的时间尺度：一跳几十年的局，把时间尺度设成“年”。一次跳很久最多补推三次。</small>':''} <small style="opacity:.8">今天 ${s.today.calls} 次，约 ${money(s.today.usd)}${s.chosen ? '' : ` · 没另选（跟着${escapeHtml(s.follows)}）`} · 此刻：${s.off ? '关着' : s.waits ? `${escapeHtml(s.model ?? '（没配）')}，等钥匙「${escapeHtml(s.waits)}」` : `${escapeHtml(s.model ?? '（没配）')}，${escapeHtml(s.auto ? `自动用了"${s.auto}"` : s.key ?? '原配置')} ${escapeHtml(s.tail)}`}</small></div>
               <div style="display:flex;gap:.4em;flex-wrap:wrap;align-items:center;margin-top:.3em">
                 <select class="text_pole" data-f="key" style="flex:0 0 9em">${keyOpts(s.key)}</select>
-                <input class="text_pole" data-f="model" list="rpe-models-${s.id}" value="${escapeHtml(s.model ?? '')}" style="flex:1 1 12em">
-                <datalist id="rpe-models-${s.id}">${(lists[s.id] ?? []).map(m => `<option value="${escapeHtml(m)}">`).join('')}</datalist>
-                <button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-st="models" type="button" title="读取可用型号，建议先检查连接。">拉型号</button>
+                ${modelPickerHtml(s.model,lists[s.id],s.recommended)}
                 <label><small>入</small> <input class="text_pole" data-f="in" value="${s.priceInPerM}" style="width:4.5em;display:inline-block"></label>
                 <label><small>出</small> <input class="text_pole" data-f="out" value="${s.priceOutPerM}" style="width:4.5em;display:inline-block"></label>
                 <small>美元／百万</small>
@@ -1137,8 +1159,35 @@ async function openStages() {
               </div>
             </div>`).join('')}</details>`;
     };
-    box.addEventListener('change', async event => { if(event.target.matches('[data-advisor-enabled]')) { try { await api('tuning',{set:'advisor.enabled',value:event.target.checked});v=await api('stages',{});draw(); } catch(e){globalThis.toastr?.error(e.message);} } });
+    const pickerRow = target => target.closest('[data-model-group], [data-stage]');
+    const pickerStage = row => row.dataset.stage ?? v.groups.find(g=>g.id===row.dataset.modelGroup).ids[0];
+    const pickerKey = row => row.querySelector('[data-group-key], [data-f="key"]')?.value || null;
+    const suggest = picker => {
+        const row=pickerRow(picker), list=lists[pickerStage(row)]?.models??[], input=picker.querySelector('[data-model-input]');
+        const hit=list.includes(input.value)?null:matchListedModel(input.value,list), note=picker.querySelector('[data-model-suggestion]');
+        note.innerHTML=hit?`<small>这个渠道里写作 ${escapeHtml(hit)}，要换成它吗？</small><button class="menu_button" style="width:auto;white-space:nowrap" type="button" data-model-use="${escapeHtml(hit)}" title="换成渠道返回的原名。">换成它</button>`:'';
+    };
+    const refreshPicker = async (row, refresh=false) => {
+        const id=pickerStage(row), selectedKey=pickerKey(row), picker=row.querySelector('[data-model-picker]'), model=picker.querySelector('[data-model-input]').value;
+        const result=await api('stage-models',{stage:id,key:selectedKey,refresh});
+        if(!row.isConnected || pickerKey(row)!==selectedKey)return;
+        lists[id]=result;
+        picker.outerHTML=modelPickerHtml(model,result,v.stages.find(s=>s.id===id)?.recommended,!!row.dataset.modelGroup);
+    };
+    box.addEventListener('input',event=>{
+        const picker=event.target.closest('[data-model-picker]');if(!picker)return;
+        if(event.target.matches('[data-model-search]'))for(const option of picker.querySelector('[data-model-select]').options)option.hidden=!!option.value&&option.value!=='__manual__'&&!option.textContent.toLowerCase().includes(event.target.value.toLowerCase());
+        if(event.target.matches('[data-model-input]'))suggest(picker);
+    });
+    box.addEventListener('change', async event => { try {
+        if(event.target.matches('[data-model-select]')){const picker=event.target.closest('[data-model-picker]'),input=picker.querySelector('[data-model-input]');input.hidden=event.target.value!=='__manual__';if(input.hidden)input.value=event.target.value;suggest(picker);}
+        if(event.target.matches('[data-group-key], [data-f="key"]'))await refreshPicker(pickerRow(event.target));
+        if(event.target.matches('[data-summary-batch]')){await api('tuning',{set:'extractor.batch',value:event.target.value===''?null:Number(event.target.value)});v=await api('stages',{});event.target.value=v.batch;}
+        if(event.target.matches('[data-advisor-enabled]')) { await api('tuning',{set:'advisor.enabled',value:event.target.checked});v=await api('stages',{});draw(); }
+    }catch(e){globalThis.toastr?.error(e.message);} });
     box.addEventListener('click', async event => {
+        if(event.target.hasAttribute('data-model-refresh')){try{await refreshPicker(pickerRow(event.target),true);}catch(e){globalThis.toastr?.error(e.message);}return;}
+        if(event.target.dataset.modelUse){const picker=event.target.closest('[data-model-picker]');picker.querySelector('[data-model-input]').value=event.target.dataset.modelUse;const select=picker.querySelector('[data-model-select]');select.value=event.target.dataset.modelUse;picker.querySelector('[data-model-input]').hidden=true;suggest(picker);return;}
         const groupId=event.target.dataset.groupSave;
         if(groupId){const group=v.groups.find(g=>g.id===groupId),row=event.target.closest('[data-model-group]');try{v=await saveStageGroup(group.ids,{key:row.querySelector('[data-group-key]').value,model:row.querySelector('[data-group-model]').value},api);draw();}catch(e){v=await api('stages',{});draw();globalThis.toastr?.error('本组未全部保存：'+e.message);}return;}
         const act = event.target?.dataset?.st;
@@ -1148,7 +1197,7 @@ async function openStages() {
         const f = name => (row ?? box).querySelector(`[data-f="${name}"]`)?.value ?? '';
         event.target.disabled = true;
         try {
-            if (act === 'save-key') { v = await api('stages', { saveKey: { name: f('kname'), baseUrl: f('kurl'), apiKey: f('kkey') } }); globalThis.toastr?.success('钥匙存好了。'); }
+            if (act === 'save-key') { v = await api('stages', { saveKey: { name: f('kname'), baseUrl: f('kurl'), apiKey: f('kkey') } }); await hydrate(); globalThis.toastr?.success('钥匙存好了。'); }
             if (act === 'remove-key') {
                 const ok = await ctx().callGenericPopup(`删掉钥匙"${escapeHtml(event.target.dataset.name)}"？用着它的环节回到跟着原配置。`, ctx().POPUP_TYPE.CONFIRM);
                 if (ok) v = await api('stages', { removeKey: event.target.dataset.name });
@@ -1164,8 +1213,8 @@ async function openStages() {
                 fitted = null;
             }
             if (act === 'models') {
-                const r = await api('stage-models', { stage: id, key: f('key') || null });
-                lists[id] = r.models;
+                const r = await api('stage-models', { stage: id, key: f('key') || null, refresh:true });
+                lists[id] = r;
                 if (r.error || !r.models.length) globalThis.toastr?.warning(`没拉到型号列表${r.error ? `：${r.error}` : ''}，手填型号就行。`);
                 else globalThis.toastr?.info(`拉到 ${r.models.length} 个型号，点型号那一栏选。`);
             }
@@ -1535,7 +1584,7 @@ let render = () => {};
 export function releaseLabel(info) {
     if (!info) return '';
     const edition = info.release ? (info.edition ?? (info.follow === 'origin/release' ? '正式版' : info.follow === 'origin/main' ? '开发版（跟 main）' : '更新分支未取得')) : '开发副本';
-    const version = edition === '正式版' && Number.isSafeInteger(info.version) && info.version > 0 ? ` v${info.version}` : '';
+    const version = edition === '正式版' && Number.isSafeInteger(info.version) && info.version > 0 ? ` v${typeof info.label === 'string' && /^\d+(\.\d+)?$/.test(info.label) ? info.label : info.version}` : '';
     return `${edition}${version} · ${info.running ?? info.head ?? '版本未取得'}${info.release ? info.ok === false || info.fetchFailed ? ' · 新版检查失败' : info.behind > 0 ? ' · 有新版本' : ' · 发布分支无新版' : ''}`;
 }
 export function installationHint({backendDown,localRelease,backendRelease}={}) {

@@ -658,7 +658,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/stage-models': async b => {
             const s = settings().stages;
             if (!s) bad('stages_unavailable');
-            return s.models({ stage: str(b.stage, 'stage', { optional: true, max: 40 }), key: str(b.key, 'key', { optional: true, max: 40 }) });
+            return s.models({ stage: str(b.stage, 'stage', { optional: true, max: 40 }), key: str(b.key, 'key', { optional: true, max: 40 }), refresh: b.refresh === true });
         },
         // 测这一环节此刻的型号经这条线传不传得过去思考档（真调一两次极短的，几分钱）
         'POST /v1/stage-probe': async b => {

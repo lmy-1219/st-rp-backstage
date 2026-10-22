@@ -87,8 +87,8 @@ export function loadConfig(home) {
         // 绝大多数是一两条就等满了 10 分钟，等于没攒成、只多了延迟，账也跟不上最新一条。省钱从固定部分省，不从延迟省。
         // 想攒的自己写：攒够 batch 条一起记；攒不够、最早那条又已经等了 batchWaitMin 分钟，也记。config.json 里已经写了的照旧生效。
         auto: e.auto !== false,
-        batch: Math.max(1, Number(e.batch ?? 1)),
-        batchWaitMin: Number(e.batchWaitMin ?? 0),
+        batch: Math.min(8, Math.max(1, Math.trunc(Number(e.batch) || 1))),
+        batchWaitMin: Number(e.batchWaitMin ?? (Number(e.batch) > 1 ? 30 : 0)),
     };
     // 各环节换钥匙、换模型（D-106）：记账那档先换，下面各格"不填就用记账的"都跟着它
     const book = keyBook(raw.keys), probes = raw.effortProbe && typeof raw.effortProbe === 'object' ? raw.effortProbe : {}, over = raw.stages && typeof raw.stages === 'object' ? raw.stages : {};

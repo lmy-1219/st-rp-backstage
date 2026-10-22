@@ -58,6 +58,7 @@ export const KNOBS = [
     { path: 'planner.provider', group: '离开与规划', type: 'enum', options: [['api', '调模型'], ['queue', '交给窗口'], ['off', '关']], label: "规划", help: "选择规划方式，建议先用调模型。" },
     { path: 'planner.briefChars', group: '离开与规划', type: 'int', min: 10000, max: 400000, label: "规划简报最多多少字", help: "限制规划材料长度，建议先用默认。" },
     // 花费
+    { path: 'extractor.batch', group: '花费', type: 'int', min: 1, max: 8, label: '每几条总结一次', help: '攒几条一起总结，省一点钱；后台记住的事会晚几条。', note: '攒不够的话，最早那条等满 30 分钟也会总结；已设等待时间的照原值。' },
     { path: 'extractor.dailyBudgetUsd', group: '花费', type: 'num', min: 0, max: 500, label: "后台每天最多花（美元）", help: "控制后台花费，建议先设预算。" },
     { path: 'thinking.heartbeat', group: '离开与规划', type: 'bool', label: "想得久的模型保持连接", help: "给长思考保活，建议保持默认。" },
     { path: 'planner.budgetUsd', group: '花费', type: 'num', min: 0, max: 500, label: "规划每天最多花（美元）", help: "限制规划花费，建议先设预算。" },
@@ -79,6 +80,11 @@ const byPath = new Map([...KNOBS, ...FRESH_KNOBS].map(k => [k.path, k]));
 const read = (obj, p) => p.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
 
 export function checkValue(knob, v) {
+    if (knob.path === 'extractor.batch') {
+        if (v === '' || v == null || Number(v) === 0) return 1;
+        if (!Number.isInteger(Number(v)) || Number(v) < 0) throw new Error('要填整数');
+        return Math.min(8, Number(v));
+    }
     if (knob.type === 'bool') { if (typeof v !== 'boolean') throw new Error('要开或关'); return v; }
     if (knob.type === 'enum') { if (!knob.options.some(([x]) => x === v)) throw new Error('没有这个选项'); return v; }
     const n = Number(v);

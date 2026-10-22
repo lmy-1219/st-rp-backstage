@@ -3,11 +3,25 @@
 // 钥匙只存在后台的 config.json 里；这里任何一个返回都不带整把钥匙，只给末四位（面板可能经端口映射在别处打开）。
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
+import modelData from './models.json' with { type: 'json' };
 import { loadConfig, STAGES, EFFORTS, probeKey, EMBED_MODEL, embedProbeKey, sameKeyName } from './config.mjs';
 import { IDLE_MS } from './model.mjs';
 
 const tail = key => (key ? `…${String(key).slice(-4)}` : '');
 const cleanUrl = v => (typeof v === 'string' ? v.trim().replace(/\/+$/, '') : '');
+
+export function matchModel(name, list) {
+    if (typeof name !== 'string') return null;
+    if (list.includes(name)) return name;
+    const normalize = s => s.toLowerCase().replace(/[._ ]/g, '-');
+    const exact = list.filter(s => normalize(s) === normalize(name));
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) return null;
+    const bare = s => normalize(s).replace(/^[^/]+\//, '');
+    const hits = list.filter(s => bare(s) === bare(name));
+    return hits.length === 1 ? hits[0] : null;
+}
 
 // 记在叙事组装那张表里的调用，按"说话的人"认是哪个环节；不带括号的是角色名（叙事组装）。
 export function stageOfSpeaker(speaker) {
@@ -37,6 +51,11 @@ export function stageOfSpeaker(speaker) {
 // onKeys：钥匙簿或"向量"环节变了（后台据此重测哪把能调向量、补转旧记录）
 export function createStagesAdmin({ home, db = null, fetchImpl = fetch, onKeys = () => {} }) {
     const file = path.join(home, 'config.json');
+    const cacheFile = path.join(home, 'model-lists.json');
+    let cache = {}; try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
+    const inflight = new Map();
+    const cacheId = k => crypto.createHash('sha256').update(JSON.stringify([cleanUrl(k.baseUrl), k.name ?? k.key ?? ''])).digest('hex');
+    const fingerprint = k => crypto.createHash('sha256').update(k.apiKey).digest('hex');
     const readRaw = () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } };
     // 先写临时文件再换名：写到一半后台正好读配置，读到的不会是半截
     const patch = mutate => {
@@ -63,6 +82,7 @@ export function createStagesAdmin({ home, db = null, fetchImpl = fetch, onKeys =
     function view() {
         const config = loadConfig(home), raw = readRaw(), used = today();
         return {
+            batch: config.extractor.batch,
             keys: config.keys.map(k => ({ name: k.name, baseUrl: k.baseUrl, tail: tail(k.apiKey) })),
             // 各环节写着要用、钥匙簿里还没有的钥匙名（推荐配置里写的是名字，钥匙由用户照名字存）
             // 钥匙簿里只有一把时各环节都用它，不算缺（alone：有环节是借它的）
@@ -77,6 +97,7 @@ export function createStagesAdmin({ home, db = null, fetchImpl = fetch, onKeys =
                     waits: typeof ov.key === 'string' && ov.key && !x.key ? ov.key : null,
                     effort: typeof ov.effort === 'string' ? ov.effort : '', effortOk: config.effortProbe[probeKey(x.baseUrl, x.model)] ?? null,
                     today: { calls: used[s.id].calls, usd: Math.round(used[s.id].usd * 1000) / 1000 },
+                    recommended: modelData.recommended.stages[s.id]?.model ?? (s.id === 'extract' ? modelData.recommended.extractor.model : s.id === 'keys' || s.id === 'fresh' || s.id === 'setupKeys' ? modelData.recommended.assembler.keysModel : modelData.recommended.advisor.model),
                 };
             }),
         };
@@ -96,6 +117,7 @@ export function createStagesAdmin({ home, db = null, fetchImpl = fetch, onKeys =
             raw.keys = [...keys.filter(k => !sameKeyName(k?.name, name)), { name, baseUrl, apiKey: key }];
         });
         onKeys();
+        void models({ key: name, refresh: true });
         return view();
     }
 
@@ -141,16 +163,29 @@ export function createStagesAdmin({ home, db = null, fetchImpl = fetch, onKeys =
     }
 
     // 某把钥匙在那个地址上能用哪些型号（拉不到就返回空，面板让手填）。keyName 空＝这个环节此刻用的那把。
-    async function models({ stage, key }) {
+    async function models({ stage, key, refresh = false }) {
         const config = loadConfig(home);
         const k = key ? config.keys.find(x => sameKeyName(x.name, key)) : config.stages[stage];
         if (!k?.baseUrl || !k.apiKey) return { models: [], error: '这一环节还没有钥匙' };
+        const id = cacheId(k), token = fingerprint(k);
+        if (inflight.has(id)) return inflight.get(id);
+        if (!refresh && cache[id]?.token === token) return cache[id].result;
+        const request = (async () => { let result;
         try {
-            const r = await fetchImpl(`${k.baseUrl}/models`, { headers: { authorization: `Bearer ${k.apiKey}` }, signal: AbortSignal.timeout(20000) });
-            if (!r.ok) return { models: [], error: `中转回 ${r.status}` };
+            const r = await fetchImpl(`${k.baseUrl}/models`, { headers: { authorization: `Bearer ${k.apiKey}`, 'x-api-key': k.apiKey, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.timeout(20000) });
+            if (!r.ok) result = { models: [], error: `渠道回 ${r.status}` };
+            else {
             const body = await r.json().catch(() => null);
-            return { models: (body?.data ?? []).map(m => m?.id).filter(x => typeof x === 'string').sort() };
-        } catch (error) { return { models: [], error: error.name === 'TimeoutError' ? '拉型号列表超时' : error.message }; }
+            const list = [...new Set((Array.isArray(body?.data) ? body.data : []).map(m => m?.id).filter(x => typeof x === 'string' && x.length <= 200))].sort();
+            result = { models: list, ...(list.length ? {} : { error: '渠道没有返回型号列表' }) };
+            }
+        } catch (error) { result = { models: [], error: error.name === 'TimeoutError' ? '拉型号列表超时' : '连接渠道失败' }; }
+        cache[id] = { token, result };
+        try { fs.writeFileSync(`${cacheFile}.tmp`, JSON.stringify(cache)); fs.renameSync(`${cacheFile}.tmp`, cacheFile); } catch { /* 缓存写不成不影响手填 */ }
+        return result;
+        })();
+        inflight.set(id, request);
+        try { return await request; } finally { inflight.delete(id); }
     }
 
     // 只有一把钥匙时（10/2 用户定为默认）：它调得了各环节推荐的型号吗？拉一次型号列表比一比（不调模型、不花钱）。
@@ -160,8 +195,7 @@ export function createStagesAdmin({ home, db = null, fetchImpl = fetch, onKeys =
         if (config.keys.length !== 1) return { models: [], missing: [], error: '钥匙簿里不止一把（或者还没有）' };
         const { models: list, error } = await models({ key: config.keys[0].name });
         if (error || !list.length) return { models: [], missing: [], error: error ?? '没拉到型号列表' };
-        const have = new Set(list);
-        const missing = STAGES.filter(s => s.id !== 'embed' && config.stages[s.id]?.model && config.stages[s.id].key === config.keys[0].name && !have.has(config.stages[s.id].model))
+        const missing = STAGES.filter(s => s.id !== 'embed' && config.stages[s.id]?.model && config.stages[s.id].key === config.keys[0].name && !matchModel(config.stages[s.id].model, list))
             .map(s => ({ id: s.id, name: s.name, model: config.stages[s.id].model }));
         return { models: list, missing, key: config.keys[0].name };
     }
