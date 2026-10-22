@@ -1693,7 +1693,9 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             const active = store.menuOf(chatKey).filter(m => m.status === 'waiting' || m.status === 'pocket').length;
             const newNotes = notes.some(n => n.kind === '聊' && n.used_in_plan == null);
             const verdict = last?.status === 'ready' ? verdictOf(store, chatKey, last.id) : null;
-            const reason = needsPlan({ lastPlan: last, activeItems: active, newNotes, nodeOver: verdict?.result });
+            let reason = needsPlan({ lastPlan: last, activeItems: active, newNotes, nodeOver: verdict?.result });
+            // 第一份规划等开局单确认生效、或者玩家说了第一句再排（用户 10/22：一接入就排，角色还没拉完、开局单还没填，钱就花出去了）
+            if (reason === 'first' && !store.setupOf?.(storyId) && !messages.some(m => m.is_user)) reason = null;
             // 判定挂在哪条消息上，新规划也跟着挂上：那条删了、改了，新规划就不算，退回原来那份（用户 10/4）
             if (reason) requestPlanNow(store, records, chatKey, planner, { reason, present: here, verdict: verdict?.why, thread: verdict?.thread, basis: verdict?.at ?? null });
             else if (last?.status === 'ready' && backFrom(store, chatKey, last)) {
@@ -2517,6 +2519,45 @@ export function storyContext(store, records, chatKey, { present = null } = {}) {
 
 // 现在就叫规划者（发言前按需触发、面板按钮、/聊 都走这里）：攒简报、记一条"等规划"、交给 provider。
 const LASTING_CHANGE = new Set(['直到被改变', '永久']);
+
+export function planPersonaOf(store, chatKey) {
+    const chat = store.requireChat(chatKey);
+    let persona = null;
+    try { persona = JSON.parse(store.getMeta(`persona:${chatKey}`) ?? 'null'); } catch {}
+    const current = typeof persona?.name === 'string' ? persona.name.trim() : '';
+    let previous = store.getMeta(`plan_persona:${chat.story_id}`) || null;
+    // 老局已有生效规划：第一次检查只补记当前名字，不打断正在玩的局。
+    if (!previous && current && store.lastReadyPlan(chatKey)) {
+        previous = current; store.setMeta(`plan_persona:${chat.story_id}`, current);
+    }
+    return { current, previous };
+}
+
+export function holdPlanPersona(store, request) {
+    const { current, previous } = planPersonaOf(store, request.chatKey);
+    if (current && current === previous) { store.setMeta(`plan_persona_wait:${request.chatKey}`, null); return null; }
+    const { id, chatKey, reason = 'user', verdict = null, thread = null, force = null, entry = 'auto' } = request;
+    store.setMeta(`plan_persona_wait:${chatKey}`, JSON.stringify({ id, chatKey, reason, verdict, thread, force, entry }));
+    return { current, previous };
+}
+
+export function awaitingPlanPersona(store, chatKey) {
+    let wait = null;
+    try { wait = JSON.parse(store.getMeta(`plan_persona_wait:${chatKey}`) ?? 'null'); } catch {}
+    if (!wait || store.planById(wait.id)?.status !== 'requested') return null;
+    const p = planPersonaOf(store, chatKey);
+    return { ...p, id: wait.id };
+}
+
+export function confirmPlanPersona(store, chatKey, expected = null) {
+    const chat = store.requireChat(chatKey), p = planPersonaOf(store, chatKey);
+    if (!p.current || (expected != null && p.current !== expected)) throw Object.assign(new Error('人设变了或还没送到后台，请重新核对'), { status: 409 });
+    store.setMeta(`plan_persona:${chat.story_id}`, p.current);
+    let wait = null;
+    try { wait = JSON.parse(store.getMeta(`plan_persona_wait:${chatKey}`) ?? 'null'); } catch {}
+    store.setMeta(`plan_persona_wait:${chatKey}`, null);
+    return wait && store.planById(wait.id)?.status === 'requested' ? wait : null;
+}
 
 export function requestPlanNow(store, records, chatKey, planner, { reason = 'user', present = null, verdict = null, thread = null, basis = null, force = null, entry = 'auto' } = {}) {
     const stopped = playStop(store, chatKey); if (stopped) return stopped;

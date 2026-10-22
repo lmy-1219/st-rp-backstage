@@ -167,10 +167,43 @@ export function installPack(src, packsDir, { overwrite = false } = {}) {
 function copyDir(src, dst) {
     fs.mkdirSync(dst, { recursive: true });
     for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+        if (e.name === '.git') continue;
         const s = path.join(src, e.name), d = path.join(dst, e.name);
         if (e.isDirectory()) copyDir(s, d);
         else if (e.isFile() && e.name.toLowerCase() !== 'secrets.json') fs.copyFileSync(s, d);
     }
+}
+
+// 独立素材包：从受管来源里找，不把任意本机路径当成上传结果。
+export function findMaterialPacks(root) {
+    assertOpeningDirectory(path.resolve(root));
+    const found = [];
+    function walk(dir, depth) {
+        const st = fs.lstatSync(dir);
+        if (st.isSymbolicLink() || !st.isDirectory()) fail('素材包目录不是普通目录');
+        if (['常识.json', '物价.json', '势力网.json', '关系网.json'].some(n => isFile(path.join(dir, n))) || ['年表', '人物档案'].some(n => isDir(path.join(dir, n)))) { found.push(dir); return; }
+        if (depth === 3) return;
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) if (e.isDirectory() && !e.isSymbolicLink() && !e.name.startsWith('.')) walk(path.join(dir, e.name), depth + 1);
+    }
+    walk(path.resolve(root), 0);
+    if (!found.length) fail('这不像一个素材包');
+    return found;
+}
+
+export function materialPackSource(input, managed) {
+    const root = path.resolve(managed), dir = path.resolve(input), rel = path.relative(root, dir);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || rel.split(path.sep).some(n => n.startsWith('.'))) fail('请选择本入口上传或拉取的素材包');
+    const top = rel.split(path.sep)[0];
+    if (!isFile(path.join(root, '.sources', top + '.json'))) fail('不认识这个素材包来源');
+    const check = current => {
+        const st = fs.lstatSync(current);
+        if (st.isSymbolicLink()) fail('素材包不能引用链接');
+        if (st.isDirectory()) for (const e of fs.readdirSync(current, { withFileTypes: true })) if (e.name !== '.git') check(path.join(current, e.name));
+    };
+    // 从来源顶层检查，防止选择落在链接目录下面。
+    check(path.join(root, top));
+    safeLabel(path.basename(dir));
+    return dir;
 }
 
 export function findOpeningPacks(root) {

@@ -323,10 +323,24 @@ export function personaPayload(c, chatKey) {
     if (!chatKey) return null;
     const name = String(c?.name1 ?? '').trim().slice(0, 200);
     const raw = c?.powerUserSettings?.persona_description;
-    if (!name || typeof raw !== 'string') return null;
-    const text = raw.replace(/\{\{user\}\}/gi, name).trim().slice(0, 4000);
-    if (!text) return null;
+    if (!name) return null;
+    const text = (typeof raw === 'string' ? raw : '').replace(/\{\{user\}\}/gi, name).trim().slice(0, 4000);
     return { body: { chatKey, name, text }, key: `${chatKey}\n${name}\n${text}` };
+}
+
+// 旧酒馆没有 PERSONA_CHANGED：只读名字，事件和三秒检查共用一份基线。
+export function createPersonaWatch({ current, onChange, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    let key = null, name = null, timer = null;
+    const check = () => {
+        clearTimer(timer); timer = null;
+        const next = current();
+        if (!next?.key) { key = null; name = null; return; }
+        const changed = key === next.key && name != null && next.name && name !== next.name;
+        const previous = name; key = next.key; name = next.name;
+        if (changed) onChange(previous, name);
+        timer = setTimer(check, 3000);
+    };
+    return { check, pause() { clearTimer(timer); timer = null; }, reset() { clearTimer(timer); timer = null; key = null; name = null; } };
 }
 
 // 后台未明确回答关闭时，不显示旧门。

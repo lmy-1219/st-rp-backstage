@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const TITLES = { extract: '记账（从一小段对话里记下事实）', setup: '开局单分格', plan: '规划（一个主线节点）', keys: '开局单前史的检索词' };
+const TITLES = { extract: '记账（从一小段对话里记下事实）', setup: '开局单分格', plan: '规划（一个主线节点）', keys: '开局单前史的检索词', 'relations-draft': '关系表自动起草（核对保存才生效）' };
 const fence = s => '````text\n' + String(s ?? '') + '\n````';
 
 // 调模型的错误里哪些是"API 没响应"（该交给窗口），哪些是回答本身的问题（照原来的重试／对半切／跳过）。

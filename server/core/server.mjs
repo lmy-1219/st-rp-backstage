@@ -1,13 +1,14 @@
 // 本机后台的 HTTP 接口。只听 127.0.0.1；浏览器不直接连它，经 ST 里的转发插件过来（plugin/）。
 import http from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
-import { playModeOf, playStop, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
+import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
 import { labelsOf, sinceWord, dateIn, dayNumber } from './timeline.mjs';
 import { validMark, planFailure } from './store.mjs';
 import { digests } from './digest.mjs';
 import { parsePlan } from './planner.mjs';
 import { snapshot, applyPreset } from './presets.mjs';
-import { readOpeningPack, installPack, backupStFiles, findOpeningPacks, openingSources, httpsPackUrl } from './pack-import.mjs';   // 一键导入开局包（_dev/开局包格式-20261017.md）
+import { readOpeningPack, installPack, backupStFiles, findOpeningPacks, openingSources, httpsPackUrl, findMaterialPacks, materialPackSource, checkPack } from './pack-import.mjs';   // 一键导入开局包（_dev/开局包格式-20261017.md）
 import { profileHash } from './profile.mjs';
 import { toText, fromText, advisorContext, parseSetup, SETUP_SYSTEM, setupPrompt, KEYS_SYSTEM, keysPrompt, parseBackstoryKeys, withKeys, formMerge, formMissing, receiptLines, formRows, mustCastOf, checkIntimate, intimateRows } from './setup.mjs';
 import { ensureOpening } from './opening.mjs';
@@ -85,6 +86,15 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         return sourceManager;
     };
     const sourceTimer = setInterval(() => { try { sourceManager?.cleanup(); } catch {} }, 60000); sourceTimer.unref();
+    let materialManager = null;
+    const materialSources = () => {
+        const backups = settings().backupsDir;
+        if (!backups) bad('素材包数据目录未配置');
+        const root = path.resolve(backups, '..', '素材包来源');
+        if (!materialManager || materialManager.root !== root) materialManager = openingSources(root);
+        return materialManager;
+    };
+    const materialTimer = setInterval(() => { try { materialManager?.cleanup(); } catch {} }, 60000); materialTimer.unref();
     const contentView = chatKey => {
         const options = promptOptionsFor(store, chatKey), env = promptEnvironmentFor(store);
         const rows = intimateRows(options.setup, { names: setupNames(store.requireChat(chatKey).story_id) });
@@ -104,6 +114,16 @@ export function createRoutes(store, { worker = null, records = null, assembler =
     };
     const setupNames = storyId => [...store.getCast(storyId).filter(e => e.role !== '不用').map(e => e.name), ...(store.playerNames?.(storyId) ?? [])];
     const withPack = chatKey => { const base = settings?.() ?? {}; const p = base.packOf?.(chatKey) ?? null; return { ...base, economy: { table: p?.table ?? null }, world: { seeds: p?.seeds ?? null, anchors: p?.anchors ?? null, facts: p?.facts ?? null }, factions: { net: p?.factions ?? null } }; };
+    const draftRelations = (chat, cards) => {
+        const service = settings().relationsDrafts;
+        if (service) void service.start({ chatKey: chat.key, cards: Array.isArray(cards) ? cards : [] }).catch(() => {});
+    };
+    const confirmSetupPersona = (chatKey, expected) => {
+        if (expected != null || planPersonaOf(store, chatKey).current) {
+            const wait = confirmPlanPersona(store, chatKey, expected ?? null);
+            if (wait) queueMicrotask(() => { if (!playStop(store, chatKey)) settings().planner?.resumePersona?.(wait); });
+        }
+    };
     // 开局单分格 API 没响应 ⇒ 整份稿子写成外援包交给窗口；交回的和模型答的走同一套核对，进草稿等用户核对。
     handoffs?.register('setup', {
         stale: meta => store.setupDraft(meta.storyId)?.id !== meta.setupId,
@@ -693,6 +713,16 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             return { packs, pack: store.getMeta(`pack:${chat.story_id}`) || null };
         },
         // 规划：看状态；request＝现在就叫规划者；reveal＝看幕后菜单（会剧透）。
+        'POST /v1/plan-persona': b => {
+            const chatKey = str(b.chatKey, 'chatKey'); store.requireChat(chatKey);
+            if (b.confirm === true) {
+                // 当前名字未知时允许面板把正在核对的名字一起交来；已知时不接受旧弹窗盖掉新名字。
+                if (!planPersonaOf(store, chatKey).current && b.name) store.setMeta(`persona:${chatKey}`, JSON.stringify({ name: str(b.name, 'name', { max: 200 }).trim(), text: '', at: new Date().toISOString() }));
+                const wait = confirmPlanPersona(store, chatKey, b.name ?? null);
+                if (wait && !playStop(store, chatKey)) settings().planner?.resumePersona?.(wait);
+            }
+            return { ...planPersonaOf(store, chatKey), awaitingPersona: awaitingPlanPersona(store, chatKey) };
+        },
         'POST /v1/plan': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             store.requireChat(chatKey);
@@ -707,7 +737,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const menu = store.menuOf(chatKey);
             const count = st => menu.filter(m => m.status === st).length;
             return {
-                playMode: playModeOf(store,chatKey), playReason: playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey),
+                playMode: playModeOf(store,chatKey), playReason: playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), awaitingPersona: playStop(store,chatKey) ? null : awaitingPlanPersona(store,chatKey),
                 provider: planner?.provider ?? 'off', last: last ? { id: last.id, status: last.status, reason: last.reason, createdAt: last.created_at, readyAt: last.ready_at } : null,
                 counts: { waiting: count('waiting'), pocket: count('pocket'), used: count('used'), sunk: count('sunk') + count('sunk_told'), void: count('void'), expired: count('expired') },
                 ...(b.reveal ? (ready => ({ goal: ready?.goal ?? null, node: ready?.node ? JSON.parse(ready.node) : null, menu }))(store.lastReadyPlan(chatKey)) : {}),
@@ -779,7 +809,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 if (b.confirm === true && missing.length) bad(`还没填：${missing.join('、')}`);
                 const base = store.setupDraft(storyId)?.status === 'draft' ? store.setupDraft(storyId).data : store.setupOf(storyId)?.data;
                 const data = checkIntimate(formMerge(base, b.form), { names: setupNames(storyId) });
-                if (b.confirm === true) { store.confirmSetup({ storyId, data }); keysFor(storyId, chat.key); seedOpening(chat.key); receipt = receiptLines(data); } else store.saveSetupDraft({ storyId, data });
+                if (b.confirm === true) { confirmSetupPersona(chat.key, b.planPersona); store.confirmSetup({ storyId, data }); keysFor(storyId, chat.key); seedOpening(chat.key); draftRelations(chat, b.relationCards); receipt = receiptLines(data); } else store.saveSetupDraft({ storyId, data });
             } else if (b.draft != null) {
                 // 别处分好的（测试期中转卡住时由 Claude 子代理分）：同样逐条核对原文，进草稿等用户核对。
                 const d = store.setupDraft(storyId);
@@ -789,7 +819,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 handoffs?.settle('setup', String(d.id));
             } else if (b.text != null) {
                 const data = fromText(str(b.text, 'text', { max: 200000 }), { names: setupNames(storyId) });
-                if (b.confirm === true) { store.confirmSetup({ storyId, data }); keysFor(storyId, chat.key); seedOpening(chat.key); receipt = receiptLines(data); } else store.saveSetupDraft({ storyId, data });
+                if (b.confirm === true) { confirmSetupPersona(chat.key, b.planPersona); store.confirmSetup({ storyId, data }); keysFor(storyId, chat.key); seedOpening(chat.key); draftRelations(chat, b.relationCards); receipt = receiptLines(data); } else store.saveSetupDraft({ storyId, data });
             } else if (b.discard === true) store.discardSetupDraft(storyId);
             else if (b.keys === true) keysFor(storyId, chat.key);
             return view();
@@ -847,6 +877,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 if (!one) bad('没有这份预设');
                 p.backup(snapshot(store, chat.story_id, { name: `套用前-${chat.story_id}` }));
                 const applied = applyPreset(store, chat.story_id, one);
+                if (one.pack && !(settings().listPacks?.() ?? []).includes(one.pack)) applied.warnings = [...(applied.warnings ?? []), `素材包 ${one.pack} 还没导入，点'导入素材包'`];
                 store.setMeta(`roster_listed:${chat.story_id}`, '1');
                 // 前史还没配检索词的（预设是没配完就存的）补一次
                 if (one.setup?.前史?.some(x => !x.keys?.length)) keysFor(chat.story_id, chat.key);
@@ -855,6 +886,30 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             return { presets: p.list() };
         },
         // 三种来源汇入现有预览／导入：新素材进数据目录，卡书预设交给扩展往 ST 导。
+        'POST /v1/material-pack-upload': b => materialSources().upload(b),
+        'POST /v1/material-pack-git': async b => materialSources().pull(httpsPackUrl(str(b.url, 'url', { max: 2000 }))),
+        'POST /v1/material-pack': b => {
+            const chat = store.requireChat(str(b.chatKey, 'chatKey'));
+            const source = materialPackSource(str(b.path, 'path', { max: 500 }), materialSources().root);
+            const options = findMaterialPacks(source);
+            if (options.length > 1) {
+                if (b.go === true) bad('请先选择一份素材包');
+                return { choices: options.map(dir => ({ path: dir, name: path.relative(source, dir) })) };
+            }
+            const dir = options[0], name = path.basename(dir), checks = checkPack(dir);
+            const packsDir = settings().packsDir?.();
+            if (!packsDir) bad('没有素材包目录');
+            const exists = fs.existsSync(path.join(packsDir, name));
+            const r = { name, path: dir, checks, exists };
+            if (b.go === true) {
+                if (exists && b.overwrite !== true) return { ...r, needsOverwrite: true };
+                r.installed = installPack(dir, packsDir, { overwrite: b.overwrite === true });
+                if (!store.getMeta(`pack:${chat.story_id}`) || b.use === true) store.setMeta(`pack:${chat.story_id}`, name);
+                r.packs = settings().listPacks?.() ?? [];
+                r.pack = store.getMeta(`pack:${chat.story_id}`) || null;
+            }
+            return r;
+        },
         'POST /v1/opening-pack-upload': b => sources().upload(b),
         'POST /v1/opening-pack-git': async b => sources().pull(httpsPackUrl(str(b.url, 'url', { max: 2000 }))),
         'POST /v1/opening-pack': b => {
@@ -878,12 +933,15 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         // 人物关系表（按局存）：看；text＝面板里改过的全文；data＝整份导入（本机工具用）。
         'POST /v1/relations': b => {
             const chat = store.requireChat(str(b.chatKey, 'chatKey'));
+            const drafts = settings().relationsDrafts;
+            if (b.draftId && (drafts?.view(chat.story_id)?.id !== b.draftId || store.relationsOf(chat.story_id)?.人?.length)) bad('关系表或草稿变了，请重新打开核对');
             if (b.text != null) store.putRelations(chat.story_id, relationsFromText(str(b.text, 'text', { max: 300000 })));
             else if (b.data != null) store.putRelations(chat.story_id, normalizeRelations(b.data), { by: 'import' });
+            if (b.text != null || b.data != null) drafts?.clear(chat.story_id);
             const data = store.relationsOf(chat.story_id);
             const d = data ? normalizeRelations(data) : null;
             const now = d && records ? currentLines(relationsNow(store, chat.key, d, records.visible(chat.key), store.getCast(chat.story_id).map(e => e.name))) : [];
-            return { text: d ? relationsText(d) : null, people: d?.人.length ?? 0, unsure: d?.人.filter(p => p.待核.length || /待定/.test(p.能用)).map(p => p.名) ?? [], now };
+            return { text: d ? relationsText(d) : null, people: d?.人.length ?? 0, unsure: d?.人.filter(p => p.待核.length || /待定/.test(p.能用)).map(p => p.名) ?? [], now, ...(drafts ? { draft: drafts.view(chat.story_id) } : {}) };
         },
         // 打开窗口时问一声：用户是不是离开很久刚回来。是就记下这次离开、开始推各人这些天（后台跑），并说由谁先开口。
         // 再问一次拿推演的进度（working｜ready｜failed）。离开记在离开前最后那条上：那之后已经有新消息了，就不算"刚回来"。
@@ -937,7 +995,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             store.requireChat(chatKey);
             const name = str(b.name ?? '', 'name', { max: 200 }).trim();
             const text = str(b.text ?? '', 'text', { max: 64000 }).trim().slice(0, 4000);
-            if (!text) return { ok: true, changed: false };
+            if (!name) return { ok: true, changed: false };
             let old = null;
             try { old = JSON.parse(store.getMeta(`persona:${chatKey}`) ?? 'null'); } catch {}
             if (old && old.name === name && old.text === text) return { ok: true, changed: false };

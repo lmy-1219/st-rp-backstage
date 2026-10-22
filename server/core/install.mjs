@@ -20,8 +20,9 @@ export function checkInstallerPrerequisites({nodeVersion=process.versions.node,g
 }
 export function findSt(start,io=fs) {
     let dir=path.resolve(start);
-    for(;;){if(io.existsSync(path.join(dir,'config.yaml'))&&io.existsSync(path.join(dir,'server.js')))return dir;const parent=path.dirname(dir);if(parent===dir)return null;dir=parent;}
+    for(;;){if(stConfig(dir,io)&&io.existsSync(path.join(dir,'server.js')))return dir;const parent=path.dirname(dir);if(parent===dir)return null;dir=parent;}
 }
+const stConfig=(dir,io)=>[path.join(dir,'config.yaml'),path.join(dir,'config','config.yaml')].find(file=>io.existsSync(file));
 function noLinks(root,file,io) {
     if(io.lstatSync(root).isSymbolicLink())throw Error('安装目录有链接，请先核对实际路径。');
     let at=root;
@@ -64,8 +65,8 @@ function ensureClone(dir,{io,git}) {
 export async function installLayout2({stRoot,dry=false,nodeVersion=process.versions.node,git=gitRun,io=fs,isFree=available}={}) {
     // 所有版本/工具检查必须在任何 mkdir、clone、备份之前。
     checkInstallerPrerequisites({nodeVersion,git});
-    if(!stRoot||!findSt(stRoot,io)||path.resolve(findSt(stRoot,io))!==path.resolve(stRoot))throw Error('找不到SillyTavern：请给包含server.js和config.yaml的目录。');
-    const st=path.resolve(stRoot),plugin=path.join(st,'plugins',NAME),thirdParty=path.join(st,'public','scripts','extensions','third-party',NAME),extension=io.existsSync(thirdParty)?thirdParty:path.join(st,'data','default-user','extensions',NAME),yamlFile=path.join(st,'config.yaml'),configFile=path.join(plugin,'config.json'),backup=yamlFile+'.rp-emergence.bak';
+    if(!stRoot||!findSt(stRoot,io)||path.resolve(findSt(stRoot,io))!==path.resolve(stRoot))throw Error('找不到酒馆的 config.yaml（根目录或 config/ 里），先启动一次酒馆再装。');
+    const st=path.resolve(stRoot),plugin=path.join(st,'plugins',NAME),thirdParty=path.join(st,'public','scripts','extensions','third-party',NAME),extension=io.existsSync(thirdParty)?thirdParty:path.join(st,'data','default-user','extensions',NAME),yamlFile=stConfig(st,io),configFile=path.join(plugin,'config.json'),backup=yamlFile+'.rp-emergence.bak';
     // 用酒馆“安装扩展”装给所有用户的，扩展在 third-party 下：就地更新那一份，不再给 default-user 另装一份（否则会出两个面板）。
     if(io.existsSync(path.join(st,'plugins','rp-emergence'))||io.existsSync(path.join(st,'data','default-user','extensions','rp-emergence')))throw Error('发现旧版rp-emergence目录。请先备份并移出旧扩展和插件，避免重复加载；安装器不会替你移动。');
     for(const file of [plugin,extension,yamlFile,configFile,backup,path.join(st,'data','rp-emergence')])noLinks(st,file,io);

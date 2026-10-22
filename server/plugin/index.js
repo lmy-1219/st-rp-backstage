@@ -2,7 +2,7 @@
 // 浏览器只跟 ST 同一个地址说话 ⇒ 远程/手机玩也能用，且继承 ST 自己的登录保护（白皮书 §9.1-1）。
 // 配置在同目录 config.json：{ "port": <后台端口>, "autoStart": { "entry": "<仓库>/core/main.mjs", "home": "<数据目录>" }, "update": { "follow": "origin/main" } }
 // 后台没起来时，只是这些接口返回 503；ST 本身不受影响（N-40）。
-// 写了 update 的（玩的 ST，D-117）：ST 一启动先把代码跟到正本已推送的最新版、把扩展装好，再拉起后台。
+// 先拉后台；旧布局跟版本在后台进行，新布局由酒馆更新代码。
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFile } from 'node:child_process';
@@ -62,7 +62,21 @@ export function stProxy(config) {
 
 // 后台没在跑就把它作为独立进程拉起来；它和 ST 互不牵连。
 let lastStart = 0;
-async function ensureCore(base, config) {
+export function openCoreLog(config) {
+    const home = path.resolve(config.autoStart?.home ?? path.join(stRoot, 'data', 'rp-emergence'));
+    fs.mkdirSync(home, { recursive: true });
+    const file = path.join(home, '后台日志.txt');
+    if (fs.existsSync(file) && fs.statSync(file).size > 1024 * 1024) {
+        const fd = fs.openSync(file, 'r'), size = fs.fstatSync(fd).size, tail = Buffer.alloc(200 * 1024);
+        try { fs.readSync(fd, tail, 0, tail.length, size - tail.length); } finally { fs.closeSync(fd); }
+        let start = 0; while (start < tail.length && (tail[start] & 0xc0) === 0x80) start++;
+        fs.writeFileSync(file, tail.subarray(start));
+    }
+    const fd = fs.openSync(file, 'a', 0o600);
+    fs.writeSync(fd, `\n[${new Date().toISOString()}] Node ${process.versions.node}；入口 ${config.autoStart.entry}；端口 ${config.port ?? DEFAULT_PORT}\n`);
+    return fd;
+}
+export async function ensureCore(base, config) {
     if (!config.autoStart?.entry || Date.now() - lastStart < 10000 || await health(base)) return;
     lastStart = Date.now();
     const args = ['--disable-warning=ExperimentalWarning', config.autoStart.entry, '--port', String(config.port ?? DEFAULT_PORT), '--st', stRoot];
@@ -70,15 +84,18 @@ async function ensureCore(base, config) {
     if (config.update?.follow) args.push('--follow', config.update.follow);
     const proxy = stProxy(config);
     if (proxy) args.push('--proxy', proxy);
+    let logFd;
     try {
         // 本机若经 HTTP(S)_PROXY 出网（比如本地代理软件），Node 自带的 fetch 要这个开关才会走代理。
         const env = { ...process.env, NODE_USE_ENV_PROXY: '1', ...(proxy ? { HTTPS_PROXY: proxy, HTTP_PROXY: proxy, NO_PROXY: 'localhost,127.0.0.1,::1' } : {}) };
-        const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', windowsHide: true, env });
+        logFd = openCoreLog(config);
+        const child = spawn(process.execPath, args, { detached: true, stdio: ['ignore', logFd, logFd], windowsHide: true, env });
+        child.once('error', error => console.warn('[rp-emergence] 后台启动失败：', error.message));
         child.unref();
         console.log(`[rp-emergence] 已启动本机后台（pid ${child.pid}）`);
     } catch (error) {
         console.warn('[rp-emergence] 后台启动失败：', error.message);
-    }
+    } finally { if (logFd !== undefined) fs.closeSync(logFd); }
 }
 
 function firstFollow(repo, follow) {
@@ -90,6 +107,16 @@ function firstFollow(repo, follow) {
 export async function followRelease(config) {
     if (!config.update?.follow || !config.autoStart?.entry) return;
     const repo = codeRepo(config.autoStart.entry);
+    if (pluginPaths().layout2) {
+        // 酒馆已经更新两份克隆；这里只比本地清单，不再 fetch 或复制。
+        try {
+            const version = JSON.parse(fs.readFileSync(path.join(repo, 'release.json'), 'utf8')).version;
+            const candidates = [path.join(stRoot, 'public', 'scripts', 'extensions', 'third-party', 'st-rp-backstage', 'release.json'), path.join(stRoot, 'data', 'default-user', 'extensions', 'st-rp-backstage', 'release.json')];
+            const file = candidates.find(f => fs.existsSync(f));
+            if (file && JSON.parse(fs.readFileSync(file, 'utf8')).version !== version) console.warn('[rp-emergence] 扩展和后台版本还没对上，再重启一次酒馆。');
+        } catch (error) { console.warn('[rp-emergence] 没读到本地版本：', error.message); }
+        return;
+    }
     const updater = path.join(path.dirname(config.autoStart.entry), 'update.mjs');
     try {
         // 代码比"跟着正本"这套还旧（还没有 update.mjs）：先自己拉取、快进一次，有了再往下走
@@ -119,12 +146,12 @@ async function restartIfStale(base, config) {
     } catch (error) { console.warn('[rp-emergence] 让后台重启时出错：', error.message); }
 }
 
-export async function init(router) {
-    const config = readConfig();
+export async function init(router, { loadConfig = readConfig, startCore = ensureCore, follow = followRelease, restart = restartIfStale } = {}) {
+    const config = loadConfig();
     const base = `http://127.0.0.1:${config.port ?? DEFAULT_PORT}`;
-    await followRelease(config);
-    await restartIfStale(base, config);
-    ensureCore(base, config);
+    await startCore(base, config);
+    // 网络检查不挡后台或酒馆；开发、试玩旧布局仍按原次序跟版再核重启。
+    void Promise.resolve().then(() => follow(config)).then(() => restart(base, config)).catch(error => console.warn('[rp-emergence] 后台版本检查失败：', error.message));
 
     router.get('/health', async (_req, res) => {
         res.status((await health(base)) ? 200 : 503).json({ ok: await health(base) });

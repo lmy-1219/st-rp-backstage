@@ -3,7 +3,7 @@
 // ② 每次某个角色要发言前，向后台要"只给他的那一格"，临时塞进这次请求，用完即清；
 // ③ 设置面板里的开关与状态。后台连不上时什么都不做，ST 照常。
 import { visibleTo, filterVisible, knockHtml, autoDoorHtml, autoTurnEnabled, applyLeaveEvent, isolateLeaveSupportsIndex, closeIsolationAt, runLeaveAttempt, resetLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
-import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload } from './sync.mjs';
+import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 
 const MODULE = 'rp_emergence';
 const KEYS = { rule: 'rp_emergence_rule', slot: 'rp_emergence_slot', mid: 'rp_emergence_mid', recall: 'rp_emergence_recall', world: 'rp_emergence_world' };
@@ -141,16 +141,47 @@ async function api(route, body, timeout = 30000) {
         const response = await fetch(`/api/plugins/rp-emergence/${route}`, {
             method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(timeout),
         });
-        state.backendDown = response.status >= 500 || response.status === 404 && (route === 'update' || state.backendDown === true);
+        backendConnection.observe(response.status);
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw Object.assign(new Error(data.error || String(response.status)), { status: response.status });
         ok = true;
         return data;
-    } catch (error) { if (!error.status) state.backendDown = true; throw error; }
+    } catch (error) { if (!error.status) backendConnection.observe(0); throw error; }
     finally { tick(`后台:${route}`, performance.now() - t0, ok ? '' : '失败'); }
 }
 
 const state = { epoch: 0, chatKey: null, syncing: false, dirty: false, timer: null, status: null, plan: null, planTimer: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null, entering: new Set() };
+
+// 不依赖打开聊天：短暂启动失败先等两分钟，404 则直接告诉玩家插件没加载。
+export function createBackendConnection({ request, now = Date.now, schedule = setTimeout, cancel = clearTimeout, changed = () => {} }) {
+    let kind = 'starting', since = null, timer = null, busy = false, revision = 0;
+    const view = () => ({ kind, backendDown: kind === 'missing' || kind === 'down' });
+    const stop = () => { if (timer !== null) cancel(timer); timer = null; };
+    const observe = status => {
+        if (status >= 200 && status < 500 && status !== 404) { revision++; kind = 'healthy'; since = null; stop(); }
+        else if (status === 404) { revision++; kind = 'missing'; since = null; stop(); }
+        else {
+            revision++; since ??= now(); kind = now() - since >= 120000 ? 'down' : 'starting';
+            if (kind === 'down') stop();
+            else if (timer === null) timer = schedule(() => { timer = null; void check(); }, 5000);
+        }
+        changed(view()); return view();
+    };
+    const check = async (reset = false) => {
+        if (busy) return view();
+        if (reset) { stop(); since = null; kind = 'starting'; changed(view()); }
+        busy = true; const began = revision;
+        try { const status = await request(); if (began === revision) observe(status); }
+        catch { if (began === revision) observe(0); }
+        finally { busy = false; }
+        return view();
+    };
+    return { observe, check, view, stop };
+}
+const backendConnection = createBackendConnection({
+    request: async () => (await fetch('/api/plugins/rp-emergence/health', { signal: AbortSignal.timeout(3000) })).status,
+    changed: status => { state.backendStatus = status.kind; state.backendDown = status.backendDown; render(); },
+});
 
 const escapeHtml = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
@@ -369,6 +400,7 @@ function driftHtml(d) {
 // 外援队列件数变多了：轻提示一次（后台调模型没响应，活已经写成外援包等 AI 窗口接手）。
 async function refreshHandoffs() {
     try { state.handoffUi = await api('handoff-ui', { action: 'list' }); } catch { state.handoffUi = null; }
+    if (state.relationsDraft?.status === 'handoff') void refreshRelationsDraft();
     render();
 }
 function noticeHandoffs(n = 0) {
@@ -477,8 +509,43 @@ async function openSetup() {
 
 // 确认后的回执：各段去了哪（谁看得到、什么时候用）
 async function showReceipt(lines) {
+    void refreshRelationsDraft();
     if (!lines?.length) { globalThis.toastr?.success('开局单已生效。'); return; }
     await ctx().callGenericPopup(`<h3>开局单已生效</h3><p><small>从现在起算数，随时能改。各段去了哪：</small></p><ul style="text-align:left">${lines.map(l => `<li>${escapeHtml(l)}</li>`).join('')}</ul>`, ctx().POPUP_TYPE.TEXT, '', { allowVerticalScrolling: true });
+}
+
+async function relationCardsFor(chatKey) {
+    const { cast } = await api('cast', { chatKey });
+    const chars = new Map((ctx().characters ?? []).map(c => [c.avatar, c]));
+    let room = 120000;
+    return [...cast].filter(c => c.role !== '不用' && !String(c.avatar).startsWith('face:')).sort((a,b) => Number(b.role === '主要')-Number(a.role === '主要')).flatMap(person => {
+        const c = chars.get(person.avatar); if (!c) return [];
+        const raw = [c.description, c.personality, c.scenario].filter(x => typeof x === 'string' && x.trim()).join('\n');
+        const cap = Math.min(3000, room), marker = '（后面略）';
+        const text = raw.length > cap ? (cap >= marker.length ? raw.slice(0, cap-marker.length)+marker : '') : raw;
+        room -= text.length;
+        return [{ avatar: person.avatar, text, sourceChars: raw.length }];
+    });
+}
+
+async function refreshRelationsDraft() {
+    clearTimeout(state.relationsTimer);
+    const chatKey = state.chatKey, epoch = state.epoch;
+    if (!chatKey) return;
+    try {
+        const r = await api('relations', { chatKey });
+        if (chatKey !== state.chatKey || epoch !== state.epoch) return;
+        state.relationsDraft = r.draft ?? null; render();
+        if (['working', 'handoff'].includes(r.draft?.status)) state.relationsTimer = setTimeout(refreshRelationsDraft, r.draft.status === 'working' ? 2000 : 10000);
+    } catch { /* 下次打开窗口或同步时再查，不影响聊天。 */ }
+}
+
+export function relationsDraftHtml(d, escape = s => s) {
+    if (!d) return '';
+    if (d.status === 'drafted') return `<button class="menu_button" type="button" data-action="relations-draft" title="核对自动草稿，保存后才生效。">关系表草稿好了（${d.people} 人），点开核对</button><small>这次起草花了约 $${Number(d.costUsd ?? 0).toFixed(4)}${d.via === 'handoff' ? '（不含外援费用）' : ''}${d.truncatedChars ? `；输入截短了 ${d.truncatedChars} 字` : ''}</small>`;
+    if (d.status === 'working') return '<small>关系表正在起草，核对保存才生效。</small>';
+    if (d.status === 'handoff') return '<small>关系表起草没响应，已放进外援；交回后仍要核对保存。</small>';
+    return `<small>${escape(d.reason ?? '关系表还没起好，可手写或从素材整理')}</small>`;
 }
 
 // 故事节奏（章程 H2）：快／中／慢，选了旁边小字说这一档是什么样
@@ -522,8 +589,11 @@ function castPicked(root, key) {
     const typed = String(root.querySelector(`[data-f="${key}自填"]`)?.value ?? '').split(/[、,，/]/).map(x => x.trim()).filter(Boolean);
     return [...new Set([...ticked, ...typed])];
 }
+export function setupPersonaHtml(name, escape = escapeHtml) {
+    return `<p>这一局你演的是：<b>${escape(name || '当前未知')}</b>（当前人设）。点错了先去切人设再确认。</p>`;
+}
 async function openSetupForm(s) {
-    const c = ctx(), chatKey = state.chatKey;
+    const c = ctx(), chatKey = state.chatKey, setupPersona = String(c.name1 ?? '').trim();
     const d = s.confirmed?.data ?? {};
     const t = d.时间 ?? {};
     const own = (d.类别 ?? []).filter(x => !CATEGORIES.includes(x));
@@ -531,7 +601,7 @@ async function openSetupForm(s) {
     const rows = Array.isArray(s.rows) ? s.rows : [];
     const crew = Array.isArray(s.crew) ? s.crew : Array.isArray(d.主角团) ? d.主角团 : [];
     const mustCast = Array.isArray(s.mustCast) ? s.mustCast : mustCastFrom(d);
-    const html = `<h3>开局单 · 填表</h3><p><small>带 * 的必填，其余都能空着。"核心主线"到"必要情节"每行一条，会加进现在那份里（已有的不重复）；要删、要改原来的，去"看和改全文"。"人物开场状态"列的是现有的全部，在这儿改、删、加都算数。</small></p>
+    const html = `<h3>开局单 · 填表</h3>${setupPersonaHtml(setupPersona)}<p><small>带 * 的必填，其余都能空着。"核心主线"到"必要情节"每行一条，会加进现在那份里（已有的不重复）；要删、要改原来的，去"看和改全文"。"人物开场状态"列的是现有的全部，在这儿改、删、加都算数。</small></p>
       <div style="text-align:left">
         <label style="display:block;margin:.5em 0 .1em"><b>基调 *</b>（一两句：整体什么氛围、这一局最看重什么）</label>
         <textarea class="text_pole" data-f="基调" rows="2" style="width:100%">${escapeHtml(d.基调 ?? '')}</textarea>
@@ -618,30 +688,32 @@ async function openSetupForm(s) {
     });
     if (result !== c.POPUP_RESULT.AFFIRMATIVE && result !== c.POPUP_RESULT.CUSTOM1) return;
     try {
-        const r = await api('setup', { chatKey, form, confirm: result === c.POPUP_RESULT.AFFIRMATIVE });
+        if (result === c.POPUP_RESULT.AFFIRMATIVE) { await sendPersona(); if (String(ctx().name1 ?? '').trim() !== setupPersona) throw new Error('人设变了，请重新打开开局单核对'); }
+        const r = await api('setup', { chatKey, form, confirm: result === c.POPUP_RESULT.AFFIRMATIVE, ...(result === c.POPUP_RESULT.AFFIRMATIVE ? { planPersona: setupPersona, relationCards: await relationCardsFor(chatKey) } : {}) });
         if (result === c.POPUP_RESULT.AFFIRMATIVE) await showReceipt(r.receipt);
         else globalThis.toastr?.info('存成草稿了，下次点"开局单 → 核对草稿"接着改。');
     } catch (error) { globalThis.toastr?.warning(error.message || '后台暂时连不上。'); }
 }
 
 async function openSetupText(s) {
-    const c = ctx(), chatKey = state.chatKey;
+    const c = ctx(), chatKey = state.chatKey, setupPersona = String(c.name1 ?? '').trim();
     const current = s.draft?.text ?? s.confirmed?.text ?? null;
     if (!current) return pasteSetup(chatKey);
     const note = s.draft?.text
         ? `后台分好的草稿，还没生效。${s.draft.unchecked ? `带 ⚠ 的 ${s.draft.unchecked} 条在你的原文里没找到对应的话，请看一眼。` : ''}改完点"确认"，从现在起生效${s.confirmed ? '，替换现在那一版' : ''}。`
         : `现在生效的开局单（${new Date(s.confirmed.at).toLocaleString()} 确认）。改完点"确认"就换成新的一版。`;
-    const { result, text } = await textPopup('开局单', [note, ...(s.intimateWarnings ?? [])].join('\n'), current, { ok: '确认', cancel: s.draft?.text ? '先放着' : '关闭', extra: '重新贴一段' });
-    if (result === c.POPUP_RESULT.AFFIRMATIVE) { const r = await api('setup', { chatKey, text, confirm: true }); await showReceipt(r.receipt); }
+    const { result, text } = await textPopup('开局单', [setupPersonaHtml(setupPersona), note, ...(s.intimateWarnings ?? [])].join('\n'), current, { ok: '确认', cancel: s.draft?.text ? '先放着' : '关闭', extra: '重新贴一段' });
+    if (result === c.POPUP_RESULT.AFFIRMATIVE) { await sendPersona(); if (String(ctx().name1 ?? '').trim() !== setupPersona) throw new Error('人设变了，请重新打开开局单核对'); const r = await api('setup', { chatKey, text, confirm: true, planPersona: setupPersona, relationCards: await relationCardsFor(chatKey) }); await showReceipt(r.receipt); }
     else if (result === c.POPUP_RESULT.CUSTOM1) await pasteSetup(chatKey);
     else if (s.draft?.text && text !== current) await api('setup', { chatKey, text });   // 草稿改过的先存着
 }
 
 // ---------- 人物关系表 ----------
 // 这一局的人各是谁、地盘、和谁什么关系、故事开始时知道什么、外人眼里什么样。规划者读全表；每个角色开口前只拿他自己那几行。
-async function openRelations(append = '') {
+async function openRelations(append = '', draftId = null) {
     const c = ctx(), chatKey = state.chatKey;
     const r = await api('relations', { chatKey });
+    if (draftId && (r.draft?.id !== draftId || r.people)) { globalThis.toastr?.warning('关系表或草稿变了，请重新打开核对。'); await refreshRelationsDraft(); return false; }
     const blank = '【说明】\n【公开】（谁都知道的）\n【备注】\n【不在了】（规划不排）\n【人】\n\n## 人名\n又名：\n现在：\n地盘：\n关系：\n· 某人：怎样\n开局知道：\n· \n开局不知道：\n· \n';
     const note = r.text
         ? `这一局的关系表，${r.people} 人。${r.unsure.length ? `有待核或待定的：${r.unsure.join('、')}。` : ''}"开局不知道"只给规划者看，不会递给角色。改完点"保存"，下一轮起生效。`
@@ -651,7 +723,8 @@ async function openRelations(append = '') {
     const start = append ? `${r.text ?? ''}\n\n${append}`.trim() + '\n' : r.text ?? blank;
     const { result, text } = await textPopup('人物关系表', (append ? '<b>最后面接着的是从素材整理出来的，核对、删改后保存。</b><br>' : '') + note + later, start, { ok: '保存', cancel: '关闭' });
     if (result === c.POPUP_RESULT.AFFIRMATIVE && text !== (r.text ?? blank)) {
-        const saved = await api('relations', { chatKey, text });
+        const saved = await api('relations', { chatKey, text, ...(draftId ? { draftId } : {}) });
+        await refreshRelationsDraft();
         globalThis.toastr?.success(`关系表已保存（${saved.people} 人）。`);
         return true;
     }
@@ -782,7 +855,8 @@ async function openPresets() {
                 list = (await api('preset', { chatKey, save: n, includeGrownFaces })).presets;
                 globalThis.toastr?.success('存好了。');
             }
-            if (act === 'import') box.querySelector('[data-f="file"]').click();
+            // 先 return：后面的 draw() 会把这个隐藏的文件框换掉，选完文件的 change 落在已经不在页面上的旧框上，就没反应了（用户 10/22）
+            if (act === 'import') { box.querySelector('[data-f="file"]').click(); return; }
             if (act === 'apply') {
                 const ok = await c.callGenericPopup(`把"${escapeHtml(name)}"套到这一局？这一局现在的开局单、名册、关系表、素材包、离开时怎么算会换成预设里的（原来的样子后台另存了一份）。`, c.POPUP_TYPE.CONFIRM);
                 if (!ok) return;
@@ -1326,6 +1400,8 @@ async function syncNow(force = false) {
         do {
             state.dirty = false;
             const c = ctx();
+            await sendPersona();
+            if (epoch !== state.epoch) return;
             cameraOf(c);   // 旁白卡写的记 narrator：先认出它再算指纹
             const tb = performance.now();
             const { seq, bodies } = buildSequence(c.chat, fallbackAvatar(c));
@@ -1361,7 +1437,7 @@ async function syncNow(force = false) {
                 refreshLore();
                 refreshPlan();
             }
-            sendPersona();
+            void sendPersona().catch(() => {});
             // 打开窗口后第一次同步完：把 ST 里现有的卡交给后台补名册（新卡给默认档，用户改过的不动）。
             if (state.castSent !== state.chatKey) {
                 state.castSent = state.chatKey;
@@ -1378,6 +1454,7 @@ async function syncNow(force = false) {
                 checkReturn(state.chatKey, epoch);
                 refreshPlanStatus();
                 api('pack', { chatKey: state.chatKey }).then(p => { state.pack = p; render(); }).catch(() => {});
+                void refreshRelationsDraft();
             }
         }
     } catch (error) {
@@ -1393,22 +1470,85 @@ async function syncNow(force = false) {
 }
 
 // 玩家的人设交给后台（N-368）：接入、切窗口、每次同步完都看一眼，名字和描述跟上次发的一样就不发；拿不到就不发，发不出去下次再试，不报错
-function sendPersona() {
+async function sendPersona(chatKey = state.chatKey) {
+    personaWatch.check();
+    if (state.personaFlight) await state.personaFlight;
     let p = null;
-    try { p = personaPayload(ctx(), state.chatKey); } catch {}
+    try { if (chatKey === ctx().chatMetadata?.rp_emergence?.chatKey) p = personaPayload(ctx(), chatKey); } catch {}
     if (!p || state.personaSent === p.key) return;
-    state.personaSent = p.key;
-    api('persona', p.body).catch(() => { if (state.personaSent === p.key) state.personaSent = null; });
+    const flight = api('persona', p.body).then(() => { state.personaSent = p.key; });
+    state.personaFlight = flight;
+    try { await flight; } finally { if (state.personaFlight === flight) state.personaFlight = null; }
+}
+
+const personaWatch = createPersonaWatch({
+    current: () => {
+        const c = ctx(), mark = c.chatMetadata?.rp_emergence?.chatKey;
+        // ST 重新打开空聊天时，后台 open 尚未返回，state.chatKey 会暂时空着；
+        // 聊天自己的标记和 ST 身份仍在，不能因此把同窗切人设误当首次读到。
+        if (!settings().enabled || !mark || (state.chatKey === mark && state.status?.enabled === false)) return null;
+        return { key: chatIds(c).stChatId, name: String(c.name1 ?? '').trim() };
+    },
+    onChange: (from, to) => {
+        globalThis.toastr?.info(`人设换了：${from} → ${to}。之后的规划会按 ${to}；要是点错了，现在切回去。`, 'RP：幕后');
+        void sendPersona().then(() => refreshPlanStatus()).catch(() => {});
+    },
+});
+
+async function confirmPersonaNow(chatKey, name) {
+    await sendPersona(chatKey);
+    if (ctx().chatMetadata?.rp_emergence?.chatKey !== chatKey || String(ctx().name1 ?? '').trim() !== name) throw new Error('人设变了，请重新核对');
+    await api('plan-persona', { chatKey, confirm: true, name });
+    refreshPlanStatus();
+}
+
+async function askPlanPersona(wait) {
+    if (!wait || state.personaPromptBusy) return;
+    const c = ctx(), chatKey = state.chatKey, name = wait.current || String(c.name1 ?? '').trim();
+    const key = `${chatKey}:${wait.id}:${name}`;
+    state.personaPrompted ??= new Set();
+    if (state.personaPrompted.has(key)) return;
+    state.personaPrompted.add(key); state.personaPromptBusy = true;
+    try {
+        const continuing = state.personaFallback?.chatKey === chatKey && state.personaFallback.name !== name;
+        const html = continuing ? `<h3>用「${escapeHtml(name)}」继续规划吗？</h3>` : `<h3>确认规划人设</h3><p>这一局的规划要按人设「${escapeHtml(name || '当前未知')}」来排（${wait.previous ? `上次是「${escapeHtml(wait.previous)}」` : '这是第一份规划'}）。</p>`;
+        const result = await c.callGenericPopup(html, c.POPUP_TYPE.CONFIRM, '', { okButton: continuing ? '继续' : '确认用此人设', cancelButton: '更改人设' });
+        if (state.chatKey !== chatKey) return;
+        if (result === c.POPUP_RESULT.AFFIRMATIVE) { await confirmPersonaNow(chatKey, name); state.personaFallback = null; return; }
+        if (result !== c.POPUP_RESULT.NEGATIVE) return;
+        const choices = Object.entries(stPowerUser?.power_user?.personas ?? c.powerUserSettings?.personas ?? {}).filter(([,n]) => typeof n === 'string' && n.trim());
+        let selected = null;
+        if (choices.length && typeof c.executeSlashCommandsWithOptions === 'function') {
+            const pick = await c.callGenericPopup(`<h3>更改人设</h3><select class="text_pole" data-role="plan-persona-choice">${choices.map(([avatar,n]) => `<option value="${escapeHtml(avatar)}">${escapeHtml(n)}</option>`).join('')}</select>`, c.POPUP_TYPE.CONFIRM, '', { okButton: '用这个并继续', cancelButton: '先放着', onClosing: popup => { selected = popup.dlg.querySelector('[data-role="plan-persona-choice"]')?.value; return true; } });
+            if (pick !== c.POPUP_RESULT.AFFIRMATIVE || state.chatKey !== chatKey) return;
+            const target = choices.find(([a]) => a === selected);
+            try {
+                if (!target || /["\\\r\n|]/.test(target[0])) throw new Error('人设标识无法安全传给命令');
+                await c.executeSlashCommandsWithOptions(`/persona-set mode=lookup "${target[0]}"`);
+                if (ctx().chatMetadata?.rp_emergence?.chatKey !== chatKey || String(ctx().name1 ?? '').trim() !== target[1]) throw new Error('人设没有换过去');
+                await confirmPersonaNow(chatKey, target[1]); state.personaFallback = null; return;
+            } catch { /* 老酒馆命令不可用时留给人设页切换。 */ }
+        }
+        state.personaFallback = { chatKey, name };
+        globalThis.toastr?.info('去用户设置页切到正确的人设，切好以后会自动继续', 'RP：幕后');
+    } catch (error) { globalThis.toastr?.warning(error.message || '人设确认没成功，规划仍在等'); }
+    finally { state.personaPromptBusy = false; }
 }
 
 // ---------- 窗口接入 ----------
 
 async function onChatChanged() {
+    const samePersonaWindow = state.personaWindow === chatIds(ctx()).stChatId;
+    personaWatch.pause();
+    if (!samePersonaWindow) { state.personaPrompted = new Set(); state.personaFallback = null; }
+    state.personaWindow = chatIds(ctx()).stChatId;
     const epoch = ++state.epoch;
     state.lastCameraPrompt = null;
     state.lastPrompt = null;   // 换了窗口：上一次量的长度（别的卡、别的聊天）不作数
     clearTimeout(state.timer);
     clearTimeout(state.planTimer);
+    clearTimeout(state.relationsTimer);
+    state.relationsDraft = null;
     clearPrompts();
     Object.assign(state, { chatKey: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
     Object.assign(auto, { on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map() });
@@ -1439,6 +1579,7 @@ async function onChatChanged() {
             await c.saveMetadata();
         }
         state.chatKey = result.chatKey;
+        personaWatch.check();
         scheduleSync(0);
         setTimeout(() => { if (epoch === state.epoch) autoPeek().catch(() => {}); }, 2500);
     } catch {
@@ -1587,8 +1728,11 @@ export function releaseLabel(info) {
     const version = edition === '正式版' && Number.isSafeInteger(info.version) && info.version > 0 ? ` v${typeof info.label === 'string' && /^\d+(\.\d+)?$/.test(info.label) ? info.label : info.version}` : '';
     return `${edition}${version} · ${info.running ?? info.head ?? '版本未取得'}${info.release ? info.ok === false || info.fetchFailed ? ' · 新版检查失败' : info.behind > 0 ? ' · 有新版本' : ' · 发布分支无新版' : ''}`;
 }
-export function installationHint({backendDown,localRelease,backendRelease}={}) {
-    if(backendDown)return '<p>还差一步：运行安装器（Windows 双击 安装.bat；手机和 Mac 运行 install.sh），然后重启酒馆。 <a href="https://github.com/lmy-1219/st-rp-backstage#安装" target="_blank" rel="noopener noreferrer">查看安装说明</a></p>';
+export function installationHint({backendDown,backendStatus,localRelease,backendRelease}={}) {
+    const retry = '<button class="menu_button" type="button" data-action="health-retry" title="重新检查后台，建议修好连接后点。">再查一次</button>';
+    if(backendStatus==='starting')return '<p role="status">后台正在启动……</p>';
+    if(backendStatus==='missing')return '<p>后台插件还没装上（只装了面板）。要在运行酒馆的那台机器上跑一次安装器：Windows 双击 安装.bat；手机 Termux、Mac、Linux、云服务器运行 install.sh；然后重启酒馆。用 Docker 或者云服务器部署的，看说明里“云服务器／Docker”一节。 <a href="https://github.com/lmy-1219/st-rp-backstage#安装" target="_blank" rel="noopener noreferrer">查看安装说明</a></p><small>酒馆的“安装扩展”只能装面板这一半；报“Directory already exists”是面板已经装过了，不用再装。</small>'+retry;
+    if(backendStatus==='down'||backendDown)return '<p>插件装好了，但后台没起来。重启一次酒馆试试；还不行，把 data/rp-emergence/后台日志.txt 最后几十行发到群里或 Issues。</p>'+retry;
     if(localRelease?.layout===2&&Number.isSafeInteger(localRelease.version)&&Number.isSafeInteger(backendRelease?.version)&&localRelease.version!==backendRelease.version)return '<p>扩展和后台版本还没对上，重启一次酒馆就好。</p>';
     return '';
 }
@@ -1755,7 +1899,7 @@ export function stageHelp(id) {
 }
 export function onboardingHtml({ hasChat = false, joined = false } = {}) {
     if (joined) return '';
-    const steps = ['先到“设置 → 钥匙和模型”填好钥匙。','在酒馆新建群聊并加入角色，单聊也可以。','打开聊天，若弹出接入确认就点“接入”；没弹时到“设置”勾选“本窗口接入”。','三选一：有局预设就套上；没有就填开局单或贴大纲、核对后确认生效；有整套开局包就点“导入开局包”，它会自动建群、接入和套设定，可跳过前面的第2～4步。','发第一句话开玩。第一次有人开口时开始规划，需几分钟、约一两美元；规划好之前角色照常说话。'];
+    const steps = ['先到“设置 → 钥匙和模型”填好钥匙。','在酒馆新建群聊并加入角色，单聊也可以。','打开聊天，若弹出接入确认就点“接入”；没弹时到“设置”勾选“本窗口接入”。','三选一：有局预设就套上；没有就填开局单或贴大纲、核对后确认生效；有整套开局包就点“导入开局包”，它会自动建群、接入和套设定，可跳过前面的第2～4步。','发第一句话开玩。第一份规划等开局单确认生效、或你发了第一句才开始，需几分钟、约一两美元；规划好之前角色照常说话。'];
     const start = hasChat ? 3 : 1;
     return `<section class="rpe-card" data-guide-start="${start}"><h4>开一局的顺序</h4><ol start="${start}">${steps.slice(start-1).map(s=>`<li>${s}</li>`).join('')}</ol></section>`;
 }
@@ -1766,14 +1910,14 @@ export function panelPageHtml(page) {
         <section class="rpe-card" data-role="tasks-card" hidden><h4>待处理</h4><div data-role="tasks"></div></section>
         ${card('幕后', '<p data-role="plan"></p><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + button('plan-reveal', '看幕后（剧透）') + '</div>')}
         <details class="rpe-card" data-role="handoff-details"><summary>外援</summary><small>把未完成任务交给其他AI，建议按题目交回。</small><div data-role="handoffs" hidden></div><div data-role="extract-alert"></div></details></div>`;
-    if (page === 'story') return `<div data-joined>${card('这一局', '<p><small>有局预设：套上就行。没有：填开局单，或贴大纲让后台拆，核对确认后可保存、导出为局预设。开局包是作者用 skill 生成的整套卡、书和设定，点“导入开局包”会新建群。</small></p><div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
+    if (page === 'story') return `<div data-joined><div data-role="relations-draft"></div>${card('这一局', '<p><small>有局预设：套上就行。没有：填开局单，或贴大纲让后台拆，核对确认后可保存、导出为局预设。开局包是作者用 skill 生成的整套卡、书和设定，点“导入开局包”会新建群。</small></p><div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
         <div class="rpe-grid">${button('setup', '开局单')}${button('cast', '名册')}${button('relations', '关系表')}${button('presets', '局预设')}${button('opening-pack', '导入开局包')}</div></div>`;
     if (page === 'ledger') return `<div data-joined class="rpe-stack">${button('records', '总结详情')}${button('ledger', '账本')}${button('pending', '约定历史')}${button('episodes', '剧情总览')}${button('talk', '任意调整 <small>几美分一句</small>')}</div>`;
     if (page === 'settings') return `${card('设置', '<label>玩法（全局默认）：<select data-opt="playMode"><option value="full">完整</option><option value="memory">只记忆</option></select></label><small>只记忆：只留记性（总结、召回、不串知），不排剧情、不推演，省钱；角色主动性会弱一些。</small><label class="checkbox_label"><input type="checkbox" data-opt="windowConnected"> 本窗口接入</label><label>每天最多花（美元）<input class="text_pole" type="number" min="0" max="500" step="0.1" data-opt="dailyBudget" aria-label="每天最多花（美元）"></label>' + button('stages', '钥匙和模型') + '<small data-role="edition"></small><a data-role="release" data-action="update" hidden href="#">检查更新</a>')}${card('去复读', '<small>先用免费第一档；第二档只改绑定角色。</small>' + button('fresh-settings', '去复读两档与口吻语料'))}${button('advanced', '高级（创作者用）›')}`;
     if (page !== 'advanced') return '';
     return `${button('advanced-back', '‹ 返回设置')}
         ${card('口味', '<div data-role="prompt-pack-controls"></div>' + button('prompt-pack', '看／改口味包 · 导入／导出') + button('prompt-preview', '预览规划题目（不花钱）'))}
-        ${card('这一局的细节', '<label data-role="pack-row">素材包：<select data-opt="pack"></select></label><label data-role="away-row">离开时这一局：<select data-opt="awayMode"><option value="">跟着默认</option><option value="real">照现实过</option><option value="pause">世界等你</option></select></label><label class="checkbox_label"><input type="checkbox" data-opt="speakFirst"> 离开回来时由角色先开口</label><label class="checkbox_label"><input type="checkbox" data-opt="cameraJoin"> 有卡的人在场时旁白也接没卡的人的戏</label>' + button('camera', '一个人时的旁白') + button('plan-request', '要下一个节点的规划（约一两美元）') + button('lore', '世界书谁知道') + '<small>后台自动判每条世界书谁该知道（要打开“世界书按开口的人筛”）；判错了在这里改。一般不用动。</small>')}
+        ${card('这一局的细节', '<label data-role="pack-row">素材包：<select data-opt="pack"></select> <button class="menu_button" type="button" data-action="material-pack" title="导入参考资料，建议先核对预览。">导入素材包</button></label><label data-role="away-row">离开时这一局：<select data-opt="awayMode"><option value="">跟着默认</option><option value="real">照现实过</option><option value="pause">世界等你</option></select></label><label class="checkbox_label"><input type="checkbox" data-opt="speakFirst"> 离开回来时由角色先开口</label><label class="checkbox_label"><input type="checkbox" data-opt="cameraJoin"> 有卡的人在场时旁白也接没卡的人的戏</label>' + button('camera', '一个人时的旁白') + button('plan-request', '要下一个节点的规划（约一两美元）') + button('lore', '世界书谁知道') + '<small>后台自动判每条世界书谁该知道（要打开“世界书按开口的人筛”）；判错了在这里改。一般不用动。</small>')}
         ${card('送给前台的', '<label>每轮只送最近：<select data-opt="historyRounds"><option value="0">不限（ST 默认）</option><option value="10">10 轮</option><option value="15">15 轮</option><option value="20">20 轮</option><option value="30">30 轮</option></select> 聊天</label><label class="checkbox_label"><input type="checkbox" data-opt="digestOld"> 较早的回复换成大意，最近 <select data-opt="digestKeep"><option>4</option><option>6</option><option>8</option><option>12</option><option>20</option></select> 条照原文</label><label class="checkbox_label"><input type="checkbox" data-opt="loreFilter"> 世界书按开口的人筛</label>' + button('places', '提示词位置'))}
         ${card('后台', '<p data-role="ledger"></p><div class="rpe-grid">' + button('stages', '各环节的模型') + button('tuning', '调参') + button('extract', '暂停每条总结') + button('backfill', '补记接入以前的消息') + button('sync', '立即同步') + button('update', '检查更新') + '</div><label>新开的窗口：<select data-opt="newChats"><option value="ask">问我</option><option value="auto">直接接入</option><option value="off">不接入</option></select></label>')}
         <details class="rpe-card"><summary>排查用（平时不用开）</summary><p data-role="status"></p><span data-role="leave-retries"></span><small data-role="waiting"></small><p data-role="warn" hidden></p>${button('confirm', '确认，是我删的')}
@@ -1817,8 +1961,9 @@ function mountPanel() {
     });
     render = () => {
         const s = settings(), st = state.status;
+        $('[data-role="relations-draft"]').innerHTML = relationsDraftHtml(state.relationsDraft, escapeHtml);
         const hint=$('[data-role="installation-hint"]');
-        hint.innerHTML=installationHint({backendDown:state.backendDown,localRelease:state.localRelease,backendRelease:state.release});hint.hidden=!hint.innerHTML;
+        hint.innerHTML=installationHint({backendDown:state.backendDown,backendStatus:state.backendStatus,localRelease:state.localRelease,backendRelease:state.release});hint.hidden=!hint.innerHTML;
         const door = document.querySelector('#rpe_door');
         if (door) {
             door.innerHTML = state.chatKey && s.enabled ? autoDoorHtml({...auto,items:state.door?.items??[],lit:state.door?.lit},escapeHtml) : '';
@@ -1842,7 +1987,7 @@ function mountPanel() {
         $('[data-role="plan-row"]').hidden = !state.chatKey;
         const planning = st?.planning ?? ps?.planning;
         $('[data-role="plan"]').textContent = !state.chatKey || !ps ? '' : ps.playReason ? ps.playReason + '，规划已停' : ps.provider === 'off' ? '规划关着'
-            : (planning?.running || ps.last?.status === 'requested' ? '在规划' : planning?.failure || ps.last?.status === 'failed' ? '没成功（' + (planning?.message || '上次没写成') + '）' : ps.last?.status === 'ready' ? '规划好了' : '还没有规划')
+            : (ps.awaitingPersona ? '等你确认人设' : planning?.running || ps.last?.status === 'requested' ? '在规划' : planning?.failure || ps.last?.status === 'failed' ? '没成功（' + (planning?.message || '上次没写成') + '）' : ps.last?.status === 'ready' ? '规划好了' : '还没有规划')
               + ' · 口袋 ' + (ps.counts?.pocket ?? 0) + ' 件 · 等着 ' + (ps.counts?.waiting ?? 0) + ' 件';
         $('[data-opt="windowConnected"]').checked = !!state.chatKey && st?.enabled !== false;
         $('[data-opt="windowConnected"]').disabled = !s.enabled;
@@ -1853,8 +1998,8 @@ function mountPanel() {
         $('[data-role="tasks"]').innerHTML = pendingTasksHtml(tasks);
         const badge = $('[data-role="pending-badge"]'); badge.hidden = !tasks.length; badge.textContent = tasks.length + ' 件待处理';
         const dot = $('[data-role="connection-dot"]');
-        dot.dataset.state = state.backendDown ? 'error' : state.chatKey && st?.enabled !== false && s.enabled ? 'on' : 'off';
-        dot.setAttribute('aria-label', state.backendDown ? '后台连不上' : dot.dataset.state === 'on' ? '已接入' : '未接入或暂停');
+        dot.dataset.state = state.backendDown ? 'error' : state.backendStatus === 'starting' ? 'off' : state.chatKey ? (st?.enabled !== false && s.enabled ? 'on' : 'off') : state.backendStatus === 'healthy' ? 'on' : 'off';
+        dot.setAttribute('aria-label', state.backendDown ? '后台连不上' : state.backendStatus === 'starting' ? '后台正在启动' : dot.dataset.state === 'on' ? (state.chatKey ? '已接入' : '后台已连接，窗口未接入') : '未接入或暂停');
         $('[data-action="sync"]').hidden = !state.chatKey;
         $('[data-action="confirm"]').hidden = !state.collapsed;
         const warn = $('[data-role="warn"]');
@@ -2075,8 +2220,11 @@ function mountPanel() {
             if (action === 'cast') await editCast();
             if (action === 'setup') { await openSetup(); await refreshContent().catch(() => {}); }
             if (action === 'relations') await openRelations();
+            if (action === 'relations-draft' && state.relationsDraft?.status === 'drafted') await openRelations(state.relationsDraft.text, state.relationsDraft.id);
             if (action === 'presets') await openPresets();
             if (action === 'opening-pack') await openOpeningPack();
+            if (action === 'health-retry') await backendConnection.check(true);
+            if (action === 'material-pack') await openMaterialPack();
             if (action === 'camera') await setUpCamera();
             if (action === 'fresh-settings') await openFreshSettings();
             if (action === 'stages') await openStages();
@@ -2256,6 +2404,77 @@ export async function uploadOpeningZip(file, send, progress = () => {}) {
         }
         return result.path;
     } catch (e) { try { await send('opening-pack-upload', { id, abort: true }); } catch {} throw e; }
+}
+async function openMaterialPack() {
+    const c = ctx(), chatKey = state.chatKey;
+    if (!chatKey) return;
+    const box = document.createElement('div');
+    box.style.textAlign = 'left';
+    box.innerHTML = `<h3>导入素材包</h3>
+        <label><input type="radio" name="rpe-material-source" value="zip" checked>选 zip</label>
+        <div><input type="file" data-f="zip" accept=".zip" hidden><button class="menu_button" type="button" data-p="zip" style="width:auto;white-space:nowrap" title="打开系统文件选择器，建议选下载的zip。">选压缩包</button></div>
+        <label><input type="radio" name="rpe-material-source" value="git">贴 git 地址</label>
+        <div style="display:flex;gap:.4em"><input class="text_pole" data-f="git" placeholder="https://… 仓库地址"><button class="menu_button" type="button" data-p="git" style="width:auto;white-space:nowrap" title="拉取或更新素材，建议核对来源。">拉取／更新</button></div>
+        <small>只认 zip 或无账号密码的 HTTPS git 地址。先预览，再确认导入。</small>
+        <p data-f="progress" role="status"></p><div data-f="preview"></div>`;
+    const preview = box.querySelector('[data-f="preview"]'), progress = box.querySelector('[data-f="progress"]');
+    let looked = null, busy = false;
+    const lock = value => { busy = value; for (const el of box.querySelectorAll('button,input')) el.disabled = value; };
+    const show = async source => {
+        looked = null;
+        const r = await api('material-pack', { chatKey, path: source });
+        if (r.choices) {
+            preview.innerHTML = '<p>找到几份素材包，请选一份：</p>' + r.choices.map(x => `<button class="menu_button" type="button" data-p="choose" data-path="${escapeHtml(x.path)}" title="预览这份素材，建议核对内容。">${escapeHtml(x.name)}</button>`).join('');
+            return;
+        }
+        looked = r;
+        preview.innerHTML = `<h4>${escapeHtml(r.name)}</h4><ul>${r.checks.map(x => `<li>${escapeHtml(x.file)} ${x.ok === true ? '✓' : x.ok === false ? '✗' : '—'} ${escapeHtml(x.why)}</li>`).join('')}</ul>
+            ${r.exists ? '<p>后台已有同名素材包，导入时会再问是否覆盖。</p>' : ''}
+            <label><input type="checkbox" data-f="use" checked>给这一局用</label>
+            <button class="menu_button" type="button" data-p="go" style="width:auto;white-space:nowrap" title="复制到后台素材目录，建议核对后导入。">导入</button>`;
+    };
+    const run = async work => {
+        if (busy) return;
+        lock(true);
+        try { await work(); } catch (e) { progress.textContent = e.message; }
+        finally { lock(false); }
+    };
+    box.querySelector('[data-f="zip"]').addEventListener('change', event => {
+        const file = event.target.files?.[0]; if (!file) return;
+        run(async () => {
+            looked = null; preview.innerHTML = ''; box.querySelector('[value="zip"]').checked = true;
+            const source = await uploadOpeningZip(file, (_route, data, timeout) => api('material-pack-upload', data, timeout), (i, n) => { progress.textContent = `上传中 ${i}/${n}`; });
+            progress.textContent = '上传完成'; await show(source);
+        });
+        event.target.value = '';
+    });
+    box.addEventListener('click', event => {
+        const action = event.target?.dataset?.p;
+        if (!action || busy) return;
+        if (action === 'zip') { box.querySelector('[data-f="zip"]').click(); return; }
+        run(async () => {
+            if (action === 'git') {
+                looked = null; preview.innerHTML = ''; box.querySelector('[value="git"]').checked = true;
+                progress.textContent = '正在拉取／更新……';
+                const r = await api('material-pack-git', { url: box.querySelector('[data-f="git"]').value.trim() }, 190000);
+                progress.textContent = r.operation === 'pull' ? '仓库更新完成' : '仓库拉取完成'; await show(r.path);
+            }
+            if (action === 'choose') await show(event.target.dataset.path);
+            if (action === 'go' && looked) {
+                if (state.chatKey !== chatKey) throw new Error('当前窗口变了，请回原窗口重新导入');
+                const use = !!box.querySelector('[data-f="use"]').checked;
+                const send = overwrite => api('material-pack', { chatKey, path: looked.path, go: true, use, overwrite });
+                let r = await send(false);
+                if (r.needsOverwrite) {
+                    if (!(await c.callGenericPopup(`素材包「${escapeHtml(r.name)}」已经有了，覆盖吗？`, c.POPUP_TYPE.CONFIRM))) { progress.textContent = '没有覆盖'; return; }
+                    r = await send(true);
+                }
+                if (state.chatKey === chatKey) { state.pack = { packs: r.packs, pack: r.pack }; render(); }
+                looked = null; preview.innerHTML = ''; progress.textContent = `素材包「${r.name}」导入了${r.pack === r.name ? '，这一局已选用' : ''}。`;
+            }
+        });
+    });
+    await c.callGenericPopup(box, c.POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true, okButton: '关闭' });
 }
 async function openOpeningPack() {
     const c = ctx();
@@ -2786,6 +3005,7 @@ document.addEventListener('click', event => {
     }
 }, true);
 on('CHAT_CHANGED', () => { onChatChanged(); });
+for (const event of ['PERSONA_CHANGED', 'SETTINGS_UPDATED']) on(event, () => { personaWatch.check(); void sendPersona().catch(() => {}); });
 for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'MESSAGE_UPDATED', 'GROUP_UPDATED']) {
     on(name, (id) => { if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED') stripDoorMark(id).catch(() => {}); if (name === 'GROUP_UPDATED') watchMembers(); scheduleSync(); if (name !== 'MESSAGE_SENT') refreshDoor(); });
 }
@@ -3080,7 +3300,7 @@ async function freshen(id, type) {
 // 这一轮酒馆真触发了哪几条世界书（质量窗 10/2）：记在接下来那条回复上（extra.rp_lore，跟着聊天文件走），同步时交给后台；
 // 记账时这几条给全文（以前靠字面挑，会漏会撞）。条目正文也交给后台认得——没开"按开口的人筛"时只认、不花钱判谁知道。
 // 别的扩展在后台悄悄生成（quiet）时触发的不算。换一套卡、书、预设也一样：这是酒馆自己的事件，不认书名、不认条目写法。
-on('GENERATION_STARTED', type => { state.genType = type ?? 'normal'; state.genAt = performance.now(); });
+on('GENERATION_STARTED', async type => { state.genType = type ?? 'normal'; state.genAt = performance.now(); await sendPersona(); });
 on('WORLD_INFO_ACTIVATED', entries => {
     if (!settings().enabled || !state.chatKey || !Array.isArray(entries) || state.genType === 'quiet') return;
     const list = entries.filter(e => e && e.uid != null).slice(0, 60).map(e => ({ key: `${e.world ?? ''}|${e.uid}`, hash: loreHash(e.content), world: e.world ?? '',
@@ -3485,6 +3705,7 @@ function refreshPlanStatus() {
         if (state.chatKey !== chatKey || state.epoch !== epoch) return;
         state.planStatus = p; state.status = st;
         noticeStory(chatKey, st.notice); render();
+        if (p.awaitingPersona) void askPlanPersona(p.awaitingPersona);
         // 长规划在后台完成，玩家不发消息也要能看到失败和生效；只在有待完成规划时读状态。
         if (p.last?.status === 'requested' || st.planning?.running) state.planningTimer = setTimeout(refreshPlanStatus, 5000);
     }).catch(() => {
@@ -3493,6 +3714,7 @@ function refreshPlanStatus() {
 }
 
 mountPanel();
+void backendConnection.check();
 loadExtensionRelease();
 addDayButtons();
 addWand();

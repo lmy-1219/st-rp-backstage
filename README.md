@@ -11,6 +11,8 @@
 
 交流 QQ 群：1131373686
 
+素材包可以单独导入（选 zip 或贴 git 地址），入口在“设置 → 高级 → 这一局的细节 → 导入素材包”。
+
 ## 开局包怎么导
 
 开局包在面板“这一局 → 导入开局包”里选下载的 `.zip`，不用自己解压；QQ、微信收到的先保存到下载。也可以贴无账号密码的 HTTPS git 地址拉取，再点一次就是更新；本机文件夹入口留在电脑进阶里。先预览资源和同名覆盖清单，再确认导入新群。只认 zip（普通 store／deflate），rar、7z 请转 zip；最多 300MB 解压内容、5000 项。新装素材进后台数据目录，代码仓原有素材照读，不自动搬迁。
@@ -25,7 +27,7 @@
 
 ## 安装
 
-酒馆要先启动过一次（这样才有 `config.yaml`），然后关掉酒馆再装。下面的 `<ST>` 是含 `server.js`、`config.yaml` 的 SillyTavern 目录；安装不需要 `npm install`。
+酒馆要先启动过一次以生成配置，然后关掉酒馆再装。下面的 `<ST>` 是含 `server.js` 的 SillyTavern 根目录；配置可在根目录或 `config/config.yaml`。安装不需要 `npm install`。
 
 ### A. 安装器（推荐）
 
@@ -50,6 +52,34 @@
 
 - 后台跟着酒馆在手机里跑。被系统杀掉以后，重新启动酒馆就会自动拉起；工具箱的"保活"有帮助。
 - 工具箱"更新酒馆"不影响本插件。恢复备份、重装酒馆以后，面板如果提示"还差一步"，重跑上面第三行就好；数据在酒馆的 `data/rp-emergence/` 里。
+
+### 云服务器／Docker
+
+安装器必须在**运行酒馆的机器**上执行，电脑浏览器里装扩展只装了面板。已有下载目录就用那份 `install.sh`，不用反复克隆。
+
+**有 SSH、直接跑 Node 的云服务器**：登录服务器，进入含 `server.js` 的酒馆目录，运行：
+
+```sh
+cd <酒馆目录>
+git clone https://github.com/lmy-1219/st-rp-backstage /tmp/st-rp-installer
+sh /tmp/st-rp-installer/install.sh "$PWD"
+```
+
+然后用平时的方式重启酒馆，例如 `pm2 restart <名称>`、`systemctl restart <服务名>`，或关掉再开。第一次安装前，先启动过一次酒馆以生成配置。
+
+**Docker**：先 `docker exec -it <容器名> sh` 进入容器，再运行：
+
+```sh
+cd /home/node/app
+git clone https://github.com/lmy-1219/st-rp-backstage /tmp/st-rp-installer
+sh /tmp/st-rp-installer/install.sh "$PWD"
+```
+
+官方镜像的酒馆目录是 `/home/node/app`，自定义镜像按实际目录替换。退出容器 shell 后在宿主机运行 `docker restart <容器名>`。安装器同时识别根目录的 `config.yaml` 和 `config/config.yaml`，两份都有时优先根目录。配置原件备份在所用文件旁边。按官方 compose 挂载 `config/`、`data/`、`plugins/`、扩展目录后，插件和数据留在挂载卷里，重建容器不会丢；未挂载的目录要先配置持久化。
+
+**没有命令行的托管服务**用不了：后台需要在酒馆所在机器运行。没有终端且不能放服务端插件的一体化酒馆 App 也不支持。
+
+装完暂时灰灯“后台正在启动……”会自动重查，最多等两分钟。“后台插件还没装上”请补服务器端安装；“插件装好了，但后台没起来”请重启，并查看 `data/rp-emergence/后台日志.txt` 最后几十行。自定义 `autoStart.home` 时日志就在那个数据目录里。两种故障都能点“再查一次”；`Directory already exists` 只说明面板已经装过，不用再点“安装扩展”。日志分享前遮住私人路径等信息，不要贴钥匙或整份配置。
 
 ### B. 酒馆自带“安装扩展”
 

@@ -6,6 +6,9 @@
 // 题材无关：判断用法的规矩是通用的。
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { fromText as relationsFromText } from './relations.mjs';
+import { cleanAnswer, isTransient } from './handoff.mjs';
 
 export const KINDS = ['开局单', '关系表', '参考资料'];
 const EXT = /\.(txt|md|markdown|json|csv)$/i;
@@ -44,6 +47,91 @@ export const RELATIONS_SYSTEM = [
     '· 故事开始时他还不知道的事（只给规划看）',
     '只输出这些段落，不要别的话。',
 ].join('\n');
+
+// 卡只取介绍三项，按名册身份认，主要在前；总输入（含标记）不超过十二万字。
+export function relationsDraftInput({ cast = [], cards = [], setup = {}, net = '' } = {}) {
+    const byAvatar = new Map(cards.filter(c => c && typeof c.avatar === 'string').map(c => [c.avatar, c]));
+    const ordered = cast.filter(c => c.role !== '不用' && !String(c.avatar).startsWith('face:')).sort((a,b) => Number(b.role === '主要') - Number(a.role === '主要'));
+    let truncatedChars = 0, truncatedCards = 0;
+    const marker = '（后面略）';
+    const blocks = ordered.flatMap(person => {
+        const card = byAvatar.get(person.avatar); if (!card) return [];
+        const raw = typeof card.text === 'string' ? card.text : [card.description, card.personality, card.scenario].filter(x => typeof x === 'string' && x.trim()).join('\n');
+        const original = Math.max(raw.length, Number.isSafeInteger(card.sourceChars) ? card.sourceChars : 0);
+        const text = raw.length > 3000 ? raw.slice(0, 3000-marker.length) + marker : raw;
+        if (original > text.length) { truncatedCards++; truncatedChars += original-text.length; }
+        if (!raw.trim()) return [];
+        return [`【角色卡：${person.name}（${person.role}）】\n${text}`];
+    });
+    blocks.push('【开局单：前史、口径、人物开场状态】\n' + JSON.stringify({ 前史: setup?.前史 ?? [], 口径: setup?.口径 ?? [], 开场状态: setup?.开场状态 ?? [] }));
+    if (net) blocks.push('【素材包关系网】\n' + net);
+    const raw = blocks.join('\n\n'), user = raw.length > 120000 ? raw.slice(0, 120000-marker.length) + marker : raw;
+    truncatedChars += raw.length-user.length;
+    return { user, chars: user.length, truncatedChars, truncatedCards };
+}
+
+// 自动草稿与生效关系表分开存，外援和 API 走同一条核验路径。
+export function createRelationsDrafts({ store, records, handoffs, getConfig, clientFor, packFor = () => null, log = () => {} }) {
+    const key = storyId => `relations_draft:${storyId}`;
+    const read = storyId => { try { return JSON.parse(store.getMeta(key(storyId)) ?? 'null'); } catch { return null; } };
+    const write = (storyId, value) => { store.setMeta(key(storyId), value ? JSON.stringify(value) : null); return value; };
+    const populated = storyId => !!store.relationsOf(storyId)?.人?.length;
+    const current = meta => !populated(meta.storyId) && read(meta.storyId)?.id === meta.id && store.setupOf(meta.storyId)?.id === meta.setupId;
+    const view = storyId => { const d = read(storyId); return d && current({ ...d, storyId }) ? d : null; };
+    const finish = (text, meta, patch = {}) => {
+        if (!current(meta)) throw new Error('relations_draft_stale');
+        const answer = cleanAnswer(text), people = relationsFromText(answer).人.length;
+        if (!people) throw new Error('关系表草稿里没有可核对的人物，原表保留');
+        const d = write(meta.storyId, { ...read(meta.storyId), status: 'drafted', text: answer, people, ...patch });
+        return { people: d.people };
+    };
+    const configured = s => !!(s?.baseUrl && s.apiKey && s.model);
+    const cost = (usage, s) => ((usage?.input ?? 0) * (s.priceInPerM ?? 0) + (usage?.output ?? 0) * (s.priceOutPerM ?? 0)) / 1e6;
+    const generate = async (meta, user) => {
+        const cfg = getConfig(), s = cfg.stages?.setup, started = Date.now();
+        if (!current(meta)) return;
+        if (!configured(s)) { write(meta.storyId, { ...read(meta.storyId), status: 'unconfigured', reason: '没配开局单那档的模型，关系表要手写或从素材整理' }); return; }
+        if (Number.isFinite(cfg.extractor?.dailyBudgetUsd) && (records?.spentToday?.() ?? 0) >= cfg.extractor.dailyBudgetUsd) { write(meta.storyId, { ...read(meta.storyId), status: 'blocked', reason: '今天后台预算已到上限，关系表先手写或从素材整理' }); return; }
+        let response = null;
+        try {
+            const r = response = await clientFor({ ...s, maxOutputTokens: 16000, timeoutMs: 600000, stream: true }).complete({ system: RELATIONS_SYSTEM, user });
+            const usd = cost(r.usage, s);
+            if (current(meta)) finish(r.text, meta, { costUsd: (read(meta.storyId).costUsd ?? 0) + usd, via: 'api' });
+            records?.logAssemble({ chatKey: meta.chatKey, speaker: '(开局单·关系表草稿)', model: s.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd: usd, ms: Date.now()-started, raw: r.text });
+        } catch (error) {
+            const usage = error.usage ?? response?.usage ?? null, usd = cost(usage, s);
+            records?.logAssemble({ chatKey: meta.chatKey, speaker: '(开局单·关系表草稿)', model: s.model, status: 'failed', usage, costUsd: usd, ms: Date.now()-started, error: error.message });
+            if (!current(meta)) return;
+            const old = read(meta.storyId), base = { ...old, costUsd: (old.costUsd ?? 0) + usd, reason: error.message };
+            if (handoffs && isTransient(error)) {
+                const id = handoffs.request({ kind: 'relations-draft', key: meta.id, chatKey: meta.chatKey, why: error.message, system: RELATIONS_SYSTEM, user, task: '只把提供的卡介绍、开局单和关系网里写明的内容整理成关系表，等玩家核对保存', checks: '至少有一段可解析的人物；只存草稿，不直接写入关系表', meta });
+                write(meta.storyId, { ...base, status: 'handoff', handoff: id });
+            } else write(meta.storyId, { ...base, status: 'failed' });
+            log(`relations draft failed: ${error.message}`);
+        }
+    };
+    handoffs?.register('relations-draft', {
+        stale: meta => !current(meta),
+        apply: (text, meta) => finish(text, meta, { via: 'handoff' }),
+        retry: async (meta, h) => { await generate(meta, h.payload.user); return view(meta.storyId)?.status === 'drafted' ? 'done' : 'failed'; },
+    });
+    return { view, clear: storyId => write(storyId, null),
+        async start({ chatKey, cards = [] }) {
+            const chat = store.requireChat(chatKey), setup = store.setupOf(chat.story_id);
+            if (!setup || populated(chat.story_id)) return;
+            const old = view(chat.story_id);
+            if (old && ['working', 'handoff', 'drafted'].includes(old.status)) return old;
+            const id = randomUUID(), meta = { id, chatKey, storyId: chat.story_id, setupId: setup.id };
+            const pack = packFor(chatKey); let net = '';
+            if (pack?.dir) { try { net = fs.readFileSync(path.join(pack.dir, '关系网.json'), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') log(`relations network read failed: ${error.message}`); } }
+            const input = relationsDraftInput({ cast: store.getCast(chat.story_id), cards, setup: setup.data, net });
+            write(chat.story_id, { id, setupId: setup.id, status: 'working', costUsd: 0, chars: input.chars, truncatedChars: input.truncatedChars, truncatedCards: input.truncatedCards });
+            log(`relations draft input: ${input.chars} chars; trimmed ${input.truncatedChars}, cards ${input.truncatedCards}`);
+            await generate(meta, input.user);
+            return view(chat.story_id);
+        },
+    };
+}
 
 // 文件名只留安全的字（中英文、数字、空格、点、横线、下划线），不许带路径。
 export const safeName = name => path.basename(String(name ?? '')).replace(/[^\p{L}\p{N} ._\-（）()]/gu, '_').slice(0, 120);
