@@ -673,8 +673,15 @@ export function openStore(file) {
         }
         return out;
     }
-    // 这一局玩家用过的名字（玩家消息上的人设名）
-    function playerNames(storyId) { return q('select distinct name from messages where story_id = ? and is_user = 1 and name is not null').all(storyId).map(r => r.name).filter(Boolean); }
+    // 这一局玩家用过的名字：历史消息、各窗口当前人设、已确认规划人设。
+    function playerNames(storyId) {
+        const names = q('select distinct name from messages where story_id = ? and is_user = 1 and name is not null').all(storyId).map(r => r.name);
+        for (const chat of q('select key from chats where story_id = ?').all(storyId)) {
+            try { names.push(JSON.parse(getMeta(`persona:${chat.key}`) ?? 'null')?.name); } catch {}
+        }
+        names.push(getMeta(`plan_persona:${storyId}`));
+        return [...new Set(names.filter(n => typeof n === 'string').map(n => n.trim()).filter(Boolean))];
+    }
     function markFreshened(newFp, oldFp) { if (newFp && oldFp && newFp !== oldFp) setMeta(`fresh_from:${newFp}`, oldFp); }
     function sameMessage(currentFp, anchorFp) {
         let fp = currentFp;

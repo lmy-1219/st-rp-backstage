@@ -444,6 +444,18 @@ export function formMerge(data, form = {}) {
     if (cast.length || Array.isArray(form.必要角色)) d.原则 = [...d.原则.filter(x => !x.条.startsWith(MUST_CAST)), ...(cast.length ? [{ 条: `${MUST_CAST}${cast.join('、')}` }] : [])];
     if (String(form.其他 ?? '').trim() && !d.其他.includes(String(form.其他).trim())) d.其他 = [d.其他, String(form.其他).trim()].filter(Boolean).join('\n');
     if (Array.isArray(form.人物)) rowsMerge(d, form.人物);
+    if (Array.isArray(form.亲密线)) {
+        const pair = row => JSON.stringify(names(row?.谁).sort());
+        const old = d.亲密线 ?? [], seen = new Set();
+        d.亲密线 = form.亲密线.filter(row => {
+            const key = pair(row); if (seen.has(key)) return false; seen.add(key); return true;
+        }).map(row => {
+            const previous = old.find(x => pair(x) === pair(row));
+            // 表单只更新成年确认；旧校验结果重新计算，其他细节照留。
+            const { ok, error, ...details } = previous ?? {};
+            return { ...details, 谁: previous?.谁 ?? names(row?.谁), 成年: row?.成年 === true };
+        });
+    }
     return d;
 }
 // 原则里那条"这一局必须有的角色：……"读回名字（给填表时预先勾上）；没有就是空的

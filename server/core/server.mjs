@@ -793,6 +793,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                     confirmed: c ? { text: toText(checked(c.data)), at: c.created_at, data: checked(c.data) } : null,
                     draft: d ? { status: d.status, text: d.data ? toText(checked(d.data)) : null, unchecked: d.unchecked.length, error: d.error, at: d.updated_at } : null,
                     rows: formRows(base),
+                    intimate: base?.亲密线 ?? [], names: setupNames(storyId), content: { tier: contentView(chat.key).tier },
                     // 填表时预先填上的（章程 K1）：全剧情必要角色（原则里那条读回的名字）、主角团
                     mustCast: mustCastOf(base), crew: base?.主角团 ?? [],
                 };

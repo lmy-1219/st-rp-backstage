@@ -592,6 +592,29 @@ function castPicked(root, key) {
 export function setupPersonaHtml(name, escape = escapeHtml) {
     return `<p>这一局你演的是：<b>${escape(name || '当前未知')}</b>（当前人设）。点错了先去切人设再确认。</p>`;
 }
+export function setupIntimateRows(data, crew, cardNames, player) {
+    if (Array.isArray(data) && data.length) return data.map(r => ({ 谁: [...r.谁], 成年: r.成年 === true }));
+    const first = crew.find(n => n !== player && cardNames.includes(n));
+    return first && player ? [{ 谁: [player, first], 成年: true }] : [];
+}
+export function setupIntimateHtml(rows, names, player, tier) {
+    if (tier === 'SFW') return '<small>档位是 SFW，不用亲密线；要用先在\'这一局\'改档位。</small>';
+    const own = rows.filter(r => r.谁.includes(player));
+    const adult = checked => `<label class="checkbox_label"><input type="checkbox" data-intimate-adult${checked ? ' checked' : ''}> 两人都已成年</label>`;
+    return `<div data-role="intimate-form"><b>亲密线</b><p>和你有亲密线的人（可多选）</p>
+        <div style="display:flex;flex-wrap:wrap;gap:.3em .8em">${[...new Set([...names.filter(n => n !== player), ...own.flatMap(r => r.谁).filter(n => n !== player)])].map(n => {
+            const row = own.find(r => r.谁.includes(n));
+            return `<div data-intimate-own="${escapeHtml(n)}"><label class="checkbox_label"><input type="checkbox" data-intimate-pick${row ? ' checked' : ''}> ${escapeHtml(n)}</label>${adult(row ? row.成年 : true)}</div>`;
+        }).join('')}</div><p>别的两人之间（可选）</p><div data-role="intimate-others">${rows.filter(r => !r.谁.includes(player)).map(r => setupIntimateOtherHtml(r, names)).join('')}</div>
+        <button type="button" class="menu_button" style="width:auto;white-space:nowrap" data-role="intimate-add" title="添加一条两人之间的亲密线。">加一行</button><small>提交就表示你确认这些人都已成年；有未成年的，取消勾选或删掉那一条。</small></div>`;
+}
+export function setupIntimateOtherHtml(row = { 谁: [], 成年: true }, names = []) {
+    return `<div data-intimate-other style="display:flex;flex-wrap:wrap;gap:.3em">${[0, 1].map(i => `<select class="text_pole" data-intimate-person><option value="">选人</option>${[...new Set([...names, ...row.谁])].map(n => `<option value="${escapeHtml(n)}"${row.谁[i] === n ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')}</select>`).join('')}<label class="checkbox_label"><input type="checkbox" data-intimate-adult${row.成年 ? ' checked' : ''}> 两人都已成年</label><button type="button" class="menu_button" data-role="intimate-del" title="删掉这条亲密线，确认后生效。">✕</button></div>`;
+}
+export function setupIntimatePicked(root, player) {
+    return [...[...root.querySelectorAll('[data-intimate-own]')].filter(el => el.querySelector('[data-intimate-pick]').checked).map(el => ({ 谁: [player, el.dataset.intimateOwn], 成年: el.querySelector('[data-intimate-adult]').checked })),
+        ...[...root.querySelectorAll('[data-intimate-other]')].map(el => ({ 谁: [...el.querySelectorAll('[data-intimate-person]')].map(x => x.value), 成年: el.querySelector('[data-intimate-adult]').checked }))];
+}
 async function openSetupForm(s) {
     const c = ctx(), chatKey = state.chatKey, setupPersona = String(c.name1 ?? '').trim();
     const d = s.confirmed?.data ?? {};
@@ -601,7 +624,10 @@ async function openSetupForm(s) {
     const rows = Array.isArray(s.rows) ? s.rows : [];
     const crew = Array.isArray(s.crew) ? s.crew : Array.isArray(d.主角团) ? d.主角团 : [];
     const mustCast = Array.isArray(s.mustCast) ? s.mustCast : mustCastFrom(d);
-    const html = `<h3>开局单 · 填表</h3>${setupPersonaHtml(setupPersona)}<p><small>带 * 的必填，其余都能空着。"核心主线"到"必要情节"每行一条，会加进现在那份里（已有的不重复）；要删、要改原来的，去"看和改全文"。"人物开场状态"列的是现有的全部，在这儿改、删、加都算数。</small></p>
+    const intimate = setupIntimateRows(s.intimate ?? d.亲密线, crew, (c.characters ?? []).filter(ch => !isCamera(ch)).map(ch => ch.name), setupPersona);
+    const intimateNames = [...new Set([setupPersona, ...(s.names ?? castChoices(c))].filter(Boolean))];
+    const tier = s.content?.tier ?? state.content?.tier ?? 'SFW';
+    const html = `<h3>开局单 · 填表</h3>${setupPersonaHtml(setupPersona)}<p><small>带 * 的必填，其余都能空着。"核心主线"到"必要剧情"每行一条，会加进现在那份里（已有的不重复）；要删、要改原来的，去"看和改全文"。"人物开场状态"和"亲密线"列的是现有的全部，在这儿改、删、加都算数。</small></p>
       <div style="text-align:left">
         <label style="display:block;margin:.5em 0 .1em"><b>基调 *</b>（一两句：整体什么氛围、这一局最看重什么）</label>
         <textarea class="text_pole" data-f="基调" rows="2" style="width:100%">${escapeHtml(d.基调 ?? '')}</textarea>
@@ -614,6 +640,7 @@ async function openSetupForm(s) {
             <small data-role="pace-hint" style="flex:1 1 12em">${escapeHtml(PACE_HINT[d.节奏 ?? '中'] ?? '')}</small>
         </div>
         ${castPicker(c, '主角团', '主要聚焦角色（主角团）', crew, '故事围着转的那几个人，含你自己的角色；可多选，也能自己填')}
+        ${setupIntimateHtml(intimate, intimateNames, setupPersona, tier)}
         <label>玩家性别 <select class="text_pole" data-f="玩家性别">${['', '男', '女'].map(g => `<option value="${g}"${(d.玩家性别 ?? '') === g ? ' selected' : ''}>${g || '不写'}</option>`).join('')}</select></label>
         <details style="margin:.5em 0"><summary>开场时间（选填）</summary>
           <div style="display:flex;flex-wrap:wrap;gap:.3em">
@@ -633,9 +660,8 @@ async function openSetupForm(s) {
           <div class="menu_button" data-role="row-add" style="display:inline-block;margin-top:.3em" title="增加一行设定，建议只填确认的事实。">加一行</div>
         </details>
         ${field('核心主线', '主线', 2, '这一局的核心主题（只当主题，不排日程）')}
-        ${field('必要剧情', '必要剧情', 2, '一定要有的线，每行一条')}
+        ${field('必要剧情', '必要剧情', 2, '一定要有的线或场面，每行一条')}
         ${castPicker(c, '必要角色', '全剧情必要角色', mustCast, '一定要出场的人：从角色卡里勾，没建卡的直接填')}
-        ${field('必要情节', '必要情节', 2, '一定要发生的场面，每行一条')}
         ${field('其他', '其他', 2)}
       </div>`;
     let form = null;
@@ -648,6 +674,8 @@ async function openSetupForm(s) {
                 if (e.target?.closest?.('[data-role="row-add"]')) box.insertAdjacentHTML('beforeend', openRowHtml());
                 const del = e.target?.closest?.('[data-role="row-del"]');
                 if (del) del.closest('[data-row]')?.remove();
+                if (e.target?.closest?.('[data-role="intimate-add"]')) popup.dlg.querySelector('[data-role="intimate-others"]').insertAdjacentHTML('beforeend', setupIntimateOtherHtml(undefined, intimateNames));
+                e.target?.closest?.('[data-role="intimate-del"]')?.closest('[data-intimate-other]')?.remove();
             });
             // 换了哪一类，"是什么"的示例跟着换；换了节奏，旁边的小字跟着换
             popup.dlg.addEventListener('change', e => {
@@ -666,7 +694,8 @@ async function openSetupForm(s) {
             const orig = el => { try { return el.dataset.orig ? JSON.parse(el.dataset.orig) : null; } catch { return null; } };
             form = {
                 基调: q('[data-f="基调"]').value, 主线: q('[data-f="主线"]').value, 必要剧情: q('[data-f="必要剧情"]').value,
-                必要角色: castPicked(popup.dlg, '必要角色'), 玩家性别: q('[data-f="玩家性别"]').value, 主角团: castPicked(popup.dlg, '主角团'), 必要情节: q('[data-f="必要情节"]').value, 其他: q('[data-f="其他"]').value,
+                必要角色: castPicked(popup.dlg, '必要角色'), 玩家性别: q('[data-f="玩家性别"]').value, 主角团: castPicked(popup.dlg, '主角团'), 其他: q('[data-f="其他"]').value,
+                ...(tier !== 'SFW' ? { 亲密线: setupIntimatePicked(popup.dlg, setupPersona) } : {}),
                 节奏: q('[data-f="节奏"]')?.value ?? '中',
                 类别: [...[...popup.dlg.querySelectorAll('[data-cat]')].filter(x => x.checked).map(x => x.dataset.cat), ...q('[data-f="自填"]').value.split(/[、,，/]/).map(x => x.trim()).filter(Boolean)],
                 时间: time,
@@ -675,6 +704,10 @@ async function openSetupForm(s) {
                     是: el.querySelector('[data-r="是"]').value.trim(), 谁知道: el.querySelector('[data-r="谁知道"]').value.trim(), 原来: orig(el) })).filter(r => r.谁 || r.是) : undefined,
             };
             const half = (form.人物 ?? []).filter(r => !r.谁 || !r.是);
+            if (popup.result !== c.POPUP_RESULT.NEGATIVE && popup.result !== c.POPUP_RESULT.CANCELLED && (form.亲密线 ?? []).some(r => r.谁.length !== 2 || r.谁.some(n => !n) || r.谁[0] === r.谁[1])) {
+                globalThis.toastr?.warning('亲密线每条要选两个不同的人；不要的点 ✕ 删掉');
+                return false;
+            }
             if (popup.result !== c.POPUP_RESULT.NEGATIVE && popup.result !== c.POPUP_RESULT.CANCELLED && half.length) {
                 globalThis.toastr?.warning(`人物开场状态有 ${half.length} 行没填全（谁、是什么都要写；不要的点 ✕ 删掉）`);
                 return false;
@@ -1751,7 +1784,7 @@ export function contentControlsHtml(content) {
             ${content.tiers.length > 1 ? `<label>档位：<select data-content="tier"><option value=""${content.ownTier ? '' : ' selected'}>跟全局默认（当前 ${escapeHtml(content.tier)}）</option>${content.tiers.map(t => `<option${content.ownTier === t ? ' selected' : ''}>${escapeHtml(t)}</option>`).join('')}</select></label>` : ''}
             <div class="rpe-pace" role="group" aria-label="节奏">${['快', '中', '慢'].map(p => `<button type="button" class="menu_button" title="调整事件疏密，建议先用中档。" data-pace="${p}" aria-pressed="${content.pace === p}">${p}</button>`).join('')}</div>
             ${content.tier === 'SFW' ? '<p>SFW 档不用亲密线</p>' : ''}
-            ${content.pureIntimateInactive ? '<small>纯NSFW 要开局单里有亲密线才起作用，现在和剧情向一样。</small>' : ''}
+            ${content.tier !== 'SFW' && !content.intimate.some(r => r.adult && !r.error) ? '<small>没有生效的亲密线：后台不会安排亲密情节（剧情向和纯NSFW 都一样）。在开局单里加。</small>' : ''}
             ${content.pureNoPack && !content.pureIntimateInactive ? '<small>纯NSFW 的口味文字在单独的口味包里：在“高级 → 口味 → 看／改口味包”里导入，再选它。没导入时和剧情向一样。</small>' : ''}
             ${content.intimate.map(r => `<label class="checkbox_label"><input type="checkbox" data-content-adult="${r.index}"${r.adult ? ' checked' : ''}${content.tier === 'SFW' ? ' disabled' : ''}> 这一条里的人都已成年：${escapeHtml(r.people.join('、'))}<small>确认本线均成年，建议逐人核对。</small></label>${r.error && content.tier !== 'SFW' ? `<small>${escapeHtml(r.error)}</small>` : ''}${r.progress ? `<p>现在：${escapeHtml(r.progress.current)}${r.progress.day != null ? `（第${r.progress.day + 1}天更新）` : '（开局原文）'} <label>改回：<select data-intimate-progress="${r.index}">${r.progress.choices.map(v => `<option value="${escapeHtml(v)}"${v === r.progress.current ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select></label></p>` : ''}`).join('')}`;
 }
