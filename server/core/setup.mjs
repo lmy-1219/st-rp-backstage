@@ -1,4 +1,6 @@
 import { personWord, genderOf } from './pronoun.mjs';
+const setupGender = value => genderOf(value) || (value === '其他' ? value : null);
+const secretCell = x => { const targets = names(x?.不让谁知道); return targets.length ? { 不让谁知道: targets } : {}; };
 import { CONTENT_TIERS, tierOf } from './prompt-slots.mjs';
 // 开局单（白皮书 O-08、开局单设计稿 §四～§七；D-72）：用户把一局的设定交给系统——贴一整段（大纲、开场稿都行）→ 后台模型分格 →
 // 用户核对、改、确认。按局存在后台（不写进用户的卡和书），随时能改，从确认那一刻起生效。
@@ -14,7 +16,7 @@ import { parseAmount } from './money.mjs';
 import { LIFE_KINDS } from './life.mjs';
 import { scaleOf, unitOf, partsOf, DAY_PARTS } from './timescale.mjs';
 import { paceCell, paceWords } from './tempo.mjs';
-import { HOLD_KEYS, holdOf, isHeld } from './held.mjs';
+import { HOLD_KEYS, holdOf, isHeld, secretKeepNote } from './held.mjs';
 
 // 主角团（章程 K1）：故事围着转的那几个人（名字，含玩家的角色）→ 规划简报；规划围着他们排（crewOf）
 export const SECTIONS = ['基调', '类别', '主角团', '玩家性别', '档位', '玩法', '开场', '时间', '节奏', '钱', '生活现状', '开场状态', '原则', '前史', '走向', '口径', '主线', '储备线', '亲密线', '意向', '其他'];
@@ -41,7 +43,7 @@ export const SETUP_SYSTEM = [
     '- 基调：整体氛围、这一局最看重什么。',
     '- 类别：剧情类别和必含题材（词）。',
     '- 主角团：故事围着转的那几个人，含玩家的角色；原则、基调里写了的照写（名字；只有一个主角就只写这一个）。',
-    '- 玩家性别：玩家的角色的性别，稿子写明了才填男或女；没写就留空，不猜。',
+    '- 玩家性别：玩家的角色的性别，稿子写明了才填男、女或其他；没写就留空，不猜。',
     '- 档位：稿子明写了才填 SFW、剧情向NSFW 或纯NSFW；没写就留空，使用全局默认。',
     '- 开场：从哪一幕开始、开场时的要点。',
     '- 时间：开场那一天。日期（稿子里写了年月日才填，写成 YYYY-MM-DD）；架空年号的写连续年份（元年＝1），纪年里写每个年号从哪一年起；时段（早上/上午/中午/下午/傍晚/晚上/深夜/凌晨）；从哪天算第一天、开场是第几天（稿子里写了"某件事之后第几天"才填）；天气、气温（写了才填）。' +
@@ -94,7 +96,7 @@ export function mergeSetups(results) {
         for (const k of ['基调', '开场', '其他']) if (data[k]) out[k] = out[k] ? `${out[k]}\n${data[k]}` : data[k];
         out.类别 = [...new Set([...out.类别, ...data.类别])];
         if (data.主角团?.length) out.主角团 = [...new Set([...(out.主角团 ?? []), ...data.主角团])];
-        if (!out.玩家性别 && genderOf(data.玩家性别)) out.玩家性别 = data.玩家性别;
+        if (!out.玩家性别 && setupGender(data.玩家性别)) out.玩家性别 = data.玩家性别;
         if (!out.档位 && CONTENT_TIERS.includes(data.档位)) out.档位 = data.档位;
         if (!out.玩法 && ['完整','只记忆'].includes(data.玩法)) out.玩法 = data.玩法;
         out.时间 ??= data.时间 ?? null;
@@ -206,7 +208,7 @@ export function parseSetup(text, { source = '', names: roster = null } = {}) {
         ...(paceCell(raw.节奏) ? { 节奏: paceCell(raw.节奏) } : {}),
         类别: names(raw.类别),
         ...(crewCell(raw.主角团).length ? { 主角团: crewCell(raw.主角团) } : {}),   // 写了才有这一格（老开局单一个字不变）
-        ...(genderOf(raw.玩家性别) ? { 玩家性别: raw.玩家性别 } : {}),
+        ...(setupGender(raw.玩家性别) ? { 玩家性别: raw.玩家性别 } : {}),
         ...(CONTENT_TIERS.includes(raw.档位) ? { 档位: raw.档位 } : {}),
         ...(['完整','只记忆'].includes(raw.玩法) ? { 玩法: raw.玩法 } : {}),
         钱: list(raw.钱).map(x => item(x, { 谁: str, 多少: v => parseAmount(v), 谁知道: v => names(v).filter(n => n !== '所有人') })).filter(x => x.谁 && x.多少),
@@ -214,7 +216,7 @@ export function parseSetup(text, { source = '', names: roster = null } = {}) {
         开场状态: list(raw.开场状态).map(x => item(x, { 谁: str, 类: kindOf, 是: str, 谁知道: names, 跟谁: names, 多少: v => parseAmount(v), 圈子: str })).filter(x => x.谁 && x.是 && x.类).map(openExtras),
         原则: list(raw.原则).map(x => item(x, { 条: str })).filter(x => x.条),
         // 心里压着的事（held.mjs，用户 10/16）：写了处置那四格才带上（老开局单一个字不变）
-        前史: list(raw.前史).map(x => ({ ...item(x, { 事: str, 谁知道: v => names(v).filter(n => n !== '所有人'), 层: v => (LAYERS.includes(str(v)) ? str(v) : '本局私设'), 谁的版本: str, 常驻: v => v === true }), ...(holdOf(x) ?? {}) })).filter(x => x.事).map(({ 常驻, ...x }) => (常驻 ? { ...x, 常驻 } : x)),
+        前史: list(raw.前史).map(x => ({ ...item(x, { 事: str, 谁知道: v => names(v).filter(n => n !== '所有人'), 层: v => (LAYERS.includes(str(v)) ? str(v) : '本局私设'), 谁的版本: str, 常驻: v => v === true }), ...(holdOf(x) ?? {}), ...secretCell(x) })).filter(x => x.事).map(({ 常驻, ...x }) => (常驻 ? { ...x, 常驻 } : x)),
         走向: list(raw.走向).map(x => item(x, { 事: str, 本局: str })).filter(x => x.事 && x.本局),
         口径: list(raw.口径).map(x => item(x, { 谁: str, 对谁: str, 怎么: str })).filter(x => x.谁 && x.对谁 && x.怎么),
         主线: list(raw.主线).map(x => item(x, { 名: str, 内容: str })).filter(x => x.名 || x.内容),
@@ -272,7 +274,7 @@ export function toText(data) {
     block('基调', [data.基调 ?? '']);
     out.push(`【类别】${(data.类别 ?? []).join('、')}`, '');
     out.push(`【主角团】（${HINT.主角团}）${(data.主角团 ?? []).join('、')}`, '');
-    if (genderOf(data.玩家性别)) out.push(`【玩家性别】${data.玩家性别}`, '');
+    if (setupGender(data.玩家性别)) out.push(`【玩家性别】${data.玩家性别}`, '');
     if (CONTENT_TIERS.includes(data.档位)) out.push(`【档位】${data.档位}`, '');
     if (['完整','只记忆'].includes(data.玩法)) out.push(`【玩法】${data.玩法}`, '');
     block('开场', [data.开场 ?? '']);
@@ -283,7 +285,7 @@ export function toText(data) {
     block('生活现状', (data.生活现状 ?? []).map(x => `- ${mark(x)}${x.谁} ｜ ${x.类} ｜ ${x.是}${x.类 === '家里' ? ` ｜ ${x.在哪 || ''}` : ''} ｜ ${(x.谁知道 ?? []).join('、') || '只有他自己'}`));
     block('开场状态', (data.开场状态 ?? []).map(x => `- ${mark(x)}${[x.谁, x.类, x.是, (x.谁知道 ?? []).join('、') || '只有他自己', x.跟谁?.length && `跟谁：${x.跟谁.join('、')}`, x.多少 && `多少：${x.多少}`, x.圈子 && `圈子：${x.圈子}`].filter(Boolean).join(' ｜ ')}`));
     block('原则', (data.原则 ?? []).map(x => `- ${mark(x)}${x.条}`));
-    block('前史', (data.前史 ?? []).map(x => `- ${mark(x)}${x.事} ｜ ${x.谁知道.join('、') || '所有人'} ｜ ${x.层}${x.层 === '某人记得的版本' && x.谁的版本 ? `：${x.谁的版本}` : ''}${x.常驻 ? ' ｜ 常驻' : ''}${HOLD_KEYS.filter(k => x[k]).map(k => ` ｜ ${k}：${x[k]}`).join('')}`));
+    block('前史', (data.前史 ?? []).map(x => `- ${mark(x)}${x.事} ｜ ${x.谁知道.join('、') || '所有人'} ｜ ${x.层}${x.层 === '某人记得的版本' && x.谁的版本 ? `：${x.谁的版本}` : ''}${x.不让谁知道?.length ? ` ｜ 不让：${x.不让谁知道.join('、')}` : ''}${x.常驻 ? ' ｜ 常驻' : ''}${HOLD_KEYS.filter(k => x[k]).map(k => ` ｜ ${k}：${x[k]}`).join('')}`));
     block('走向', (data.走向 ?? []).map(x => `- ${mark(x)}${x.事} ｜ ${x.本局}`));
     block('口径', (data.口径 ?? []).map(x => `- ${mark(x)}${x.谁} → ${x.对谁} ｜ ${x.怎么}`));
     block('主线', (data.主线 ?? []).map(x => `- ${mark(x)}${x.名} ｜ ${x.内容}`));
@@ -354,7 +356,7 @@ export function fromText(text, { names: roster = null } = {}) {
         else if (section === '前史') {
             const [layer, whose] = (parts[2] ?? '').split(/[：:]/).map(s => s.trim());
             const kv = Object.fromEntries(parts.slice(3).map(p => p.trim().match(/^(处置|开口条件|不说时外显|说的场合)[：:]\s*(.*)$/)).filter(Boolean).map(m => [m[1], m[2].trim()]));
-            data.前史.push({ 事: parts[0], 谁知道: names(parts[1]).filter(n => n !== '所有人'), 层: LAYERS.includes(layer) ? layer : '本局私设', 谁的版本: whose ?? '', ...(parts.slice(3).some(p => p.trim() === '常驻') ? { 常驻: true } : {}), ...(holdOf(kv) ?? {}) });
+            data.前史.push({ 事: parts[0], 谁知道: names(parts[1]).filter(n => n !== '所有人'), 层: LAYERS.includes(layer) ? layer : '本局私设', 谁的版本: whose ?? '', ...(parts.slice(3).some(p => p.trim() === '常驻') ? { 常驻: true } : {}), ...(holdOf(kv) ?? {}), ...secretCell({ 不让谁知道: parts.slice(3).map(p => p.trim().match(/^不让[：:]\s*(.*)$/)?.[1]).filter(Boolean).join('、') }) });
         } else if (section === '走向' && parts[1]) data.走向.push({ 事: parts[0], 本局: parts.slice(1).join('｜') });
         else if (section === '口径') {
             const [who, to] = parts[0].split(/\s*(?:→|->)\s*/);
@@ -404,7 +406,7 @@ function setCrew(d, v, { add = false } = {}) {
 // 表格里填的并进现有那份（没有就新起一份）：基调、类别、时间、其他照表格的；主线、必要剧情、必要情节逐行加进去（已有的不重复）；
 // 全剧情必要角色写成一条原则（"这一局必须有的角色：……"，有了就换）。
 export const MUST_CAST = '这一局必须有的角色：';
-function setGender(data, value) { if (genderOf(value)) data.玩家性别 = value; else delete data.玩家性别; }
+function setGender(data, value) { if (setupGender(value)) data.玩家性别 = value; else delete data.玩家性别; }
 function setPlay(data, value) { const v=String(value ?? '').trim(); if (['完整','只记忆'].includes(v)) data.玩法=v; else delete data.玩法; }
 function setContentTier(data, value) { const tier = String(value ?? '').replace(/\s/g, ''); if (CONTENT_TIERS.includes(tier)) data.档位 = tier; else delete data.档位; }
 const blankSetup = () => ({ 基调: '', 类别: [], 开场: '', 时间: null, 钱: [], 生活现状: [], 开场状态: [], 原则: [], 前史: [], 走向: [], 口径: [], 主线: [], 储备线: [], 意向: [], 其他: '' });
@@ -435,15 +437,36 @@ export function formMerge(data, form = {}) {
     if (form.档位 !== undefined) setContentTier(d, form.档位);
     if (form.玩法 !== undefined) setPlay(d, form.玩法);
     if (form.主角团 !== undefined) setCrew(d, Array.isArray(form.主角团) ? form.主角团 : String(form.主角团 ?? '').replace(/\n/g, '、'));
-    for (const l of linesOf(form.主线)) if (!d.主线.some(x => x.内容 === l || x.名 === l)) d.主线.push({ 名: '', 内容: l });
+    const replaceRows = (rows, old) => rows.map(x => typeof x === 'string' ? { 内容: x } : x).filter(x => str(x?.内容)).map(x => {
+        const previous = old.find(y => y.内容 === (x.原来 ?? x.内容));
+        return { ...(previous ?? x.拆分原格 ?? {}), 名: x.名 === undefined ? previous?.名 ?? '' : str(x.名), 内容: str(x.内容) };
+    });
+    if (Array.isArray(form.主线)) d.主线 = replaceRows(form.主线, d.主线);
+    else for (const l of linesOf(form.主线)) if (!d.主线.some(x => x.内容 === l || x.名 === l)) d.主线.push({ 名: '', 内容: l });
     const must = (l, 名) => { if (!d.储备线.some(x => x.内容 === l)) d.储备线.push({ 名, 内容: l, 可选: false, 条件: '', 露法: '', 门槛: '', 终局: false, 拉扯: '' }); };
-    for (const l of linesOf(form.必要剧情)) must(l, '');
+    if (Array.isArray(form.必要剧情)) {
+        const next = replaceRows(form.必要剧情, d.储备线.filter(x => x.可选 === false)).map(x => ({ ...x, 可选: false }));
+        d.储备线 = [...d.储备线.flatMap(x => x.可选 !== false ? [x] : next.length ? [next.shift()] : []), ...next];
+    }
+    else for (const l of linesOf(form.必要剧情)) must(l, '');
     for (const l of linesOf(form.必要情节)) must(l, '必要情节');
     // 全剧情必要角色：数组（新版表上勾的，整个替换，空数组＝去掉那条）或"、"隔开的字符串（旧版表上填的，空着＝原样留着）
     const cast = Array.isArray(form.必要角色) ? names(form.必要角色) : names(String(form.必要角色 ?? '').replace(/\n/g, '、'));
     if (cast.length || Array.isArray(form.必要角色)) d.原则 = [...d.原则.filter(x => !x.条.startsWith(MUST_CAST)), ...(cast.length ? [{ 条: `${MUST_CAST}${cast.join('、')}` }] : [])];
-    if (String(form.其他 ?? '').trim() && !d.其他.includes(String(form.其他).trim())) d.其他 = [d.其他, String(form.其他).trim()].filter(Boolean).join('\n');
+    if (form.开场 !== undefined) d.开场 = String(form.开场).trim();
+    if ((Array.isArray(form.主线) || Array.isArray(form.必要剧情)) && form.其他 !== undefined) d.其他 = String(form.其他).trim();
+    else if (String(form.其他 ?? '').trim() && !d.其他.includes(String(form.其他).trim())) d.其他 = [d.其他, String(form.其他).trim()].filter(Boolean).join('\n');
     if (Array.isArray(form.人物)) rowsMerge(d, form.人物);
+    if (Array.isArray(form.前史)) {
+        const old = d.前史 ?? [];
+        d.前史 = form.前史.filter(x => String(x?.事 ?? '').trim()).map(x => {
+            const previous = old.find(y => y.事 === x.事) ?? x.拆分原格 ?? {};
+            const row = { ...previous, 事: String(x.事).trim(), 谁知道: names(x.谁知道).filter(n => n !== '所有人'), 层: LAYERS.includes(x.层) ? x.层 : '本局私设', 谁的版本: x.层 === '某人记得的版本' ? str(x.谁的版本) : '' };
+            delete row.不让谁知道;
+            if (x.秘密) { Object.assign(row, secretCell(x)); if (!row.处置) row.处置 = '瞒着'; }
+            return row;
+        });
+    }
     if (Array.isArray(form.亲密线)) {
         const pair = row => JSON.stringify(names(row?.谁).sort());
         const old = d.亲密线 ?? [], seen = new Set();
@@ -456,7 +479,14 @@ export function formMerge(data, form = {}) {
             return { ...details, 谁: previous?.谁 ?? names(row?.谁), 成年: row?.成年 === true };
         });
     }
+    if (Array.isArray(form.拆分补充) && form.拆分补充.length) {
+        return mergeSetups([{ data: d }, ...form.拆分补充.map(raw => ({ data: { ...blankSetup(), ...Object.fromEntries(['原则', '口径', '走向', '意向'].map(k => [k, list(raw[k])])), 储备线: list(raw.储备线).filter(x => x.可选 !== false) } }))]).data;
+    }
     return d;
+}
+export function formUnshown(data) {
+    const d = data ?? {};
+    return [['原则', (d.原则 ?? []).filter(x => !str(x.条).startsWith(MUST_CAST)).length], ['称呼口径', d.口径?.length], ['原作走向', d.走向?.length], ['可选储备线', (d.储备线 ?? []).filter(x => x.可选 !== false).length], ['长期意向', d.意向?.length]].filter(([, n]) => n).map(([label, n]) => `${label} ${n} 条`);
 }
 // 原则里那条"这一局必须有的角色：……"读回名字（给填表时预先勾上）；没有就是空的
 export function mustCastOf(data) {
@@ -549,7 +579,7 @@ export function briefSection(data, { open = null } = {}) {
     each('开场时的住处和家当（之后聊天里变了的以聊天为准）：', (data.生活现状 ?? []).map(x => `${x.谁}·${x.类}：${x.是}${x.在哪 ? `（${x.在哪}）` : ''}`));
     each('开场时各人怎么样（之后聊天里变了的以聊天为准）：', (data.开场状态 ?? []).map(x => `${x.谁}·${x.类}：${x.是}（${(x.谁知道 ?? []).includes('所有人') ? '人人都知道' : x.谁知道?.length ? `${x.谁知道.join('、')}也知道` : `只有${personWord(x.谁)}自己知道`}）`));
     each('原则：', data.原则.map(x => x.条));
-    each('前史（谁知道／哪一层；写了处置的是知道的人压着不说的）：', data.前史.map(x => `${x.事}（${x.谁知道.join('、') || '所有人'}／${x.层}${x.谁的版本 ? `：${x.谁的版本}` : ''}${x.过时 ? '；开场时如此，聊天里后来已经不成立了' : ''}${!x.过时 && x.处置 ? `；处置：${HOLD_KEYS.filter(k => x[k]).map(k => (k === '处置' ? x[k] : `${k}：${x[k]}`)).join('，')}` : ''}）`));
+    each('前史（谁知道／哪一层；写了处置的是知道的人压着不说的）：', data.前史.map(x => `${x.事}（${x.谁知道.join('、') || '所有人'}／${x.层}${x.谁的版本 ? `：${x.谁的版本}` : ''}${x.不让谁知道?.length ? `；不让谁知道：${x.不让谁知道.join('、')}（被蒙着的人可能起疑、追问、打听，可以拿来排事）` : ''}${x.过时 ? '；开场时如此，聊天里后来已经不成立了' : ''}${!x.过时 && x.处置 ? `；处置：${HOLD_KEYS.filter(k => x[k]).map(k => (k === '处置' ? x[k] : `${k}：${x[k]}`)).join('，')}` : ''}）`));
     each('原作走向，这一局怎么定的：', data.走向.map(x => `${x.事}：${x.本局}`));
     each('主线（只当主题）：', data.主线.map(x => `${x.名}：${x.内容}`));
     // 9/27 审计：储备线每次整份给，规划者看见什么就倾向于用什么，设定满的局会变成推任务。平时只给名字和条件；
@@ -684,14 +714,14 @@ export function slotLines(data, { name, present = [], talk = '', roster = [], pi
     const held = x => isHeld(x) && x.谁知道.length > 0;
     const fixed = knows.filter(x => x.常驻 && !held(x) && !openQuestion(x.事));
     const open = knows.filter(x => x.常驻 && !held(x) && openQuestion(x.事));
-    if (fixed.length) lines.push(`${name}一直知道、一直算数的事（不用特意提起；写到相关的地方别和这些相反，也别自己补出相反的细节）：`, ...fixed.map(x => `· ${x.事}${whose(x)}`));
+    if (fixed.length) lines.push(`${name}一直知道、一直算数的事（不用特意提起；写到相关的地方别和这些相反，也别自己补出相反的细节）：`, ...fixed.map(x => `· ${x.事}${whose(x)}${secretKeepNote(x) ? `；${secretKeepNote(x)}` : ''}`));
     if (open.length) lines.push(`${name}知道、但还没弄清的事（写着的照样算数，别和它相反；没弄清的那一截${personWord(name)}也不知道，别替${personWord(name)}补上答案；${personWord(name)}在意的话，会想问、想弄明白）：`, ...open.map(x => `· ${x.事}${whose(x)}`));
     if (only === 'recall') lines.length = 0;
     const rest = knows.filter(x => !x.常驻 && !held(x));
     const hits = only === 'base' || !String(talk).trim() ? []
         : (pick ? pick(rest.map(x => ({ x, text: x.事, quotes: [] })), talk) : rankBackstory(rest, talk)).filter(h => h.score > 0).slice(0, 2);
     // 前史是开场之前的事：里面说的"还没见过面""以为他死了"只对开场那一刻成立，之后以聊天里发生的为准（实测：几百条之后还递"两人还没直接见过面"）。
-    if (hits.length) lines.push(`${name}知道的前事（开场之前的事，之后变了的以聊天里发生的为准；和眼下的话有关；只是${name}知道的这一版）：`, ...hits.map(({ r: { x } }) => `· ${x.事}${whose(x)}`));
+    if (hits.length) lines.push(`${name}知道的前事（开场之前的事，之后变了的以聊天里发生的为准；和眼下的话有关；只是${name}知道的这一版）：`, ...hits.map(({ r: { x } }) => `· ${x.事}${whose(x)}${secretKeepNote(x) ? `；${secretKeepNote(x)}` : ''}`));
     return lines;
 }
 
@@ -700,7 +730,7 @@ export function heldBackstory(data, { name, present = [], roster = [] }) {
     if (!data?.前史?.length) return [];
     const same = (a, b) => sameName(a, b, roster);
     return data.前史.filter(x => !x.过时 && isHeld(x) && x.谁知道.length && x.谁知道.some(p => same(p, name)))
-        .map(x => ({ 事: x.事, 对谁: present.filter(p => !same(p, name) && !x.谁知道.some(k => same(k, p))).join('、'), ...holdOf(x) }));
+        .map(x => ({ 事: x.事, 对谁: present.filter(p => !same(p, name) && !x.谁知道.some(k => same(k, p))).join('、'), ...holdOf(x), ...secretCell(x) }));
 }
 
 // ---------- 分格 ----------

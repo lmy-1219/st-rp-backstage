@@ -76,8 +76,13 @@ export function createRelationsDrafts({ store, records, handoffs, getConfig, cli
     const read = storyId => { try { return JSON.parse(store.getMeta(key(storyId)) ?? 'null'); } catch { return null; } };
     const write = (storyId, value) => { store.setMeta(key(storyId), value ? JSON.stringify(value) : null); return value; };
     const populated = storyId => !!store.relationsOf(storyId)?.人?.length;
-    const current = meta => !populated(meta.storyId) && read(meta.storyId)?.id === meta.id && store.setupOf(meta.storyId)?.id === meta.setupId;
-    const view = storyId => { const d = read(storyId); return d && current({ ...d, storyId }) ? d : null; };
+    const current = meta => !populated(meta.storyId) && read(meta.storyId)?.id === meta.id;
+    const view = storyId => {
+        const d = read(storyId); if (!d || !current({ ...d, storyId })) return null;
+        const oldSetupAt = store.setupOf(storyId)?.id !== d.setupId
+            ? d.setupAt ?? store.db.prepare('select created_at from setups where story_id = ? and id = ?').get(storyId, d.setupId)?.created_at : null;
+        return { ...d, ...(oldSetupAt ? { oldSetupAt } : {}) };
+    };
     const finish = (text, meta, patch = {}) => {
         if (!current(meta)) throw new Error('relations_draft_stale');
         const answer = cleanAnswer(text), people = relationsFromText(answer).人.length;
@@ -115,17 +120,33 @@ export function createRelationsDrafts({ store, records, handoffs, getConfig, cli
         apply: (text, meta) => finish(text, meta, { via: 'handoff' }),
         retry: async (meta, h) => { await generate(meta, h.payload.user); return view(meta.storyId)?.status === 'drafted' ? 'done' : 'failed'; },
     });
+    const inputFor = (chatKey, cards, setup) => {
+        const chat = store.requireChat(chatKey), pack = packFor(chatKey); let net = '';
+        if (pack?.dir) { try { net = fs.readFileSync(path.join(pack.dir, '关系网.json'), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') log(`relations network read failed: ${error.message}`); } }
+        return relationsDraftInput({ cast: store.getCast(chat.story_id), cards, setup: setup.data, net });
+    };
+    const canRestart = storyId => ['drafted', 'failed'].includes(view(storyId)?.status);
     return { view, clear: storyId => write(storyId, null),
-        async start({ chatKey, cards = [] }) {
+        estimate({ chatKey, cards = [] }) {
+            const chat = store.requireChat(chatKey), setup = store.setupOf(chat.story_id);
+            if (!setup || !canRestart(chat.story_id)) throw new Error('当前没有可重新起草的关系表草稿');
+            const s = getConfig().stages?.setup;
+            if (!configured(s)) throw new Error('没配开局单那档的模型');
+            const input = inputFor(chatKey, cards, setup);
+            const costUsd = Number.isFinite(s.priceInPerM) && Number.isFinite(s.priceOutPerM)
+                ? (input.chars / 1.5 * s.priceInPerM + 16000 * s.priceOutPerM) / 1e6 : null;
+            return { model: s.model, costUsd };
+        },
+        async start({ chatKey, cards = [], restart = false }) {
             const chat = store.requireChat(chatKey), setup = store.setupOf(chat.story_id);
             if (!setup || populated(chat.story_id)) return;
             const old = view(chat.story_id);
-            if (old && ['working', 'handoff', 'drafted'].includes(old.status)) return old;
+            if (restart) {
+                if (!canRestart(chat.story_id)) return old;
+            } else if (old && ['working', 'handoff', 'drafted', 'failed'].includes(old.status)) return old;
             const id = randomUUID(), meta = { id, chatKey, storyId: chat.story_id, setupId: setup.id };
-            const pack = packFor(chatKey); let net = '';
-            if (pack?.dir) { try { net = fs.readFileSync(path.join(pack.dir, '关系网.json'), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') log(`relations network read failed: ${error.message}`); } }
-            const input = relationsDraftInput({ cast: store.getCast(chat.story_id), cards, setup: setup.data, net });
-            write(chat.story_id, { id, setupId: setup.id, status: 'working', costUsd: 0, chars: input.chars, truncatedChars: input.truncatedChars, truncatedCards: input.truncatedCards });
+            const input = inputFor(chatKey, cards, setup);
+            write(chat.story_id, { id, setupId: setup.id, setupAt: setup.created_at, status: 'working', costUsd: 0, chars: input.chars, truncatedChars: input.truncatedChars, truncatedCards: input.truncatedCards });
             log(`relations draft input: ${input.chars} chars; trimmed ${input.truncatedChars}, cards ${input.truncatedCards}`);
             await generate(meta, input.user);
             return view(chat.story_id);

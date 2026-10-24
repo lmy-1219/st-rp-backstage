@@ -28,7 +28,7 @@ import { factionLedger, factionSlotLines, factionBrief, nameResolver, samePerson
 import { situationNow, moveLive, situationPrompt, deliverDue, situationSlotLines, situationBrief, repLines } from './situation.mjs';
 import { closeness, roleOf, BOND_DEFAULT, mentionedIn } from './cast.mjs';
 import { slotLines, sameName, reserveOpen, toText as setupText, backstoryText, staleBackstory, knowsRow, heldBackstory, activeIntimate, checkIntimate } from './setup.mjs';
-import { heldLines, saidSince } from './held.mjs';
+import { heldLines, saidSince, activeLeaks, withSecretLeaks, secretLeakLines } from './held.mjs';
 import { openingLines, bodyRows, OPEN_SCENE } from './opening.mjs';
 // 规划简报里的主角团、还没下文的口子（章程 K1）
 import { crewTies } from './relations.mjs';
@@ -1089,8 +1089,11 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         add(1, pairImpressions(visible, { viewer: name, people: [...present, userName, ...talked].filter(Boolean), same: sameP, aliases: n => [n, ...(rel ? personOf(rel, n, rosterNames)?.又名 ?? [] : [])] }), 'base', 'person');
     }
     // 开局单：他对眼前的人的称呼和态度；他知道的前事里和眼下的话有关的（只给他知道的那一版）。
-    const setup = staleBackstory(store.setupOf?.(store.requireChat(chatKey).story_id)?.data, visible, userName);
+    const leaks = activeLeaks(store, records, chatKey);
+    const setup = staleBackstory(withSecretLeaks(store.setupOf?.(store.requireChat(chatKey).story_id)?.data, leaks), visible, userName);
+    add(0, leaks.filter(x => x.source === 'plan' && sameName(x.谁知道了, name, rosterNames)).map(x => `· ${x.事}`), 'recall', 'person');
     if (setup) {
+        if (setup.玩家性别 === '其他') add(0, ["玩家的角色不用'他''她'称呼，直接叫名字。"], 'base', 'person');
         const sl = { name, present, talk: [talk, ...queryKeys].join('\n'), roster: roster.map(e => e.name), pick: backstoryPick };
         add(0, slotLines(setup, { ...sl, only: 'base' }), 'base', 'person');
         // 和眼下的话有关才挑上来的前事是想起来的，不是一直挂着的：放在想起的那一块（方案"场记的分量与连续性"：开局单的细节靠召回）
@@ -2616,7 +2619,7 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
     // 这一局到现在：账本要事按剧情日排（取代原先"最近两天的改变"＋"一直有效的改变"两段——一个窗口只跨两三天时，那样切会丢掉大半前情）。
     const digest = storyDigest(s.visible, { dayOf: s.dayOf, today: s.today, when: d => relativeDay(d, s.ts) });
     const rel = (r => (r ? normalizeRelations(r) : null))(store.relationsOf?.(s.chat.story_id));
-    const setup = staleBackstory(intimateSetup(store, chatKey), s.visible, s.userName);
+    const setup = staleBackstory(withSecretLeaks(intimateSetup(store, chatKey), activeLeaks(store, records, chatKey)), s.visible, s.userName);
     const lastNode = last?.node ? JSON.parse(last.node) : null;
     // 三样对账（章程 J1，用户 10/12：基调写的轻松热闹，规划连着几份排伤病；开局单写好要来的主线在"往后"里推了六份）：
     // 最近几份交回的规划（新的在前）的节点和事件，交给 planner 里的纯函数数——类别排了几件、拖着的线、该来的还没来
@@ -2643,6 +2646,7 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
     const pace = paceOf(setup, s.ts);
     const close = Number.isFinite(pace.close) ? pace.close : CLOSE_UNITS[pace.name] ?? CLOSE_UNITS.中;
     const base = {
+        secretLeaks: secretLeakLines(activeLeaks(store, records, chatKey)),
         ...(replaced.size ? { reroll: { titles: rerollTitles, changes: setupChanges.slice(0, 40), more: Math.max(0, setupChanges.length - 40) } } : {}),
         ts: s.ts,
         rhythm: rhythmFor(store, chatKey, last?.id),
@@ -2961,7 +2965,11 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     const split = slot?.split !== false;
     const depths = { mid: slot?.midDepth ?? 4, recall: slot?.recallDepth ?? -1, now: slot?.nowDepth ?? 4 };
     const shape = (text, parts) => ({ text: text ? wrap(text) : '', rule: !text ? '' : split && parts ? SPLIT_RULE : READING_RULE, ...(text && split && parts ? { parts, depths } : {}) });
-    const version = intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '');
+    const versionNow = () => {
+        const leaks = activeLeaks(store, records, chatKey);
+        return intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '');
+    };
+    const version = versionNow();
     const pinned = store.getSlot({ chatKey, speaker, anchor, ver: version });
     if (pinned !== null) {
         const parts = store.getSlotParts?.({ chatKey, speaker, anchor }) ?? null;
@@ -2984,6 +2992,6 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     }
     const { text, mode, contact = null, parts = null } = await inflight.get(key);
     // 正在等组装时喊停：旧版本不返回给前台，重新取暂停后的那一格。
-    if (intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') !== version) return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
+    if (versionNow() !== version) return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
     return { ...shape(text, parts), pinned: false, mode, contact };
 }

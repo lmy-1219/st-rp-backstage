@@ -358,15 +358,17 @@ export function planAttemptsHtml(planning, esc) {
     const rows = (planning?.attempts ?? []).map(a => `<tr><td>${esc(a.attemptId)}<br>规划 ${esc(String(a.planId))}</td><td>${esc(entries[a.entry] ?? a.entry)}</td><td>${esc(a.model ?? '未知')}<br>思考${a.thinks ? '开' : '关'}</td><td>${a.briefChars} / ${a.outputChars}</td><td>${(a.ms / 1000).toFixed(1)} 秒</td><td>${esc(a.stage)}<br>${esc(a.status)}</td><td>${esc(a.finishReason ?? '未知')}</td><td>${esc(a.failure ?? '无')}</td><td>${a.internalRetries}</td><td>${esc(kinds[a.partialKind] ?? '')}${a.hasPartial ? `<button type="button" class="menu_button" data-plan-partial="${esc(a.attemptId)}" title="只读查看已保存半截，建议规划失败时查。">看半截全文</button>` : ''}${a.repaired ? ' · 自动修过格式' : ''}</td></tr>`).join('');
     return `<h3>最近 20 次规划尝试</h3><p><small>每行是一次逻辑尝试，内部重发另计次数；正文只在本机数据库里；有半截的可以点开看。</small></p><table><thead><tr><th>尝试 / 规划</th><th>入口</th><th>型号 / 思考</th><th>简报 / 输出字数</th><th>耗时</th><th>阶段 / 状态</th><th>结束原因</th><th>失败类别</th><th>内部重发</th><th>半截与格式</th></tr></thead><tbody>${rows || '<tr><td colspan="10">还没有记录</td></tr>'}</tbody></table>`;
 }
-function noticeStory(chatKey, notice) {
+function noticeStory(chatKey, notice, scope = '') {
     if (!notice?.id || !notice.text) return;
-    const key = `rp_emergence_notice:${chatKey}`;
+    const seenKey = scope ? `${chatKey}:${scope}` : chatKey;
+    const key = `rp_emergence_notice:${seenKey}`;
     let seen = null;
     try { seen = globalThis.localStorage?.getItem(key); } catch {}
-    if (seen === notice.id || state.noticeSeen?.[chatKey] === notice.id) return;
-    state.noticeSeen = { ...(state.noticeSeen ?? {}), [chatKey]: notice.id };
+    if (seen === notice.id || state.noticeSeen?.[seenKey] === notice.id) return;
+    state.noticeSeen = { ...(state.noticeSeen ?? {}), [seenKey]: notice.id };
     try { globalThis.localStorage?.setItem(key, notice.id); } catch {}
     globalThis.toastr?.info(notice.text, '', { timeOut: 8000 });
+    if (scope === 'secret') state.secretLeakHint = notice.text;
 }
 
 // 离开很久回来：后台记下这次离开、推各人这些天做了什么（一两分钟），好了由在场最亲近的角色先开口。
@@ -472,7 +474,7 @@ async function openTalk(first = '') {
 }
 
 // ---------- 开局单 ----------
-// 贴一整段 → 后台分格（一两分钟，好了会提醒）→ 你核对、改、确认；确认后从现在起生效，随时能改。按局存，不写进卡和书。
+// 填写大纲 → 后台分格（一两分钟，好了会提醒）→ 你核对、改、确认；确认后从现在起生效，随时能改。按局存，不写进卡和书。
 
 async function textPopup(title, note, value, { ok, cancel, extra = null, rows = 22 }) {
     const c = ctx();
@@ -486,7 +488,7 @@ async function textPopup(title, note, value, { ok, cancel, extra = null, rows = 
     return { result, text };
 }
 
-// 开局单的四个口（开局单设计稿 §四）：填表（必填只有基调和剧情类别）；贴一整段让后台分格；看和改全文；上传素材。
+// 开局单的四个口（开局单设计稿 §四）：填表（必填只有基调和剧情类别）；填写大纲让后台分格；编辑全文；上传素材。
 async function openSetup() {
     const c = ctx(), chatKey = state.chatKey;
     const s = await api('setup', { chatKey });
@@ -496,11 +498,11 @@ async function openSetup() {
     const draft = !!s.draft?.text, has = draft || !!s.confirmed?.text;
     const status = draft ? `后台分好的草稿还没核对${s.draft.unchecked ? `（${s.draft.unchecked} 条在原文里没找到对应的话）` : ''}。`
         : s.confirmed ? `现在生效的是 ${new Date(s.confirmed.at).toLocaleString()} 确认的那份${s.confirmed.data?.节奏 ? `（故事节奏：${s.confirmed.data.节奏}）` : ''}。` : '这一局还没有开局单。';
-    const html = `<h3>开局单</h3><p>${status}</p>${(s.intimateWarnings ?? []).map(w => `<p><small>${escapeHtml(w)}</small></p>`).join('')}<p><small>填表：必填只有基调和剧情类别，其余都能空着。贴一整段：大纲、开场稿都行，后台替你分到各格、你再核对。上传素材：txt、md、json、csv，后台看一眼说该当开局单、关系表还是参考资料，你点头才处理。</small></p>`;
+    const html = `<h3>开局单</h3><p>${status}</p>${(s.intimateWarnings ?? []).map(w => `<p><small>${escapeHtml(w)}</small></p>`).join('')}<p><small>填写表单：必填只有基调和剧情类别，其余都能空着。填写大纲：大纲、开场稿都行，后台替你分到各格、你再核对。上传素材：txt、md、json、csv，后台看一眼说该当开局单、关系表还是参考资料，你点头才处理。</small></p>`;
     const r = await c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', {
         okButton: false, cancelButton: '关闭',
-        customButtons: [...(has ? [{ text: draft ? '核对草稿' : '看和改全文', result: c.POPUP_RESULT.CUSTOM1 }] : []),
-            { text: '填表', result: c.POPUP_RESULT.CUSTOM2 }, { text: '贴一整段', result: c.POPUP_RESULT.CUSTOM3 }, { text: '上传素材', result: c.POPUP_RESULT.CUSTOM4 }],
+        customButtons: [...(has ? [{ text: draft ? '核对草稿' : '编辑全文', result: c.POPUP_RESULT.CUSTOM1 }] : []),
+            { text: '填写表单', result: c.POPUP_RESULT.CUSTOM2 }, { text: '填写大纲', result: c.POPUP_RESULT.CUSTOM3 }, { text: '上传素材', result: c.POPUP_RESULT.CUSTOM4 }],
     });
     if (r === c.POPUP_RESULT.CUSTOM1) return openSetupText(s);
     if (r === c.POPUP_RESULT.CUSTOM2) return openSetupForm(s);
@@ -543,10 +545,24 @@ async function refreshRelationsDraft() {
 
 export function relationsDraftHtml(d, escape = s => s) {
     if (!d) return '';
-    if (d.status === 'drafted') return `<button class="menu_button" type="button" data-action="relations-draft" title="核对自动草稿，保存后才生效。">关系表草稿好了（${d.people} 人），点开核对</button><small>这次起草花了约 $${Number(d.costUsd ?? 0).toFixed(4)}${d.via === 'handoff' ? '（不含外援费用）' : ''}${d.truncatedChars ? `；输入截短了 ${d.truncatedChars} 字` : ''}</small>`;
+    const date = d.oldSetupAt ? new Date(d.oldSetupAt) : null;
+    const at = date && Number.isFinite(date.getTime()) ? `${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')} ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}` : '';
+    const note = at ? `<small>这份是按 ${at} 那版开局单起草的。</small>` : '';
+    const restart = ['drafted', 'failed'].includes(d.status) ? '<button class="menu_button" type="button" data-action="relations-redraft" title="用当前开局单重新起草，先确认费用。">按新开局单重新起草</button>' : '';
+    if (d.status === 'drafted') return `<button class="menu_button" type="button" data-action="relations-draft" title="核对自动草稿，保存后才生效。">关系表草稿好了（${d.people} 人），点开核对</button><small>这次起草花了约 $${Number(d.costUsd ?? 0).toFixed(4)}${d.via === 'handoff' ? '（不含外援费用）' : ''}${d.truncatedChars ? `；输入截短了 ${d.truncatedChars} 字` : ''}</small>${note}${restart}`;
     if (d.status === 'working') return '<small>关系表正在起草，核对保存才生效。</small>';
     if (d.status === 'handoff') return '<small>关系表起草没响应，已放进外援；交回后仍要核对保存。</small>';
-    return `<small>${escape(d.reason ?? '关系表还没起好，可手写或从素材整理')}</small>`;
+    return `<small>${escape(d.reason ?? '关系表还没起好，可手写或从素材整理')}</small>${note}${restart}`;
+}
+
+async function redraftRelations() {
+    const chatKey = state.chatKey, c = ctx(), relationCards = await relationCardsFor(chatKey);
+    const { estimate } = await api('relations-redraft', { chatKey, relationCards });
+    const price = estimate.costUsd == null ? '当前没有价格，无法估算费用' : `预计约 $${estimate.costUsd.toFixed(4)}（按输入和输出上限粗估）`;
+    const yes = await c.callGenericPopup(`用开局单那档模型 ${escapeHtml(estimate.model)}，按当前开局单和名册重新起草关系表，${price}。新草稿会覆盖旧草稿，核对保存后才生效。继续吗？`, c.POPUP_TYPE.CONFIRM);
+    if (!yes || state.chatKey !== chatKey) return;
+    await api('relations-redraft', { chatKey, relationCards: await relationCardsFor(chatKey), confirm: true });
+    await refreshRelationsDraft();
 }
 
 // 故事节奏（章程 H2）：快／中／慢，选了旁边小字说这一档是什么样
@@ -561,7 +577,7 @@ function openRowHtml(r = {}) {
     const kind = OPEN_ROW_KINDS.some(([k]) => k === r.类) ? r.类 : '在哪';
     const knows = Array.isArray(r.谁知道) ? r.谁知道.join('、') : String(r.谁知道 ?? '');
     return `<div data-row style="display:flex;flex-wrap:wrap;gap:.3em;align-items:center;margin:.2em 0" data-orig="${escapeHtml(r.原来 ? JSON.stringify(r.原来) : '')}">
-        <input class="text_pole" data-r="谁" placeholder="谁" style="flex:0 0 7em" value="${escapeHtml(r.谁 ?? '')}">
+        ${r.warning ? '<small>⚠ 原文未对上，请核对</small>' : ''}<input class="text_pole" data-r="谁" placeholder="谁" style="flex:0 0 7em" value="${escapeHtml(r.谁 ?? '')}">
         <select class="text_pole" data-r="类" style="flex:0 0 auto;width:auto">${OPEN_ROW_KINDS.map(([k, label]) => `<option value="${k}" ${k === kind ? 'selected' : ''}>${label}</option>`).join('')}</select>
         <input class="text_pole" data-r="是" placeholder="${escapeHtml(OPEN_ROW_HINT[kind])}" style="flex:1 1 12em" value="${escapeHtml(r.是 ?? '')}">
         <input class="text_pole" data-r="谁知道" placeholder="还有谁知道（、分隔；不写只有他自己）" style="flex:1 1 10em" value="${escapeHtml(knows)}">
@@ -586,9 +602,100 @@ function castPicker(c, key, label, picked, hint) {
         <input class="text_pole" data-f="${key}自填" style="width:100%" placeholder="列表里没有的（还没建卡的）直接填，用、隔开" value="${escapeHtml(own.join('、'))}">`;
 }
 function castPicked(root, key) {
-    const ticked = [...root.querySelectorAll(`[data-pick="${key}"]`)].filter(x => x.checked).map(x => x.value);
+    const ticked = [...root.querySelectorAll(`[data-pick="${key}"]`)].filter(x => x.checked && !x.disabled).map(x => x.value);
     const typed = String(root.querySelector(`[data-f="${key}自填"]`)?.value ?? '').split(/[、,，/]/).map(x => x.trim()).filter(Boolean);
     return [...new Set([...ticked, ...typed])];
+}
+export function setupRolesHtml({ names, crew, must, intimate, player, tier }) {
+    const known = new Set(names), own = intimate.filter(r => r.谁.includes(player));
+    return `<details data-role="setup-roles" style="margin:.5em 0"><summary><b>角色选择</b><small data-role="role-summary" style="display:block"></small></summary>
+        <input class="text_pole" data-role="role-search" aria-label="搜索角色名字" placeholder="搜索角色名字" style="width:100%">
+        <div style="max-height:14em;overflow:auto">${names.map(n => {
+            const main = crew.includes(n), required = must.includes(n), pair = own.find(r => r.谁.includes(n));
+            return `<div data-role-name="${escapeHtml(n)}" style="display:flex;flex-wrap:wrap;align-items:center;gap:.3em .7em;padding:.2em 0"><span style="flex:1 1 10em">${escapeHtml(n)}${n === player ? '（你）' : ''}</span>
+                <label class="checkbox_label"><input type="checkbox" data-pick="主角团" value="${escapeHtml(n)}"${main ? ' checked' : ''}> 主角</label>
+                <label class="checkbox_label"><input type="checkbox" data-pick="必要角色" data-explicit="${required}" value="${escapeHtml(n)}"${main || required ? ' checked' : ''}${main ? ' disabled' : ''}> 必要</label>
+                ${tier !== 'SFW' && n !== player ? `<div data-intimate-own="${escapeHtml(n)}" style="display:flex;gap:.4em"><label class="checkbox_label"><input type="checkbox" data-intimate-pick${pair ? ' checked' : ''}> 亲密</label><label class="checkbox_label" data-role="adult-label"${pair ? '' : ' style="display:none"'}><input type="checkbox" data-intimate-adult${!pair || pair.成年 ? ' checked' : ''}> 已成年</label></div>` : ''}</div>`;
+        }).join('')}</div>
+        <label>列表里没有的（还没建卡的）<input class="text_pole" data-f="必要角色自填" style="width:100%" placeholder="填进去的算必要，用、隔开" value="${escapeHtml(must.filter(n => !known.has(n)).join('、'))}"></label>
+        <label>主角团里没建卡的<input class="text_pole" data-f="主角团自填" style="width:100%" placeholder="用、隔开" value="${escapeHtml(crew.filter(n => !known.has(n)).join('、'))}"></label>
+        ${setupIntimateHtml(intimate, names, player, tier)}</details>`;
+}
+export function refreshSetupPickers(root) {
+    const split = value => String(value ?? '').split(/[、,，/]/).map(s => s.trim()).filter(Boolean);
+    const cats = [...root.querySelectorAll('[data-cat]')].filter(x => x.checked).map(x => x.dataset.cat);
+    const catSummary = root.querySelector('[data-role="category-summary"]');
+    if (catSummary) { const chosen = [...new Set([...cats, ...split(root.querySelector('[data-f="自填"]')?.value)])]; catSummary.textContent = chosen.length ? `已选：${chosen.join('、')}` : '还没选'; }
+    const search = root.querySelector('[data-role="role-search"]')?.value.trim().toLocaleLowerCase() ?? '';
+    for (const row of root.querySelectorAll('[data-role-name]')) {
+        const main = row.querySelector('[data-pick="主角团"]'), must = row.querySelector('[data-pick="必要角色"]');
+        must.checked = main.checked || must.dataset.explicit === 'true'; must.disabled = main.checked;
+        row.hidden = !row.dataset.roleName.toLocaleLowerCase().includes(search);
+        row.style.display = row.hidden ? 'none' : 'flex';
+        const adult = row.querySelector('[data-role="adult-label"]');
+        if (adult) adult.style.display = row.querySelector('[data-intimate-pick]').checked ? '' : 'none';
+    }
+    const summary = root.querySelector('[data-role="role-summary"]');
+    if (summary) {
+        const crew = castPicked(root, '主角团');
+        const must = castPicked(root, '必要角色').filter(n => !crew.includes(n));
+        const intimate = [...root.querySelectorAll('[data-intimate-own]')].filter(el => el.querySelector('[data-intimate-pick]').checked).map(el => el.dataset.intimateOwn);
+        intimate.push(...[...root.querySelectorAll('[data-intimate-other]')].map(el => [...el.querySelectorAll('[data-intimate-person]')].map(x => x.value).filter(Boolean).join('和')).filter(Boolean));
+        summary.textContent = [`主角团：${crew.join('、') || '未选'}`, `必要：${must.join('、') || '未选'}`, ...(root.querySelector('[data-role="intimate-form"]') ? [`亲密线：${intimate.join('、') || '未选'}`] : [])].join('｜');
+    }
+}
+export function setupFormSnapshot(root) {
+    return JSON.stringify([...root.querySelectorAll('input,select,textarea')].filter(el => el.dataset.role !== 'role-search').map(el => [el.value, el.type === 'checkbox' ? el.checked : null]));
+}
+export function setupStoryRowHtml(row = {}, split = false) {
+    const value = row.名 ? `${row.名}：${row.内容 ?? ''}` : row.内容 ?? '';
+    return `<div data-story-row data-name="${escapeHtml(row.名 ?? '')}" data-original="${escapeHtml(row.内容 ?? '')}" data-seed="${escapeHtml(split ? JSON.stringify(row) : '')}" style="display:flex;gap:.3em;margin:.3em 0">${row.ok === false ? '<small>⚠ 原文未对上，请核对</small>' : ''}<input class="text_pole" data-story-value style="flex:1" value="${escapeHtml(value)}"><button type="button" class="menu_button" data-story-delete title="删掉此条，确认表单后生效。">✕</button></div>`;
+}
+export function setupStoryPicked(root, key) {
+    return [...root.querySelectorAll(`[data-story="${key}"] [data-story-row]`)].map(el => {
+        const value = el.querySelector('[data-story-value]').value.trim(), at = el.dataset.name || !el.dataset.original ? value.indexOf('：') : -1;
+        return { 名: at > 0 ? value.slice(0, at) : '', 内容: at > 0 ? value.slice(at + 1) : value, 原来: el.dataset.original, ...(el.dataset.seed ? { 拆分原格: JSON.parse(el.dataset.seed) } : {}) };
+    }).filter(x => x.内容);
+}
+export function setupBackstoryHtml(row = {}, names = []) {
+    const list = (role, selected, all) => `<details><summary data-back-summary="${role}"></summary><div style="max-height:9em;overflow:auto">${[all, ...new Set([...names, ...selected])].map(n => `<label class="checkbox_label"><input type="checkbox" data-back-${role} value="${escapeHtml(n)}"${selected.includes(n) || role === 'known' && !selected.length && n === '所有人' ? ' checked' : ''}> ${n === '除知道的人以外' ? '除了知道的人，全部' : escapeHtml(n)}</label>`).join('')}</div></details>`;
+    return `<div data-backstory-row data-seed="${escapeHtml(row.拆分原格 ? JSON.stringify(row.拆分原格) : '')}" style="border:1px solid var(--SmartThemeBorderColor);padding:.5em;margin:.4em 0">${row.ok === false ? '<small>⚠ 原文未对上，请核对</small>' : ''}
+        <label>事<textarea class="text_pole" data-back="事" rows="2" style="width:100%">${escapeHtml(row.事 ?? '')}</textarea></label>
+        <label>谁知道${list('known', row.谁知道 ?? [], '所有人')}</label>
+        <label>层<select class="text_pole" data-back="层">${['原作', '本局私设', '某人记得的版本'].map(n => `<option${(row.层 ?? '本局私设') === n ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
+        <label data-back-whose${row.层 === '某人记得的版本' ? '' : ' style="display:none"'}>谁的<input class="text_pole" data-back="谁的版本" value="${escapeHtml(row.谁的版本 ?? '')}"></label>
+        <label class="checkbox_label"><input type="checkbox" data-back="秘密"${row.不让谁知道?.length ? ' checked' : ''}> 秘密</label>
+        <div data-back-hidden${row.不让谁知道?.length ? '' : ' style="display:none"'}>不让谁知道${list('hidden', row.不让谁知道 ?? [], '除知道的人以外')}</div>
+        <button type="button" class="menu_button" data-back-delete title="删除这一条前史，确认表格后生效。">删此条</button></div>`;
+}
+export function setupBackstoryNames(root, base = []) {
+    return [...new Set([...base, ...castPicked(root, '主角团'), ...castPicked(root, '必要角色')].filter(Boolean))];
+}
+export function refreshBackstories(root, base = []) {
+    const names = setupBackstoryNames(root, base), rows = [...root.querySelectorAll('[data-backstory-row]')];
+    const title = root.querySelector('[data-role="backstory-summary"]');
+    if (title) title.textContent = `前史 ${rows.length} 条，其中秘密 ${rows.filter(r => r.querySelector('[data-back="秘密"]').checked).length} 条`;
+    for (const row of rows) {
+        row.querySelector('[data-back-hidden]').style.display = row.querySelector('[data-back="秘密"]').checked ? '' : 'none';
+        row.querySelector('[data-back-whose]').style.display = row.querySelector('[data-back="层"]').value === '某人记得的版本' ? '' : 'none';
+        for (const role of ['known', 'hidden']) {
+            const all = role === 'known' ? '所有人' : '除知道的人以外';
+            const summary = row.querySelector(`[data-back-summary="${role}"]`), box = summary.nextElementSibling;
+            const picked = [...box.querySelectorAll('input')].filter(x => x.checked).map(x => x.value);
+            // 新勾的本局角色可立即选择；旧值保留，不枚举酒馆里其余卡。
+            const choices = [...new Set([all, ...names, ...picked])];
+            box.innerHTML = choices.map(n => `<label class="checkbox_label"><input type="checkbox" data-back-${role} value="${escapeHtml(n)}"${picked.includes(n) ? ' checked' : ''}> ${n === '除知道的人以外' ? '除了知道的人，全部' : escapeHtml(n)}</label>`).join('');
+            summary.textContent = picked.includes(all) ? all === '所有人' ? '所有人' : '除了知道的人，全部' : picked.join('、') || '还没选';
+        }
+    }
+}
+export function setupBackstoryPicked(root) {
+    return [...root.querySelectorAll('[data-backstory-row]')].map(row => {
+        const value = k => row.querySelector(`[data-back="${k}"]`).value;
+        const selected = role => [...row.querySelectorAll(`[data-back-${role}]`)].filter(x => x.checked).map(x => x.value);
+        const known = selected('known'), hidden = selected('hidden');
+        return { 事: value('事'), 层: value('层'), 谁的版本: value('谁的版本'), 谁知道: known.includes('所有人') ? [] : known, 秘密: row.querySelector('[data-back="秘密"]').checked, 不让谁知道: hidden.includes('除知道的人以外') ? ['除知道的人以外'] : hidden, ...(row.dataset.seed ? { 拆分原格: JSON.parse(row.dataset.seed) } : {}) };
+    });
 }
 export function setupPersonaHtml(name, escape = escapeHtml) {
     return `<p>这一局你演的是：<b>${escape(name || '当前未知')}</b>（当前人设）。点错了先去切人设再确认。</p>`;
@@ -600,13 +707,7 @@ export function setupIntimateRows(data, crew, cardNames, player) {
 }
 export function setupIntimateHtml(rows, names, player, tier) {
     if (tier === 'SFW') return '<small>档位是 SFW，不用亲密线；要用先在\'这一局\'改档位。</small>';
-    const own = rows.filter(r => r.谁.includes(player));
-    const adult = checked => `<label class="checkbox_label"><input type="checkbox" data-intimate-adult${checked ? ' checked' : ''}> 两人都已成年</label>`;
-    return `<div data-role="intimate-form"><b>亲密线</b><p>和你有亲密线的人（可多选）</p>
-        <div style="display:flex;flex-wrap:wrap;gap:.3em .8em">${[...new Set([...names.filter(n => n !== player), ...own.flatMap(r => r.谁).filter(n => n !== player)])].map(n => {
-            const row = own.find(r => r.谁.includes(n));
-            return `<div data-intimate-own="${escapeHtml(n)}"><label class="checkbox_label"><input type="checkbox" data-intimate-pick${row ? ' checked' : ''}> ${escapeHtml(n)}</label>${adult(row ? row.成年 : true)}</div>`;
-        }).join('')}</div><p>别的两人之间（可选）</p><div data-role="intimate-others">${rows.filter(r => !r.谁.includes(player)).map(r => setupIntimateOtherHtml(r, names)).join('')}</div>
+    return `<div data-role="intimate-form"><p>别的两人之间（可选）</p><div data-role="intimate-others">${rows.filter(r => !r.谁.includes(player)).map(r => setupIntimateOtherHtml(r, names)).join('')}</div>
         <button type="button" class="menu_button" style="width:auto;white-space:nowrap" data-role="intimate-add" title="添加一条两人之间的亲密线。">加一行</button><small>提交就表示你确认这些人都已成年；有未成年的，取消勾选或删掉那一条。</small></div>`;
 }
 export function setupIntimateOtherHtml(row = { 谁: [], 成年: true }, names = []) {
@@ -618,7 +719,8 @@ export function setupIntimatePicked(root, player) {
 }
 async function openSetupForm(s) {
     const c = ctx(), chatKey = state.chatKey, setupPersona = String(c.name1 ?? '').trim();
-    const d = s.confirmed?.data ?? {};
+    const storyCast = (await api('cast', { chatKey })).cast ?? [];
+    const d = s.formData ?? s.confirmed?.data ?? {};
     const t = d.时间 ?? {};
     const own = (d.类别 ?? []).filter(x => !CATEGORIES.includes(x));
     const field = (label, key, rows = 2, ph = '') => `<label style="display:block;margin:.5em 0 .1em">${label}</label><textarea class="text_pole" data-f="${key}" rows="${rows}" style="width:100%" placeholder="${escapeHtml(ph)}"></textarea>`;
@@ -626,23 +728,25 @@ async function openSetupForm(s) {
     const crew = Array.isArray(s.crew) ? s.crew : Array.isArray(d.主角团) ? d.主角团 : [];
     const mustCast = Array.isArray(s.mustCast) ? s.mustCast : mustCastFrom(d);
     const intimate = setupIntimateRows(s.intimate ?? d.亲密线, crew, (c.characters ?? []).filter(ch => !isCamera(ch)).map(ch => ch.name), setupPersona);
-    const intimateNames = [...new Set([setupPersona, ...(s.names ?? castChoices(c))].filter(Boolean))];
+    const intimateNames = [...new Set([setupPersona, ...castChoices(c), ...(s.names ?? []), ...intimate.flatMap(r => r.谁)].filter(Boolean))];
     const tier = s.content?.tier ?? state.content?.tier ?? 'SFW';
-    const html = `<h3>开局单 · 填表</h3>${setupPersonaHtml(setupPersona)}<p><small>带 * 的必填，其余都能空着。"核心主线"到"必要剧情"每行一条，会加进现在那份里（已有的不重复）；要删、要改原来的，去"看和改全文"。"人物开场状态"和"亲密线"列的是现有的全部，在这儿改、删、加都算数。</small></p>
+    const backstoryNames = [...new Set([setupPersona, ...members(c).map(m => m.name), ...crew, ...mustCast, ...storyCast.filter(p => p.role !== '不用' && (String(p.avatar).startsWith('face:') || !(c.characters ?? []).some(ch => ch.avatar === p.avatar))).map(p => p.name)].filter(Boolean))];
+    const storyList = (label, key, items) => `<label>${label}</label><div data-story="${key}">${items.map(row => setupStoryRowHtml(row)).join('')}</div><button type="button" class="menu_button" style="display:inline-block;width:auto;min-width:8em;white-space:nowrap" data-story-add="${key}" title="增加一条，确认表单后生效。">加一条${label}</button>`;
+    const html = `<h3>开局单 · 填写表单</h3>${setupPersonaHtml(setupPersona)}<p><small>带 * 的必填，其余都能空着。表上列的是现有的，在这儿改、删、加都算数；没在表上的去“编辑全文”。</small></p>
       <div style="text-align:left">
         <label style="display:block;margin:.5em 0 .1em"><b>基调 *</b>（一两句：整体什么氛围、这一局最看重什么）</label>
         <textarea class="text_pole" data-f="基调" rows="2" style="width:100%">${escapeHtml(d.基调 ?? '')}</textarea>
-        <label style="display:block;margin:.5em 0 .1em"><b>剧情类别 *</b>（多选，也能自己填）</label>
-        <div style="display:flex;flex-wrap:wrap;gap:.2em .8em">${CATEGORIES.map(k => `<label class="checkbox_label"><input type="checkbox" data-cat="${k}" ${(d.类别 ?? []).includes(k) ? 'checked' : ''}> ${k}</label>`).join('')}</div>
-        <input class="text_pole" data-f="自填" style="width:100%" placeholder="自己填，用、隔开" value="${escapeHtml(own.join('、'))}">
+        <label>开场<textarea class="text_pole" data-f="开场" rows="2" style="width:100%">${escapeHtml(d.开场 ?? '')}</textarea></label><small data-split-hint="开场"></small><small data-split-hint="基调"></small>
+        <details data-role="setup-categories"><summary><b>剧情类别 *</b>（多选，也能自己填）<small data-role="category-summary" style="display:block"></small></summary>
+        <div style="display:flex;flex-direction:column;gap:.2em;max-height:10em;overflow:auto">${CATEGORIES.map(k => `<label class="checkbox_label"><input type="checkbox" data-cat="${k}" ${(d.类别 ?? []).includes(k) ? 'checked' : ''}> ${k}</label>`).join('')}</div>
+        <input class="text_pole" data-f="自填" style="width:100%" placeholder="自己填，用、隔开" value="${escapeHtml(own.join('、'))}"></details>
         <label style="display:block;margin:.5em 0 .1em"><b>故事节奏</b>（选填，不选就是中）</label>
         <div style="display:flex;flex-wrap:wrap;gap:.3em;align-items:center">
             <select class="text_pole" data-f="节奏" style="flex:0 0 auto;width:auto">${[['中', '中（默认）'], ['慢', '慢'], ['快', '快']].map(([v, label]) => `<option value="${v}" ${(d.节奏 ?? '中') === v ? 'selected' : ''}>${label}</option>`).join('')}</select>
             <small data-role="pace-hint" style="flex:1 1 12em">${escapeHtml(PACE_HINT[d.节奏 ?? '中'] ?? '')}</small>
         </div>
-        ${castPicker(c, '主角团', '主要聚焦角色（主角团）', crew, '故事围着转的那几个人，含你自己的角色；可多选，也能自己填')}
-        ${setupIntimateHtml(intimate, intimateNames, setupPersona, tier)}
-        <label>玩家性别 <select class="text_pole" data-f="玩家性别">${['', '男', '女'].map(g => `<option value="${g}"${(d.玩家性别 ?? '') === g ? ' selected' : ''}>${g || '不写'}</option>`).join('')}</select></label>
+        ${setupRolesHtml({ names: intimateNames, crew, must: mustCast, intimate, player: setupPersona, tier })}
+        <label>玩家性别 <select class="text_pole" data-f="玩家性别">${['', '男', '女', '其他'].map(g => `<option value="${g}"${(d.玩家性别 ?? '') === g ? ' selected' : ''}>${g || '不写'}</option>`).join('')}</select></label>
         <details style="margin:.5em 0"><summary>开场时间（选填）</summary>
           <div style="display:flex;flex-wrap:wrap;gap:.3em">
             <input class="text_pole" data-t="日期" placeholder="日期 2000-01-31" style="flex:1 1 9em" value="${escapeHtml(t.日期 ?? '')}">
@@ -660,18 +764,59 @@ async function openSetupForm(s) {
           <div data-role="rows">${rows.map(openRowHtml).join('')}</div>
           <div class="menu_button" data-role="row-add" style="display:inline-block;margin-top:.3em" title="增加一行设定，建议只填确认的事实。">加一行</div>
         </details>
-        ${field('核心主线', '主线', 2, '这一局的核心主题（只当主题，不排日程）')}
-        ${field('必要剧情', '必要剧情', 2, '一定要有的线或场面，每行一条')}
-        ${castPicker(c, '必要角色', '全剧情必要角色', mustCast, '一定要出场的人：从角色卡里勾，没建卡的直接填')}
-        ${field('其他', '其他', 2)}
+        <details data-role="backstories" style="margin:.5em 0"><summary data-role="backstory-summary">前史 0 条，其中秘密 0 条</summary><div data-role="backstory-rows">${(d.前史 ?? []).map(row => setupBackstoryHtml(row, backstoryNames)).join('')}</div><button type="button" class="menu_button" data-back-add title="增加一条本局前史。">加前史</button></details>
+        ${storyList('核心主线', '主线', d.主线 ?? [])}
+        ${storyList('必要剧情', '必要剧情', (d.储备线 ?? []).filter(x => x.可选 === false))}
+        <label>其他<textarea class="text_pole" data-f="其他" rows="3" style="width:100%">${escapeHtml(d.其他 ?? '')}</textarea></label>
+        <button type="button" class="menu_button" style="display:inline-block;width:auto;min-width:7em;white-space:nowrap" data-split-other title="用开局单模型分格，只回填表单，核对后确认才生效。">拆进各格</button><small data-split-state>${s.splitReady ? '拆完先核对；取消表单不保存，但已发生的模型费用不会退回。' : '要先配开局单那档的模型'}</small>
+        <small data-unshown>${s.unshown?.length ? `还有：${escapeHtml(s.unshown.join('、'))}——在“编辑全文”里改。` : ''}</small>
       </div>`;
-    let form = null;
+    let form = null, initialForm = null, splitChanged = false, splitting = false;
+    const extraAccepted = [];
     const result = await c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', {
         okButton: '确认生效', cancelButton: '取消', wide: true, allowVerticalScrolling: true,
         customButtons: [{ text: '先存草稿', result: c.POPUP_RESULT.CUSTOM1 }],
         onOpen: popup => {
+            refreshSetupPickers(popup.dlg);
+            refreshBackstories(popup.dlg, backstoryNames);
+            initialForm = setupFormSnapshot(popup.dlg);
+            const splitButton = popup.dlg.querySelector('[data-split-other]'), other = popup.dlg.querySelector('[data-f="其他"]');
+            const refreshSplit = () => { splitButton.disabled = splitting || !s.splitReady || !other.value.trim(); };
+            refreshSplit();
+            popup.dlg.addEventListener('input', e => { if (e.target?.type !== 'checkbox') refreshSetupPickers(popup.dlg); refreshSplit(); });
             const box = popup.dlg.querySelector('[data-role="rows"]');
-            popup.dlg.addEventListener('click', e => {
+            popup.dlg.addEventListener('click', async e => {
+                const addStory = e.target?.closest?.('[data-story-add]');
+                if (addStory) popup.dlg.querySelector(`[data-story="${addStory.dataset.storyAdd}"]`).insertAdjacentHTML('beforeend', setupStoryRowHtml());
+                e.target?.closest?.('[data-story-delete]')?.closest('[data-story-row]')?.remove();
+                if (e.target?.closest?.('[data-split-other]') && !splitButton.disabled) {
+                    splitting = true; refreshSplit();
+                    try {
+                        const source = other.value, estimate = await api('setup-split', { chatKey, source, estimate: true });
+                        const price = estimate.usd == null ? '单价未配，无法估算费用' : `按输出上限粗估约 $${estimate.usd.toFixed(3)}`;
+                        const yes = await c.callGenericPopup(`用开局单那档模型 ${escapeHtml(estimate.model)} 拆这段“其他”，预计约 ${estimate.calls} 次调用，${price}；长段或重试可能增加调用。拆完只回填表单，核对后点“确认生效”才保存；取消表单不保存，已发生的费用不会退回。继续吗？`, c.POPUP_TYPE.CONFIRM);
+                        if (yes !== c.POPUP_RESULT.AFFIRMATIVE) return;
+                        const r = await api('setup-split', { chatKey, source, confirm: true }, 1800000);
+                        if (!popup.dlg.isConnected) return;
+                        if (!r.ok) throw new Error(r.error);
+                        for (const [key, items] of [['主线', r.data.主线 ?? []], ['必要剧情', (r.data.储备线 ?? []).filter(x => x.可选 === false)]]) for (const row of items) popup.dlg.querySelector(`[data-story="${key}"]`).insertAdjacentHTML('beforeend', setupStoryRowHtml(row, true));
+                        for (const row of r.data.前史 ?? []) popup.dlg.querySelector('[data-role="backstory-rows"]').insertAdjacentHTML('beforeend', setupBackstoryHtml({ ...row, 秘密: !!row.不让谁知道?.length, 拆分原格: row }, setupBackstoryNames(popup.dlg, backstoryNames)));
+                        for (const row of r.rows ?? []) box.insertAdjacentHTML('beforeend', openRowHtml(row));
+                        for (const key of ['基调', '开场']) if (r.data[key]) popup.dlg.querySelector(`[data-split-hint="${key}"]`).textContent = `拆出来的${key}是：${r.data[key]}；要用就自己替换。`;
+                        if (Object.values(r.extra ?? {}).some(rows => rows.length)) {
+                            const take = await c.callGenericPopup(`<p>这些放进开局单吗（在“编辑全文”里能看到）？确认表单前仍不会保存。</p><pre style="white-space:pre-wrap">${escapeHtml(r.extraText)}</pre>`, c.POPUP_TYPE.CONFIRM);
+                            if (take === c.POPUP_RESULT.AFFIRMATIVE) extraAccepted.push(r.extra);
+                            else r.data.其他 = [r.data.其他, r.extraText].filter(Boolean).join('\n');
+                        }
+                        other.value = r.data.其他 ?? ''; splitChanged = true;
+                        refreshBackstories(popup.dlg, backstoryNames);
+                        popup.dlg.querySelector('[data-split-state]').textContent = `已回填，${r.unchecked?.length ?? 0} 条原文未对上（⚠），请核对；确认生效才保存。`;
+                    } catch (error) { globalThis.toastr?.warning(error.message || '没拆成，稍后再试'); }
+                    finally { splitting = false; refreshSplit(); }
+                }
+                if (e.target?.closest?.('[data-back-add]')) popup.dlg.querySelector('[data-role="backstory-rows"]').insertAdjacentHTML('beforeend', setupBackstoryHtml({}, setupBackstoryNames(popup.dlg, backstoryNames)));
+                e.target?.closest?.('[data-back-delete]')?.closest('[data-backstory-row]')?.remove();
+                if (e.target?.closest?.('[data-back-add],[data-back-delete]')) refreshBackstories(popup.dlg, backstoryNames);
                 if (e.target?.closest?.('[data-role="row-add"]')) box.insertAdjacentHTML('beforeend', openRowHtml());
                 const del = e.target?.closest?.('[data-role="row-del"]');
                 if (del) del.closest('[data-row]')?.remove();
@@ -680,6 +825,13 @@ async function openSetupForm(s) {
             });
             // 换了哪一类，"是什么"的示例跟着换；换了节奏，旁边的小字跟着换
             popup.dlg.addEventListener('change', e => {
+                if (e.target?.matches?.('[data-back-known]') && e.target.checked) {
+                    const row = e.target.closest('[data-backstory-row]');
+                    for (const input of row.querySelectorAll('[data-back-known]')) if (input !== e.target && (e.target.value === '所有人' || input.value === '所有人')) input.checked = false;
+                }
+                if (e.target?.dataset?.pick === '必要角色') e.target.dataset.explicit = String(e.target.checked);
+                refreshSetupPickers(popup.dlg);
+                refreshBackstories(popup.dlg, backstoryNames);
                 if (e.target?.dataset?.f === '节奏') { const hint = popup.dlg.querySelector('[data-role="pace-hint"]'); if (hint) hint.textContent = PACE_HINT[e.target.value] ?? ''; return; }
                 if (e.target?.dataset?.r !== '类') return;
                 const input = e.target.closest('[data-row]')?.querySelector('[data-r="是"]');
@@ -687,6 +839,7 @@ async function openSetupForm(s) {
             });
         },
         onClosing: popup => {
+            if (splitting && [c.POPUP_RESULT.AFFIRMATIVE, c.POPUP_RESULT.CUSTOM1].includes(popup.result)) { globalThis.toastr?.warning('还在拆分，请等结果回来再确认；也可以取消表单。'); return false; }
             const q = sel => popup.dlg.querySelector(sel);
             const time = Object.fromEntries([...popup.dlg.querySelectorAll('[data-t]')].map(x => [x.dataset.t, x.value.trim()]));
             // 时间尺度（章程 G2）：两小格并成"尺度"那一格；都空着就是按天
@@ -694,16 +847,19 @@ async function openSetupForm(s) {
             delete time.尺度单位; delete time.尺度时段;
             const orig = el => { try { return el.dataset.orig ? JSON.parse(el.dataset.orig) : null; } catch { return null; } };
             form = {
-                基调: q('[data-f="基调"]').value, 主线: q('[data-f="主线"]').value, 必要剧情: q('[data-f="必要剧情"]').value,
-                必要角色: castPicked(popup.dlg, '必要角色'), 玩家性别: q('[data-f="玩家性别"]').value, 主角团: castPicked(popup.dlg, '主角团'), 其他: q('[data-f="其他"]').value,
+                基调: q('[data-f="基调"]').value, 开场: q('[data-f="开场"]').value, 主线: setupStoryPicked(popup.dlg, '主线'), 必要剧情: setupStoryPicked(popup.dlg, '必要剧情'), 拆分补充: extraAccepted,
+                必要角色: castPicked(popup.dlg, '必要角色').filter(n => !castPicked(popup.dlg, '主角团').includes(n)), 玩家性别: q('[data-f="玩家性别"]').value, 主角团: castPicked(popup.dlg, '主角团'), 其他: q('[data-f="其他"]').value,
                 ...(tier !== 'SFW' ? { 亲密线: setupIntimatePicked(popup.dlg, setupPersona) } : {}),
                 节奏: q('[data-f="节奏"]')?.value ?? '中',
                 类别: [...[...popup.dlg.querySelectorAll('[data-cat]')].filter(x => x.checked).map(x => x.dataset.cat), ...q('[data-f="自填"]').value.split(/[、,，/]/).map(x => x.trim()).filter(Boolean)],
                 时间: time,
+                前史: setupBackstoryPicked(popup.dlg),
                 // 后台不认这几行（旧版）就不带，免得把原有的几格当成删光了
                 人物: Array.isArray(s.rows) ? [...popup.dlg.querySelectorAll('[data-row]')].map(el => ({ 谁: el.querySelector('[data-r="谁"]').value.trim(), 类: el.querySelector('[data-r="类"]').value,
                     是: el.querySelector('[data-r="是"]').value.trim(), 谁知道: el.querySelector('[data-r="谁知道"]').value.trim(), 原来: orig(el) })).filter(r => r.谁 || r.是) : undefined,
             };
+            // 没改任何设定时沿用原字段与顺序；搜索、展开和收起不算修改。
+            if (!splitChanged && s.confirmed && (!intimate.length || d.亲密线?.length) && setupFormSnapshot(popup.dlg) === initialForm) form = { 基调: d.基调, 类别: d.类别 };
             const half = (form.人物 ?? []).filter(r => !r.谁 || !r.是);
             if (popup.result !== c.POPUP_RESULT.NEGATIVE && popup.result !== c.POPUP_RESULT.CANCELLED && (form.亲密线 ?? []).some(r => r.谁.length !== 2 || r.谁.some(n => !n) || r.谁[0] === r.谁[1])) {
                 globalThis.toastr?.warning('亲密线每条要选两个不同的人；不要的点 ✕ 删掉');
@@ -736,7 +892,7 @@ async function openSetupText(s) {
     const note = s.draft?.text
         ? `后台分好的草稿，还没生效。${s.draft.unchecked ? `带 ⚠ 的 ${s.draft.unchecked} 条在你的原文里没找到对应的话，请看一眼。` : ''}改完点"确认"，从现在起生效${s.confirmed ? '，替换现在那一版' : ''}。`
         : `现在生效的开局单（${new Date(s.confirmed.at).toLocaleString()} 确认）。改完点"确认"就换成新的一版。`;
-    const { result, text } = await textPopup('开局单', [setupPersonaHtml(setupPersona), note, ...(s.intimateWarnings ?? [])].join('\n'), current, { ok: '确认', cancel: s.draft?.text ? '先放着' : '关闭', extra: '重新贴一段' });
+    const { result, text } = await textPopup('开局单', [setupPersonaHtml(setupPersona), note, ...(s.intimateWarnings ?? [])].join('\n'), current, { ok: '确认', cancel: s.draft?.text ? '先放着' : '关闭', extra: '重新填写大纲' });
     if (result === c.POPUP_RESULT.AFFIRMATIVE) { await sendPersona(); if (String(ctx().name1 ?? '').trim() !== setupPersona) throw new Error('人设变了，请重新打开开局单核对'); const r = await api('setup', { chatKey, text, confirm: true, planPersona: setupPersona, relationCards: await relationCardsFor(chatKey) }); await showReceipt(r.receipt); }
     else if (result === c.POPUP_RESULT.CUSTOM1) await pasteSetup(chatKey);
     else if (s.draft?.text && text !== current) await api('setup', { chatKey, text });   // 草稿改过的先存着
@@ -1351,7 +1507,7 @@ async function openStages() {
 
 async function pasteSetup(chatKey) {
     const c = ctx();
-    const { result, text } = await textPopup('开局单：贴一整段',
+    const { result, text } = await textPopup('开局单：填写大纲',
         '大纲、开场稿、设定都行，不用先拆。后台分到各格（基调、类别、生活现状、原则、前史、原作走向、称呼口径、主线、储备线、意向），你再核对。会调一次模型（几毛钱），一两分钟。',
         '', { ok: '让系统分格', cancel: '取消', rows: 16 });
     if (result !== c.POPUP_RESULT.AFFIRMATIVE || !text.trim()) return;
@@ -1463,6 +1619,7 @@ async function syncNow(force = false) {
             state.status = await api('status', { chatKey: state.chatKey });
             noticeHandoffs(state.status.handoffs);
             noticeStory(state.chatKey, state.status.notice);
+            noticeStory(state.chatKey, state.status.secretNotice, 'secret');
             // 门、日期标签、世界书、记账进度：聊天有变化、或者隔了一阵才刷（同一轮里重复的同步不再跟一串请求）
             const stale = Date.now() - (state.fanAt ?? 0) > 8000;
             if (changed || stale) {
@@ -1943,9 +2100,9 @@ export function panelPageHtml(page) {
     const card = (title, html) => `<section class="rpe-card"><h4>${title}</h4>${html}</section>`;
     if (page === 'now') return `<div data-role="start-guide"></div><div data-joined>${card('此刻的场面', '<div data-role="board-row"></div><div class="rpe-grid">' + button('board-edit', '纠正场面') + button('camera-now', '旁白来一段') + '</div>')}
         <section class="rpe-card" data-role="tasks-card" hidden><h4>待处理</h4><div data-role="tasks"></div></section>
-        ${card('幕后', '<p data-role="plan"></p><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + '<button class="menu_button" type="button" data-action="plan-repair" hidden title="只修已保存规划的格式，建议先看失败原因。">修格式</button>' + button('plan-reveal', '看幕后（剧透）') + '</div>')}
+        ${card('幕后', '<p data-role="plan"></p><small data-role="secret-hint"></small><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + '<button class="menu_button" type="button" data-action="plan-repair" hidden title="只修已保存规划的格式，建议先看失败原因。">修格式</button>' + button('plan-reveal', '看幕后（剧透）') + '</div>')}
         <details class="rpe-card" data-role="handoff-details"><summary>外援</summary><small>把未完成任务交给其他AI，建议按题目交回。</small><div data-role="handoffs" hidden></div><div data-role="extract-alert"></div></details></div>`;
-    if (page === 'story') return `<div data-joined><div data-role="relations-draft"></div>${card('这一局', '<p><small>有局预设：套上就行。没有：填开局单，或贴大纲让后台拆，核对确认后可保存、导出为局预设。开局包是作者用 skill 生成的整套卡、书和设定，点“导入开局包”会新建群。</small></p><div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
+    if (page === 'story') return `<div data-joined><div data-role="relations-draft"></div>${card('这一局', '<p><small>有局预设：套上就行。没有：用“填写表单”编辑，或“填写大纲”让后台拆，核对确认后可保存、导出为局预设。开局包是作者用 skill 生成的整套卡、书和设定，点“导入开局包”会新建群。</small></p><div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
         <div class="rpe-grid">${button('setup', '开局单')}${button('cast', '名册')}${button('relations', '关系表')}${button('presets', '局预设')}${button('opening-pack', '导入开局包')}</div></div>`;
     if (page === 'ledger') return `<div data-joined class="rpe-stack">${button('records', '总结详情')}${button('ledger', '账本')}${button('pending', '约定历史')}${button('episodes', '剧情总览')}${button('talk', '任意调整 <small>几美分一句</small>')}</div>`;
     if (page === 'settings') return `${card('设置', '<label>玩法（全局默认）：<select data-opt="playMode"><option value="full">完整</option><option value="memory">只记忆</option></select></label><small>只记忆：只留记性（总结、召回、不串知），不排剧情、不推演，省钱；角色主动性会弱一些。</small><label class="checkbox_label"><input type="checkbox" data-opt="windowConnected"> 本窗口接入</label><label>每天最多花（美元）<input class="text_pole" type="number" min="0" max="500" step="0.1" data-opt="dailyBudget" aria-label="每天最多花（美元）"></label>' + button('stages', '钥匙和模型') + '<small data-role="edition"></small><a data-role="release" data-action="update" hidden href="#">检查更新</a>')}${card('去复读', '<small>先用免费第一档；第二档只改绑定角色。</small>' + button('fresh-settings', '去复读两档与口吻语料'))}${button('advanced', '高级（创作者用）›')}`;
@@ -2018,6 +2175,7 @@ function mountPanel() {
         $('[data-opt="speakFirst"]').checked = s.speakFirst !== false;
         $('[data-opt="cameraJoin"]').checked = s.cameraJoin !== false;
         const ps = state.planStatus;
+        $('[data-role="secret-hint"]').textContent = [state.secretLeakHint ?? '', st?.secretCheckReason ?? ''].filter(Boolean).join('；');
         for (const button of panel.querySelectorAll('[data-action="plan-reroll"]')) button.disabled = !state.chatKey || ps?.provider === 'off';
         $('[data-role="plan-row"]').hidden = !state.chatKey;
         const planning = st?.planning ?? ps?.planning;
@@ -2265,6 +2423,7 @@ function mountPanel() {
             if (action === 'setup') { await openSetup(); await refreshContent().catch(() => {}); }
             if (action === 'relations') await openRelations();
             if (action === 'relations-draft' && state.relationsDraft?.status === 'drafted') await openRelations(state.relationsDraft.text, state.relationsDraft.id);
+            if (action === 'relations-redraft') await redraftRelations();
             if (action === 'presets') await openPresets();
             if (action === 'opening-pack') await openOpeningPack();
             if (action === 'health-retry') await backendConnection.check(true);
@@ -3759,7 +3918,7 @@ function refreshPlanStatus() {
     Promise.all([api('plan', { chatKey }), api('status', { chatKey })]).then(([p, st]) => {
         if (state.chatKey !== chatKey || state.epoch !== epoch) return;
         state.planStatus = p; state.status = st;
-        noticeStory(chatKey, st.notice); render();
+        noticeStory(chatKey, st.notice); noticeStory(chatKey, st.secretNotice, 'secret'); render();
         if (p.awaitingPersona) void askPlanPersona(p.awaitingPersona);
         // 长规划在后台完成，玩家不发消息也要能看到失败和生效；只在有待完成规划时读状态。
         if (p.last?.status === 'requested' || st.planning?.running) state.planningTimer = setTimeout(refreshPlanStatus, 5000);

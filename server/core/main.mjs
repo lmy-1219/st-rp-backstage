@@ -39,6 +39,7 @@ import { enteredSince, landSent } from './landing.mjs';
 import { intentRecord, closeIntents } from './matters.mjs';
 import { SETTLE_SYSTEM, settlePrompt, parseSettle } from './settle.mjs';
 import { crewOf, crewEntry, latestNode, crewPushDue, pushedMeta, pushKey, pushText } from './crew.mjs';
+import { secretCandidates, recordSecretLeaks, activeLeaks, secretLeakLines } from './held.mjs';
 import { bodyGate, holdBodyContact, heldContactText } from './body.mjs';
 import { ASK_SYSTEM, askPrompt, parseAsk, knownFor, exchangeRecords } from './offstage.mjs';
 import { lifeSheet, homeChanged } from './life.mjs';
@@ -1460,7 +1461,7 @@ function thinkAway({ chatKey, absenceId }) {
         const started = Date.now();
         try {
             const material = awayMaterial(store, records, chatKey, a);
-            const r = await createModelClient({ ...a0, model, maxOutputTokens: 16000, timeoutMs: 600000, stream: true }).complete({ system: renderPronouns(AWAY_SYSTEM, playerContext(store, chatKey)), user: awayPrompt(material) });
+            const r = await createModelClient({ ...a0, model, maxOutputTokens: 16000, timeoutMs: 600000, stream: true }).complete({ system: renderPronouns(AWAY_SYSTEM, playerContext(store, chatKey)), user: [awayPrompt(material), ...secretLeakLines(activeLeaks(store, records, chatKey))].join('\n') });
             const costUsd = ((r.usage?.input ?? 0) * prices[0] + (r.usage?.output ?? 0) * prices[1]) / 1e6;
             records.logAssemble({ chatKey, speaker: '(离开推演)', model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
             const story = pinNames(parseAway(r.text), [...material.cast.map(e => e.name), ...material.names]);
@@ -1621,13 +1622,15 @@ async function checkNode({ chatKey, planId }) {
     try {
         let extra = {};
         try { extra = nodeCheckTaken(store, records, chatKey, planId); } catch {}
-        const r = await createModelClient({ ...a, maxOutputTokens: 400 }).complete({ system: withTaste(NODE_CHECK_SYSTEM, { kind: 'judge', model: a.model ?? p.judgeModel, config: cfg }), user: nodeCheckPrompt(node, lines, extra) });
+        const secrets = secretCandidates(store, chatKey, records);
+        const r = await createModelClient({ ...a, maxOutputTokens: secrets.length ? 2400 : 400 }).complete({ system: withTaste(NODE_CHECK_SYSTEM, { kind: 'judge', model: a.model ?? p.judgeModel, config: cfg }), user: nodeCheckPrompt(node, lines, { ...extra, secrets }) });
         const costUsd = ((r.usage?.input ?? 0) * p.judgePriceInPerM + (r.usage?.output ?? 0) * p.judgePriceOutPerM) / 1e6;
         records.logAssemble({ chatKey, speaker: '(节点检查)', model: p.judgeModel, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
         const v = parseNodeCheck(r.text);
         log(`plan ${planId} node check: ${v.result}${v.why ? `（${v.why}）` : ''}`);
         // 判定挂在检查时的最后一条消息上（删到它之前、换分支就不算，verdictOf）。
         const last = store.currentMessages(chatKey).at(-1);
+        recordSecretLeaks(store, { chatKey, candidates: secrets, leaks: v.leaks, evidence: records.visible(chatKey), at: last ? { pos: last.pos, fp: last.fp } : null });
         if (v.result !== '还没') store.setMeta(`node_verdict:${planId}`, JSON.stringify({ ...v, at: last ? { pos: last.pos, fp: last.fp } : null }));
     } catch (error) {
         records.logAssemble({ chatKey, speaker: '(节点检查)', model: p.judgeModel, status: 'failed', ms: Date.now() - started, error: error.message });
@@ -1991,7 +1994,8 @@ async function autoAnswer({ chatKey, who, answer }) {
 
 const settings = () => {
     const config = loadConfig(home);
-    return { playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
+    const split = { ...config.extractor, ...config.stages.setup };
+    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
 };
 const server = createServer(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
 server.on('error', error => {

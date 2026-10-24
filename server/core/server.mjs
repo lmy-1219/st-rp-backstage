@@ -1,3 +1,4 @@
+import { secretCandidates } from './held.mjs';
 // 本机后台的 HTTP 接口。只听 127.0.0.1；浏览器不直接连它，经 ST 里的转发插件过来（plugin/）。
 import http from 'node:http';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ import { parsePlan } from './planner.mjs';
 import { snapshot, applyPreset } from './presets.mjs';
 import { readOpeningPack, installPack, backupStFiles, findOpeningPacks, openingSources, httpsPackUrl, findMaterialPacks, materialPackSource, checkPack } from './pack-import.mjs';   // 一键导入开局包（_dev/开局包格式-20261017.md）
 import { profileHash } from './profile.mjs';
-import { toText, fromText, advisorContext, parseSetup, SETUP_SYSTEM, setupPrompt, KEYS_SYSTEM, keysPrompt, parseBackstoryKeys, withKeys, formMerge, formMissing, receiptLines, formRows, mustCastOf, checkIntimate, intimateRows } from './setup.mjs';
+import { toText, fromText, advisorContext, parseSetup, SETUP_SYSTEM, setupPrompt, KEYS_SYSTEM, keysPrompt, parseBackstoryKeys, withKeys, formMerge, formMissing, receiptLines, formRows, formUnshown, splitSource, mustCastOf, checkIntimate, intimateRows } from './setup.mjs';
 import { ensureOpening } from './opening.mjs';
 import { relinkArrivals } from './landing.mjs';
 import { snapshot as snapshotRewind, checkRewind } from './rewind.mjs';
@@ -792,6 +793,26 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const roster = chatKey ? store.getCast(store.requireChat(chatKey).story_id).map(e => e.name) : [];
             return advisor.ask({ question: str(b.question, 'question', { max: 2000 }), context, chatKey, roster, year: storyYear(setup) });
         },
+        'POST /v1/setup-split': async b => {
+            const chat = store.requireChat(str(b.chatKey, 'chatKey'));
+            const source = str(b.source, 'source', { max: 100000 });
+            const info = settings().setupSplit ?? {};
+            if (!setupMaker || info.ready === false) bad('要先配开局单那档的模型');
+            if (!source.trim()) bad('其他还是空的');
+            if (b.estimate === true) {
+                const calls = Math.max(1, splitSource(source).length);
+                const usd = Number.isFinite(info.priceInPerM) && Number.isFinite(info.priceOutPerM) ? calls * ((source.length * 2 + 1500) / 1.5 * info.priceInPerM + 16000 * info.priceOutPerM) / 1e6 : null;
+                return { model: info.model ?? '开局单那档', calls, usd };
+            }
+            if (b.confirm !== true) bad('先确认分格费用');
+            try {
+                const parsed = await setupMaker({ source, names: setupNames(chat.story_id), chatKey: chat.key });
+                const data = parsed.data;
+                const extra = Object.fromEntries(['原则', '口径', '走向', '意向'].map(k => [k, data[k] ?? []]));
+                extra.储备线 = (data.储备线 ?? []).filter(x => x.可选 !== false);
+                return { ok: true, data, rows: formRows(data).map(row => ({ ...row, warning: [...(data.开场状态 ?? []), ...(data.生活现状 ?? []), ...(data.钱 ?? [])].some(x => x.ok === false && x.谁 === row.谁 && (x.是 === row.是 || String(x.多少) === row.是)) })), extra, extraText: Object.entries(extra).filter(([, rows]) => rows.length).map(([key, rows]) => key + '：\n' + rows.map(x => (x.ok === false ? '⚠ ' : '') + Object.entries(x).filter(([k]) => k !== 'ok').map(([, v]) => Array.isArray(v) ? v.join('、') : String(v)).filter(Boolean).join(' ｜ ')).join('\n')).join('\n\n'), unchecked: parsed.unchecked };
+            } catch { return { ok: false, error: '没拆成，稍后再试；已发生的模型费用不会退回。' }; }
+        },
         // 开局单：看；source＝贴一整段让后台分格（后台跑，隔一会儿再来看）；text＝改过的全文（confirm＝确认生效）；discard＝丢掉草稿。
         'POST /v1/setup': b => {
             const chat = store.requireChat(str(b.chatKey, 'chatKey'));
@@ -807,7 +828,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                     intimateWarnings: intimateRows(base).filter(x => x.error).map(x => `${x.谁.join('、')}：${x.error}`),
                     confirmed: c ? { text: toText(checked(c.data)), at: c.created_at, data: checked(c.data) } : null,
                     draft: d ? { status: d.status, text: d.data ? toText(checked(d.data)) : null, unchecked: d.unchecked.length, error: d.error, at: d.updated_at } : null,
-                    rows: formRows(base),
+                    rows: formRows(base), formData: base, unshown: formUnshown(base), splitReady: !!setupMaker && settings().setupSplit?.ready !== false,
                     intimate: base?.亲密线 ?? [], names: setupNames(storyId), content: { tier: contentView(chat.key).tier },
                     // 填表时预先填上的（章程 K1）：全剧情必要角色（原则里那条读回的名字）、主角团
                     mustCast: mustCastOf(base), crew: base?.主角团 ?? [],
@@ -946,6 +967,15 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             if (go && b.backup && typeof b.backup === 'object') r.backedUp = backupStFiles(settings().stRoot ?? null, settings().backupsDir ?? null, { cards: strings(b.backup.cards, 200, 300), books: strings(b.backup.books, 50, 300) });
             return r;
         },
+        'POST /v1/relations-redraft': b => {
+            const chatKey = str(b.chatKey, 'chatKey'), service = settings().relationsDrafts;
+            if (!service) bad('关系表起草没接上');
+            const cards = Array.isArray(b.relationCards) ? b.relationCards : [];
+            const estimate = service.estimate({ chatKey, cards });
+            if (b.confirm !== true) return { estimate };
+            void service.start({ chatKey, cards, restart: true }).catch(() => {});
+            return { draft: service.view(store.requireChat(chatKey).story_id) };
+        },
         // 人物关系表（按局存）：看；text＝面板里改过的全文；data＝整份导入（本机工具用）。
         'POST /v1/relations': b => {
             const chat = store.requireChat(str(b.chatKey, 'chatKey'));
@@ -1022,7 +1052,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/status': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             const extract = worker ? worker.plan({ chatKey }) : null;
-            return { ...store.status({ chatKey }), playMode:playModeOf(store,chatKey), playReason:playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), intimateStopped: intimateStopped(store, records, chatKey), extract, leaveUnjudged: settings?.().auto?.unjudged?.({ chatKey }) ?? 0, handoffs: handoffs?.list().length ?? 0, notice: JSON.parse(store.getMeta(`notice:${chatKey}`) ?? 'null'), drift: JSON.parse(store.getMeta(`drift:${chatKey}`) ?? 'null'), cut: settings?.().modelTally?.() ?? null };
+            return { ...store.status({ chatKey }), playMode:playModeOf(store,chatKey), playReason:playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), intimateStopped: intimateStopped(store, records, chatKey), secretNotice: JSON.parse(store.getMeta(`secret_notice:${chatKey}`) ?? 'null'), secretCheckReason: secretCandidates(store, chatKey, records).length ? settings().secretCheckReason ?? (!settings().planner ? '规划没开，暂不检测秘密是否漏了' : null) : null, extract, leaveUnjudged: settings?.().auto?.unjudged?.({ chatKey }) ?? 0, handoffs: handoffs?.list().length ?? 0, notice: JSON.parse(store.getMeta(`notice:${chatKey}`) ?? 'null'), drift: JSON.parse(store.getMeta(`drift:${chatKey}`) ?? 'null'), cut: settings?.().modelTally?.() ?? null };
         },
         // 外援队列面板：复制题目、贴回答案、再试 API、自动重试开关。
         'POST /v1/handoff-ui': async b => {

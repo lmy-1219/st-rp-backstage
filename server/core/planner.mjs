@@ -252,7 +252,7 @@ export const premiseVoids = (waiting, gone) => (gone?.ids ?? []).map(id => waiti
 export const NODE_CHECK_SYSTEM = [
     '下面是一部长篇角色扮演眼下这个阶段的目标，以及最近记下的事。判断这个阶段算成了、明显落空了，还是都还没有。',
     '另外看一眼【续了的那几件】（上一份规划里拿出来了还没下文、这一份说要接着写的：原来那件 → 接着它的那件）：在最近记下的事和【还排着的事】里看接着它的那件接上没有（冒出来了、有人接着办、有了结果）。没接上的，把原来那件的题写进"没接上"——只是提醒，不因此改结果。别的事有没有后续不用管。',
-    '只按记下的事判断，不猜；拿不准就算"还没"。只输出一个 JSON：{"结果": "算成|落空|还没", "依据": "一句，引记下的事", "没接上": ["续了还没接上的那几件的题"]}',
+    '只按记下的事判断，不猜；拿不准就算"还没"。只输出一个 JSON：{"结果": "算成|落空|还没", "依据": "一句，引记下的事", "没接上": ["续了还没接上的那几件的题"], "漏了": [{"事": "原事文", "谁知道了": "名字", "怎么": "谁说的或亲眼撞见", "依据": "引用聊天或账里的原话"}]}。没有漏了就空数组。',
 ].join('\n');
 
 const lineOf = r => `· [${r.id}] ${r.when} ${r.holder_name ?? r.holder}：${r.text}`;
@@ -277,6 +277,7 @@ export function previousMindLines(minds = []) {
 
 export function buildBrief(s) {
     const out = [];
+    if (s.secretLeaks?.length) out.push(...s.secretLeaks, '');
     const ts = scaleOf(s.ts ?? DAY);
     // 第几天只用一套数法（三家对比："剧情第 4 天（从这个窗口开头算）……今天是第 7 天"两套并存，三家各数各的）：和消息上的日期标签同一套——
     // 开局单写了开场是第几天就从那儿数，写了日期就带上几号、星期几
@@ -285,7 +286,7 @@ export function buildBrief(s) {
     const part = s.part ?? (start ? null : s.clock?.now ?? null);
     if (scaleNote(ts)) out.push(scaleNote(ts), '');
     if (paceNote(s.pace ?? s.setup, ts)) out.push(paceNote(s.pace ?? s.setup, ts), '');   // 这局的节奏（章程 H2；中档不加）
-    if (s.setup) out.push(...briefSection(checkIntimate(s.setup, { names: [...(s.cast ?? []).map(x => x.name), s.userName].filter(Boolean) }), { open: s.openReserve ? x => s.openReserve.has(x.名) : null }), '');
+    if (s.setup) out.push(...briefSection(checkIntimate(s.setup, { names: [...(s.cast ?? []).map(x => x.name), s.userName].filter(Boolean) }), { open: s.openReserve ? x => s.openReserve.has(x.名) : null }), ...(s.setup.玩家性别 === '其他' ? ["玩家的角色不用'他''她'称呼，直接叫名字。"] : []), '');
     if (s.relations?.人?.length) out.push(...relationsSection(s.relations, { current: s.currentRelations, keep: s.relKeep ?? null }),
         ...(s.relations.人.some(p => p.派活?.length) ? ['（表里派活的人，只派自己那一片、那几档的活。）'] : []), '');
     if (s.factions?.length) out.push(...s.factions, '');
@@ -1121,9 +1122,10 @@ export const takenOf = (m, messages = []) => m?.status === 'used' || (m?.status 
 // 节点检查那一问：目标、算成、落空＋最近记下的事。
 // continued：续了的那几件（这一份规划"口子"里答了续的：原来那件 → 接着它的那件，见 slot.nodeCheckTaken）；queued：还排着的事——
 // 节点检查顺带看续了的接上没有（只提醒，不强制重规划；章程 K1）
-export function nodeCheckPrompt(node, lines, { continued = [], queued = [] } = {}) {
+export function nodeCheckPrompt(node, lines, { continued = [], queued = [], secrets = [] } = {}) {
     return [`【这个阶段的目标】${node.目标}`, `【怎样算成】${node.算成 || '（没写）'}`, `【怎样算落空】${node.落空 || '（没写）'}`, '', '【最近记下的事】', ...lines,
-        ...(continued.length ? ['', '【续了的那几件】（原来那件 → 接着它的那件）', ...continued] : []), ...(continued.length && queued.length ? ['', '【还排着的事】', ...queued] : [])].join('\n');
+        ...(continued.length ? ['', '【续了的那几件】（原来那件 → 接着它的那件）', ...continued] : []), ...(continued.length && queued.length ? ['', '【还排着的事】', ...queued] : []),
+        ...(secrets.length ? ['', '【有人瞒着的事】下面这些事有人瞒着谁。看聊天和账，被瞒的人现在是不是已经知道了；知道了写哪件、谁知道了、怎么知道的、依据一句。亲耳听到、亲眼看到、被人告诉才算；猜测不算，拿不准就不算。事文和名字照原文。', ...secrets.map(x => `· ${x.事}；知道的人：${x.知道.join('、')}；瞒着：${x.不让.join('、')}`)] : [])].join('\n');
 }
 export function parseNodeCheck(text) {
     const m = String(text ?? '').match(/\{[\s\S]*\}/);
@@ -1133,7 +1135,8 @@ export function parseNodeCheck(text) {
     // 续了还没接上的（章程 K1）：写进判词里，规划和日志都看得见；不改结果
     const loose = (Array.isArray(raw?.['没接上']) ? raw['没接上'] : []).map(x => String(x ?? '').trim().replace(/^「|」$/g, '')).filter(Boolean).slice(0, 8);
     const why = typeof raw?.['依据'] === 'string' ? raw['依据'].slice(0, 300) : '';
-    return { result, why: loose.length ? `${why}${why ? '；' : ''}续了还没接上：${loose.map(t => `「${t}」`).join('')}` : why };
+    const leaks = (Array.isArray(raw?.漏了) ? raw.漏了 : []).filter(x => x && ['事', '谁知道了', '怎么', '依据'].every(k => typeof x[k] === 'string' && x[k].trim())).slice(0, 20).map(x => Object.fromEntries(['事', '谁知道了', '怎么', '依据'].map(k => [k, x[k].trim().slice(0, k === '事' ? 2000 : 300)])));
+    return { result, why: loose.length ? `${why}${why ? '；' : ''}续了还没接上：${loose.map(t => `「${t}」`).join('')}` : why, ...(leaks.length ? { leaks } : {}) };
 }
 
 // 掷骰（可复现）：同一条、同一天，结果不变。
