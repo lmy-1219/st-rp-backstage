@@ -353,9 +353,10 @@ async function showPending() {
 
 // 后台给的一句不剧透的提示（比如剧情转向、重新规划了）：蓝色轻提示，每条只提示一次（记在本机，刷新页面也不重复）。
 export function planAttemptsHtml(planning, esc) {
-    const entries = { auto: '自动', button: '按钮', supplement: '补规划', handoff: '外援交回' };
-    const rows = (planning?.attempts ?? []).map(a => `<tr><td>${esc(a.attemptId)}<br>规划 ${esc(String(a.planId))}</td><td>${esc(entries[a.entry] ?? a.entry)}</td><td>${esc(a.model ?? '未知')}<br>思考${a.thinks ? '开' : '关'}</td><td>${a.briefChars} / ${a.outputChars}</td><td>${(a.ms / 1000).toFixed(1)} 秒</td><td>${esc(a.stage)}<br>${esc(a.status)}</td><td>${esc(a.finishReason ?? '未知')}</td><td>${esc(a.failure ?? '无')}</td><td>${a.internalRetries}</td></tr>`).join('');
-    return `<h3>最近 20 次规划尝试</h3><p><small>每行是一次逻辑尝试，内部重发另计次数；这里只有元数据。</small></p><table><thead><tr><th>尝试 / 规划</th><th>入口</th><th>型号 / 思考</th><th>简报 / 输出字数</th><th>耗时</th><th>阶段 / 状态</th><th>结束原因</th><th>失败类别</th><th>内部重发</th></tr></thead><tbody>${rows || '<tr><td colspan="9">还没有记录</td></tr>'}</tbody></table>`;
+    const entries = { auto: '自动', button: '按钮', supplement: '补规划', handoff: '外援交回', repair: '修格式' };
+    const kinds = { thinking: '想的吃光了', limit: '写到上限还没写完', format: '格式待修' };
+    const rows = (planning?.attempts ?? []).map(a => `<tr><td>${esc(a.attemptId)}<br>规划 ${esc(String(a.planId))}</td><td>${esc(entries[a.entry] ?? a.entry)}</td><td>${esc(a.model ?? '未知')}<br>思考${a.thinks ? '开' : '关'}</td><td>${a.briefChars} / ${a.outputChars}</td><td>${(a.ms / 1000).toFixed(1)} 秒</td><td>${esc(a.stage)}<br>${esc(a.status)}</td><td>${esc(a.finishReason ?? '未知')}</td><td>${esc(a.failure ?? '无')}</td><td>${a.internalRetries}</td><td>${esc(kinds[a.partialKind] ?? '')}${a.hasPartial ? `<button type="button" class="menu_button" data-plan-partial="${esc(a.attemptId)}" title="只读查看已保存半截，建议规划失败时查。">看半截全文</button>` : ''}${a.repaired ? ' · 自动修过格式' : ''}</td></tr>`).join('');
+    return `<h3>最近 20 次规划尝试</h3><p><small>每行是一次逻辑尝试，内部重发另计次数；正文只在本机数据库里；有半截的可以点开看。</small></p><table><thead><tr><th>尝试 / 规划</th><th>入口</th><th>型号 / 思考</th><th>简报 / 输出字数</th><th>耗时</th><th>阶段 / 状态</th><th>结束原因</th><th>失败类别</th><th>内部重发</th><th>半截与格式</th></tr></thead><tbody>${rows || '<tr><td colspan="10">还没有记录</td></tr>'}</tbody></table>`;
 }
 function noticeStory(chatKey, notice) {
     if (!notice?.id || !notice.text) return;
@@ -1942,7 +1943,7 @@ export function panelPageHtml(page) {
     const card = (title, html) => `<section class="rpe-card"><h4>${title}</h4>${html}</section>`;
     if (page === 'now') return `<div data-role="start-guide"></div><div data-joined>${card('此刻的场面', '<div data-role="board-row"></div><div class="rpe-grid">' + button('board-edit', '纠正场面') + button('camera-now', '旁白来一段') + '</div>')}
         <section class="rpe-card" data-role="tasks-card" hidden><h4>待处理</h4><div data-role="tasks"></div></section>
-        ${card('幕后', '<p data-role="plan"></p><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + button('plan-reveal', '看幕后（剧透）') + '</div>')}
+        ${card('幕后', '<p data-role="plan"></p><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + '<button class="menu_button" type="button" data-action="plan-repair" hidden title="只修已保存规划的格式，建议先看失败原因。">修格式</button>' + button('plan-reveal', '看幕后（剧透）') + '</div>')}
         <details class="rpe-card" data-role="handoff-details"><summary>外援</summary><small>把未完成任务交给其他AI，建议按题目交回。</small><div data-role="handoffs" hidden></div><div data-role="extract-alert"></div></details></div>`;
     if (page === 'story') return `<div data-joined><div data-role="relations-draft"></div>${card('这一局', '<p><small>有局预设：套上就行。没有：填开局单，或贴大纲让后台拆，核对确认后可保存、导出为局预设。开局包是作者用 skill 生成的整套卡、书和设定，点“导入开局包”会新建群。</small></p><div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
         <div class="rpe-grid">${button('setup', '开局单')}${button('cast', '名册')}${button('relations', '关系表')}${button('presets', '局预设')}${button('opening-pack', '导入开局包')}</div></div>`;
@@ -2020,8 +2021,10 @@ function mountPanel() {
         for (const button of panel.querySelectorAll('[data-action="plan-reroll"]')) button.disabled = !state.chatKey || ps?.provider === 'off';
         $('[data-role="plan-row"]').hidden = !state.chatKey;
         const planning = st?.planning ?? ps?.planning;
+        $('[data-action="plan-repair"]').hidden = !planning?.repairAvailable;
+        $('[data-action="plan-repair"]').disabled = !!planning?.running || !!ps?.playReason;
         $('[data-role="plan"]').textContent = !state.chatKey || !ps ? '' : ps.playReason ? ps.playReason + '，规划已停' : ps.provider === 'off' ? '规划关着'
-            : (ps.awaitingPersona ? '等你确认人设' : planning?.running || ps.last?.status === 'requested' ? '在规划' : planning?.failure || ps.last?.status === 'failed' ? '没成功（' + (planning?.message || '上次没写成') + '）' : ps.last?.status === 'ready' ? '规划好了' : '还没有规划')
+            : (planning?.repairAvailable ? planning.repairReason : ps.awaitingPersona ? '等你确认人设' : planning?.running || ps.last?.status === 'requested' ? '在规划' : planning?.failure || ps.last?.status === 'failed' ? '没成功（' + (planning?.message || '上次没写成') + '）' : ps.last?.status === 'ready' ? '规划好了' : '还没有规划')
               + ' · 口袋 ' + (ps.counts?.pocket ?? 0) + ' 件 · 等着 ' + (ps.counts?.waiting ?? 0) + ' 件';
         $('[data-opt="windowConnected"]').checked = !!state.chatKey && st?.enabled !== false;
         $('[data-opt="windowConnected"]').disabled = !s.enabled;
@@ -2274,9 +2277,20 @@ function mountPanel() {
             if (action === 'plan-attempts') {
                 const chatKey = state.chatKey, result = await api('status', { chatKey });
                 if (state.chatKey !== chatKey) return;
-                await ctx().callGenericPopup(planAttemptsHtml(result.planning, escapeHtml), ctx().POPUP_TYPE.TEXT, '', { wide: true, large: true, allowVerticalScrolling: true });
+                await ctx().callGenericPopup(planAttemptsHtml(result.planning, escapeHtml), ctx().POPUP_TYPE.TEXT, '', { wide: true, large: true, allowVerticalScrolling: true, onOpen: popup => {
+                    popup.dlg.addEventListener('click', async event => {
+                        const attemptId = event.target.closest('[data-plan-partial]')?.dataset.planPartial;
+                        if (!attemptId) return;
+                        try {
+                            const part = await api('plan-attempt', { chatKey: state.chatKey, attemptId });
+                            const text = part.partial + (part.continuation ? '\n\n【续写原文】\n' + part.continuation : '');
+                            await ctx().callGenericPopup('<h3>规划半截原文（只读）</h3><textarea readonly rows="20" style="width:100%">' + escapeHtml(text) + '</textarea>', ctx().POPUP_TYPE.TEXT, '', { wide: true, large: true, allowVerticalScrolling: true });
+                        } catch (error) { globalThis.toastr?.warning(error.message); }
+                    });
+                } });
             }
             if (action === 'update') await openUpdate();
+            if (action === 'plan-repair') { await api('plan-repair', { chatKey: state.chatKey }); refreshPlanStatus(); }
             if (action === 'plan-request') { state.planStatus = await api('plan', { chatKey: state.chatKey, request: true }); refreshPlanStatus(); }
             if (action === 'plan-reroll') {
                 const c = ctx(), chatKey = state.chatKey;

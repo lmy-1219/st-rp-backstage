@@ -137,7 +137,7 @@ const observePlanAttempt = id => {
     let at = 0, stage = null;
     return meta => { if (meta.stage !== stage || Date.now() - at >= 1000) { at = Date.now(); stage = meta.stage; store.updatePlanAttempt(id, meta); } };
 };
-const applyPlan = (planId, text, { strict = true, attempt = null } = {}) => {
+const applyPlan = (planId, text, { strict = true, strictFormat = false, attempt = null } = {}) => {
     const plan = store.planById(planId);
     const own = !attempt;
     attempt ??= store.beginPlanAttempt(planId, { entry: 'handoff', model: 'window', briefChars: plan?.brief?.length ?? 0 });
@@ -146,7 +146,7 @@ const applyPlan = (planId, text, { strict = true, attempt = null } = {}) => {
     requirePlanAttempt(attempt);
     store.updatePlanAttempt(attempt, { stage: '解析', outputChars: text.length });
     const chat = store.requireChat(plan.chat_key);
-    const parsed = parsePlan(text, planOptions(plan.chat_key));
+    const parsed = parsePlan(text, { ...planOptions(plan.chat_key), strictFormat });
     if (!parsed.items.length) throw Object.assign(new Error(`规划里的事一件都没过：${parsed.dropped.map(d => d.reason).join('；')}`), { status: 400 });
     const anchors = packOf(plan.chat_key)?.anchors;
     const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(chat.story_id)?.data).map(yearFlagText) : [];
@@ -202,43 +202,147 @@ const refreshPlanPackets = () => {
 // 重启前就在等、还没有外援包的规划（比如这个功能上线前要的），补一份包。
 for (const row of store.db.prepare("select id from plan_attempts where status = 'running'").all()) store.finishPlanAttempt(row.id, { status: 'failed', failure: 'connection' });
 for (const p of store.pendingPlans()) {
-    if (store.pendingHandoff('plan', String(p.id))) continue;
+    if (store.pendingHandoff('plan', String(p.id)) || store.planRepairCandidate(p.chat_key)) continue;
     planPacket({ id: p.id, chatKey: p.chat_key, brief: freshBrief(p.id) }, '要一份新的节点规划（设成了交给窗口写，不走 API）');
 }
 refreshPlanPackets();
 // 调规划模型写一个节点的规划（api 模式；面板"再试一次"也走这里）。成了就落账，没成抛错。长规划输出多，给足长度和时间。
+const PLAN_LIMITS = { full: 64000, reduced: 32000 };
+const PLAN_CONTINUE_NOTE = '上面没写完，从断的地方接着写，只输出剩下的部分，不要重复已经写过的，也不要加解释。';
+const PLAN_REPAIR_SYSTEM = '只修 JSON 格式：补齐括号、引号、逗号，把断开的地方接好；不改、不删、不加任何内容；只输出修好的 JSON。';
+function joinPlanParts(first, next) {
+    // KMP 找最长首尾重叠，长规划也只扫描一次；不到二十字不擅自去掉。
+    const b = String(next);
+    if (!b) return String(first);
+    const tail = String(first).slice(-b.length), pi = new Uint32Array(b.length);
+    for (let i = 1, j = 0; i < b.length; i++) { while (j && b[i] !== b[j]) j = pi[j - 1]; if (b[i] === b[j]) j++; pi[i] = j; }
+    let n = 0;
+    for (let i = 0; i < tail.length; i++) { while (n && tail[i] !== b[n]) n = pi[n - 1]; if (tail[i] === b[n]) n++; if (n === b.length && i < tail.length - 1) n = pi[n - 1]; }
+    return String(first) + b.slice(n >= 20 ? n : 0);
+}
+function checkPlanRepair(original, repaired, system) {
+    const text = String(repaired).replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '').trim();
+    let value;
+    try { value = JSON.parse(text); } catch { throw new Error('修完格式仍坏'); }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !(Array.isArray(value.事件) || Array.isArray(value.菜单))) throw new Error('修完结构仍不对');
+    const normal = s => String(s).replace(/\\u([a-f\d]{4})/gi, (_, n) => String.fromCharCode(parseInt(n, 16))).replace(/\\[nrtbf]/g, '').replace(/\\"/g, '"').replace(/\\\\/g, '\\').replace(/[“”‘’']/g, '"').replace(/\s/g, '');
+    const source = normal(original), fields = new Set([...String(system).matchAll(/"([^"\n]+)"\s*:/g)].map(m => m[1]));
+    fields.add('菜单');
+    const visit = v => {
+        if (typeof v === 'string' && v.length >= 2 && !source.includes(normal(v))) throw new Error('修的时候改了内容');
+        if (Array.isArray(v)) { for (const x of v) visit(x); }
+        else if (v && typeof v === 'object') for (const [key, x] of Object.entries(v)) { if (!fields.has(key)) throw new Error('修的时候加了规划格式以外的字段'); visit(x); }
+    };
+    visit(value); return text;
+}
+async function planModelCall({ chatKey, attempt, config, stage, prompt, speaker = '(规划)', repair = false }) {
+    const p = config.planner, e = config.extractor;
+    const run = async max => {
+        requirePlanAttempt(attempt);
+        if (records.spentToday() >= e.dailyBudgetUsd) throw new Error('budget_reached');
+        if (records.spentTodayOn('(规划)') + records.spentTodayOn('(规划·修格式)') >= p.budgetUsd) throw new Error('plan_budget_reached');
+        const started = Date.now();
+        const logCall = (result, error = null) => {
+            const usage = result?.usage ?? null;
+            const costUsd = ((usage?.input ?? 0) * (stage.priceInPerM ?? p.priceInPerM ?? 0) + (usage?.output ?? 0) * (stage.priceOutPerM ?? p.priceOutPerM ?? 0)) / 1e6;
+            records.logAssemble({ chatKey, speaker, model: stage.model ?? p.model, servedModel: result?.servedModel, status: error ? 'failed' : 'done', usage, costUsd, ms: Date.now() - started, ...(result?.text ? { raw: result.text } : {}), ...(error ? { error: error.message } : {}) });
+        };
+        try {
+            const r = await createModelClient({ ...e, ...stage, maxOutputTokens: max, maxCap: max, timeoutMs: 900000, stream: true, idleMs: 600000, ...(repair ? { heartbeat: false } : {}) }).complete(prompt, { onMeta: observePlanAttempt(attempt) });
+            logCall(r); return r;
+        } catch (error) { logCall({ usage: error.usage, servedModel: error.servedModel, text: error.partial }, error); throw error; }
+    };
+    if (repair) return run(PLAN_LIMITS.reduced);
+    try { return await run(PLAN_LIMITS.full); }
+    catch (error) { if (/model_http_400/.test(error.message) && /max_tokens|max_output_tokens|maximum/i.test(error.message)) return run(PLAN_LIMITS.reduced); throw error; }
+}
+async function repairPlanText({ id, chatKey, attempt, text, config, system }) {
+    const ready = stage => !!(stage?.baseUrl && stage.apiKey && stage.model);
+    const selected = ready(config.stages.judge) ? config.stages.judge : ready(config.stages.keys) ? config.stages.keys : null;
+    try {
+        if (!selected) throw new Error('没配快速档');
+        const extraBody = { ...(selected.extraBody ?? {}) };
+        for (const key of ['reasoning_effort', 'output_config', 'thinking', 'reasoning']) delete extraBody[key];
+        store.updatePlanAttempt(attempt, { stage: '修格式' });
+        let response;
+        try { response = await planModelCall({ chatKey, attempt, config, stage: { ...selected, extraBody }, prompt: { system: PLAN_REPAIR_SYSTEM, user: text }, speaker: '(规划·修格式)', repair: true }); }
+        catch (error) { if (planFailure(error) === 'late') throw error; throw new Error(/budget/.test(error.message) ? '到了花费上限' : '快速档调用没成功'); }
+        requirePlanAttempt(attempt);
+        const fixed = checkPlanRepair(text, response.text, system);
+        const result = applyPlan(id, fixed, { strict: false, strictFormat: true, attempt });
+        store.updatePlanAttempt(attempt, { repaired: true, repairable: false, repairError: null });
+        handoffs.settle('plan', String(id));
+        log(`plan ${id} 自动修过格式`);
+        return result;
+    } catch (error) {
+        if (planFailure(error) === 'late') throw error;
+        // 内容退件不继续修，也不把人物/题目等正文带进文件日志。
+        const contentRejected = !['没配快速档','到了花费上限','快速档调用没成功','修完格式仍坏','修完结构仍不对','修的时候改了内容','修的时候加了规划格式以外的字段','plan_bad_json','plan_bad_structure'].includes(error.message);
+        if (contentRejected) throw error;
+        const reason = `规划写完了，但格式坏了，自动修没成：${error.message}`;
+        store.updatePlanAttempt(attempt, { repairable: true, repairError: reason });
+        throw Object.assign(new Error(reason), { planRepair: true });
+    }
+}
 async function planViaApi({ id, chatKey, brief, attempt = null, entry = 'auto' }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const held = holdPlanPersona(store, { id, chatKey, reason: store.planById(id)?.reason, entry });
     if (held) { if (attempt) store.finishPlanAttempt(attempt, { status: 'queued', stage: '等确认人设' }); return held; }
-    const cfg = getConfig(), e = cfg.extractor, p = cfg.planner, s = cfg.stages.plan;
+    const cfg = getConfig(), p = cfg.planner, s = cfg.stages.plan;
     const thinks = !!(s.extraBody?.reasoning_effort || s.extraBody?.output_config?.effort);
     attempt ??= store.beginPlanAttempt(id, { entry, model: s.model ?? p.model, thinks, briefChars: brief.length });
     if (!attempt) throw Object.assign(new Error('正在重新规划'), { status: 409 });
-    const started = Date.now();
+    let first = '', continuation = '', kind = null;
     try {
-    requirePlanAttempt(attempt);
-    store.updatePlanAttempt(attempt, { stage: '发出', briefChars: brief.length });
-    if (!s.baseUrl || !s.apiKey) throw new Error('planner_no_api');
-    if (records.spentToday() >= e.dailyBudgetUsd) throw new Error('budget_reached');
-    // 规划自己的每日上限（planner.budgetUsd）：到了就不再调，交给窗口写（9/27 查漏：这个上限以前配了没管）。
-    if (records.spentTodayOn('(规划)') >= p.budgetUsd) throw new Error('plan_budget_reached');
-        // 规划模型先想很久才开始写（实测 Fable 经中转，想的时候一个字都不发）：连着没数据的限放宽到 10 分钟，整件事 15 分钟。
-        // 开了思考档的（Opus 5.5 高档）：想的那部分也算在输出上限里，直接给到 64000（10/11 实测高档一次就想掉四万八，起步给小了白花一回钱）。
-        const r = await createModelClient({ ...e, ...s, maxOutputTokens: thinks ? 64000 : 24000, maxCap: thinks ? 64000 : undefined, timeoutMs: 900000, stream: true, idleMs: 600000 }).complete({ system: planSystemFor(chatKey, s.model ?? p.model, cfg), user: `${brief}\n\n${API_PLAN_NOTE}` }, { onMeta: observePlanAttempt(attempt) });
-        store.updatePlanAttempt(attempt, { ...r.telemetry, outputChars: r.text.length });
-        const costUsd = ((r.usage?.input ?? 0) * p.priceInPerM + (r.usage?.output ?? 0) * p.priceOutPerM) / 1e6;
-        records.logAssemble({ chatKey, speaker: '(规划)', model: p.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
-        const result = applyPlan(id, r.text, { strict: false, attempt });
+        requirePlanAttempt(attempt);
+        if (!s.baseUrl || !s.apiKey) throw new Error('planner_no_api');
+        const system = planSystemFor(chatKey, s.model ?? p.model, cfg), user = `${brief}\n\n${API_PLAN_NOTE}`;
+        let text;
+        try { text = (await planModelCall({ chatKey, attempt, config: cfg, stage: s, prompt: { system, user } })).text; }
+        catch (error) {
+            if (!/model_truncated/.test(error.message)) throw error;
+            first = error.partial ?? ''; kind = error.truncationKind === 'thinking' || first.length < 200 ? 'thinking' : 'limit';
+            store.savePlanPartial(attempt, { partial: first, kind });
+            if (kind === 'thinking') throw error;
+            requirePlanAttempt(attempt);
+            store.updatePlanAttempt(attempt, { stage: '续写' });
+            try { continuation = (await planModelCall({ chatKey, attempt, config: cfg, stage: s, prompt: { system, messages: [{ role: 'user', content: user }, { role: 'assistant', content: first }, { role: 'user', content: PLAN_CONTINUE_NOTE }] } })).text; }
+            catch (nextError) { continuation = nextError.partial ?? ''; store.savePlanPartial(attempt, { partial: first, continuation, kind }); throw nextError; }
+            store.savePlanPartial(attempt, { partial: first, continuation, kind });
+            text = joinPlanParts(first, continuation);
+        }
+        requirePlanAttempt(attempt);
+        store.updatePlanAttempt(attempt, { stage: '解析', outputChars: text.length });
+        let result;
+        try { result = applyPlan(id, text, { strict: false, strictFormat: true, attempt }); }
+        catch (error) {
+            if (!['plan_bad_json','plan_bad_structure'].includes(error.message)) throw error;
+            if (!first) { first = text; kind = 'format'; store.savePlanPartial(attempt, { partial: first, kind }); }
+            result = await repairPlanText({ id, chatKey, attempt, text, config: cfg, system });
+        }
         store.finishPlanAttempt(attempt);
         return result;
     } catch (error) {
         const failure = planFailure(error);
         store.finishPlanAttempt(attempt, { ...error.telemetry, status: failure === 'late' ? 'late' : 'failed', failure });
-        records.logAssemble({ chatKey, speaker: '(规划)', model: p.model, status: 'failed', ms: Date.now() - started, error: error.message });
-        log(`plan ${id} via api failed: ${error.message}`);
+        log(`plan ${id} via api failed: ${error.planRepair ? '格式待修' : failure}`);
         throw error;
     }
+}
+async function repairSavedPlan(chatKey) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
+    const saved = store.planRepairCandidate(chatKey);
+    if (!saved) throw new Error('没有待修格式的规划');
+    const plan = store.planById(saved.planId), cfg = getConfig();
+    if (holdPlanPersona(store, { id: plan.id, chatKey, reason: plan.reason, entry: 'button' })) return;
+    const stage = cfg.stages.judge?.baseUrl && cfg.stages.judge.apiKey && cfg.stages.judge.model ? cfg.stages.judge : cfg.stages.keys;
+    const attempt = store.beginPlanAttempt(plan.id, { entry: 'repair', model: stage?.model, briefChars: plan.brief?.length ?? 0 });
+    if (!attempt) throw new Error('正在重新规划');
+    store.savePlanPartial(attempt, saved);
+    try {
+        const result = await repairPlanText({ id: plan.id, chatKey, attempt, text: joinPlanParts(saved.partial, saved.continuation), config: cfg, system: planSystemFor(chatKey, cfg.stages.plan.model ?? cfg.planner.model, cfg) });
+        store.finishPlanAttempt(attempt); return result;
+    } catch (error) { const failure = planFailure(error); store.finishPlanAttempt(attempt, { status: failure === 'late' ? 'late' : 'failed', failure }); throw error; }
 }
 const planRetryOrigins = new Map();
 handoffs.register('plan', {
@@ -284,7 +388,7 @@ const onRequest = ({ id, chatKey, brief, reason, verdict = null, thread = null, 
         if (holdPlanPersona(store, { id, chatKey, reason, verdict, thread, force, entry })) { store.finishPlanAttempt(attempt, { status: 'queued', stage: '等确认人设' }); return; }
         if (force === 'queue' || getConfig().planner.provider !== 'api') { const packet = planPacket({ id, chatKey, brief: b }, force === 'queue' ? '要一份新的节点规划（本机工具要的，交回写好的那份）' : '要一份新的节点规划（设成了交给窗口写，不走 API）'); store.finishPlanAttempt(attempt, { status: 'queued', stage: '等外援', briefChars: b.length }); return packet; }
         planViaApi({ id, chatKey, brief: b, attempt }).catch(error => {
-            if (store.planById(id)?.status === 'requested') planPacket({ id, chatKey, brief: b }, `调规划模型没成（${error.message}）`);
+            if (!error.planRepair && store.planById(id)?.status === 'requested') planPacket({ id, chatKey, brief: b }, `调规划模型没成（${error.message}）`);
         });
     };
     (async () => {
@@ -1887,7 +1991,7 @@ async function autoAnswer({ chatKey, who, answer }) {
 
 const settings = () => {
     const config = loadConfig(home);
-    return { playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
+    return { playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
 };
 const server = createServer(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
 server.on('error', error => {

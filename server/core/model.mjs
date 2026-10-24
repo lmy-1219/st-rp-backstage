@@ -35,21 +35,24 @@ export function createModelClient({ baseUrl, apiKey, model, temperature = null, 
     const total = Math.max(Number(timeoutMs) || 0, TOTAL_MS);
     const wantsNative = () => stream && !!extraBody?.output_config && !noNative.has(baseUrl);
 
-    async function once(max, { system, user }, observe) {
+    async function once(max, { system, user, messages = null }, observe) {
         const native = wantsNative();
+        const conversation = messages ?? [{ role: 'user', content: user }];
+        if (!Array.isArray(conversation) || !conversation.length || conversation.some(m => !['user', 'assistant'].includes(m?.role) || typeof m.content !== 'string')) throw new Error('model_bad_messages');
         const { reasoning_effort: _drop, ...rest } = extraBody && typeof extraBody === 'object' ? extraBody : {};
         const body = native
             ? {
-                model, max_tokens: max, stream: true, system, messages: [{ role: 'user', content: user }], ...rest,
+                model, max_tokens: max, stream: true, system, messages: conversation, ...rest,
                 ...(heartbeat ? { thinking: { ...(rest.thinking ?? {}), type: 'adaptive', display: 'summarized' } } : {}),
             }
             : {
                 model, max_tokens: max, stream,
                 ...(stream ? { stream_options: { include_usage: true } } : {}),
-                messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+                messages: [{ role: 'system', content: system }, ...conversation],
                 ...(Number.isFinite(temperature) ? { temperature } : {}),
                 ...(extraBody && typeof extraBody === 'object' ? extraBody : {}),
             };
+        if (messages) body.messages = native ? conversation : [{ role: 'system', content: system }, ...conversation];
         // 响应头 idleMs 还不来（实测中转偶尔整个挂住，底层要干等五分钟才报 fetch failed），就当这次没连上，再连一次。
         const send = async () => {
             observe({ stage: '发出', outputChars: 0, finishReason: null, send: true });
@@ -75,7 +78,7 @@ export function createModelClient({ baseUrl, apiKey, model, temperature = null, 
         // 中转偶尔回"暂时不可用"（503 之类，实测隔几秒就好）：等 3 秒再要一次
         if ([502, 503, 504, 529].includes(response.status)) { await response.text().catch(() => {}); await new Promise(r => setTimeout(r, RETRY_WAIT_MS.value)); response = await send(); }
         if (native) {
-            if ([404, 405].includes(response.status)) { noNative.add(baseUrl); return once(max, { system, user }, observe); }   // 中转没有原生接口：退回兼容接口
+            if ([404, 405].includes(response.status)) { noNative.add(baseUrl); return once(max, { system, user, messages }, observe); }   // 中转没有原生接口：退回兼容接口
             if (!response.ok) throw new Error(`model_http_${response.status}: ${(await response.text()).slice(0, 300)}`);
             return readNative(response, idleMs, firstIdle, observe);
         }
@@ -137,7 +140,7 @@ export function createModelClient({ baseUrl, apiKey, model, temperature = null, 
                     const message = ate ? `model_truncated（想的部分把输出上限 ${max} 吃光了，正文只有 ${r.text.length} 字）` : `model_truncated（写到输出上限 ${max} 还没写完，已收 ${r.text.length} 字）`;
                     giveUp(message);
                     observe({ outputChars: r.text.length, finishReason: r.finishReason });
-                    throw Object.assign(new Error(message), { partial: r.text, usage: used, ...observed() });
+                    throw Object.assign(new Error(message), { partial: r.text, truncationKind: ate ? 'thinking' : 'limit', servedModel: r.servedModel, usage: used, ...observed() });
                 }
                 max = Math.min(max * 2, maxCap);
             }

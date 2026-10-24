@@ -12,11 +12,12 @@ export const RETIRES_POCKET = new Set(['turn', 'broken', 'shift']);
 export const KEPT = 'kept';
 
 export function planFailure(error) {
+    if (error?.planRepair) return 'bad_answer';
     const text = String(error?.message ?? error ?? '');
     if (/plan_(?:withdrawn|superseded|late)/.test(text)) return 'late';
     if (/model_truncated/.test(text)) return 'truncated';
     if (/timeout|超时|model_no_response/i.test(text)) return 'timeout';
-    if (/bad_json|no_content|refusal|一件都没过|一条都没过/.test(text)) return 'bad_answer';
+    if (/bad_json|bad_structure|no_content|refusal|一件都没过|一条都没过/.test(text)) return 'bad_answer';
     if (/budget|no_api/.test(text)) return 'unavailable';
     return 'connection';
 }
@@ -175,6 +176,9 @@ export function openStore(file) {
     const db = new DatabaseSync(file);
     db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma busy_timeout = 3000;');
     db.exec(SCHEMA);
+    for (const column of ['partial text', 'continuation text', 'partial_kind text', 'repairable integer not null default 0', 'repair_error text', 'repaired integer not null default 0']) {
+        try { db.exec(`alter table plan_attempts add column ${column}`); } catch {}
+    }
     try { db.exec('alter table slots add column ids text'); } catch {}
     try { db.exec('alter table chat_seq add column mark text'); } catch {}   // 用户在这条消息上点的剧情日期：day＝从这条起算新的一天｜same＝这里没有跨天｜d:N＝这条是第 N 天（存在消息的附加字段里，同步时带过来）
     try { db.exec('alter table slots add column carry text'); } catch {}   // 老地方：余波原来跟着钉住的格子存，现在搬到 carries（下面）
@@ -755,8 +759,9 @@ export function openStore(file) {
         const key = flightKey(plan.chat_key, plan.id);
         if (planFlights.has(key)) return null;
         const id = randomUUID();
+        q('update plan_attempts set repairable = 0 where plan_id = ?').run(plan.id);
         q("insert into plan_attempts(id,plan_id,node_id,chat_key,entry,model,thinks,brief_chars,stage,status,started_at) values (?,?,?,?,?,?,?,?,'发出','running',?)")
-            .run(id, plan.id, nodeOf(plan.id), plan.chat_key, ['auto','button','supplement','handoff'].includes(entry) ? entry : 'auto', typeof model === 'string' ? model.slice(0, 200) : null, thinks ? 1 : 0, Math.max(0, Number(briefChars) || 0), now());
+            .run(id, plan.id, nodeOf(plan.id), plan.chat_key, ['auto','button','supplement','handoff','repair'].includes(entry) ? entry : 'auto', typeof model === 'string' ? model.slice(0, 200) : null, thinks ? 1 : 0, Math.max(0, Number(briefChars) || 0), now());
         planFlights.set(key, { id, planId: plan.id, supplement, started: Date.now() });
         return id;
     }
@@ -767,16 +772,33 @@ export function openStore(file) {
         return flight?.id === id && !!plan && stillWanted(plan) && (flight.supplement ? plan.status === 'ready' && lastReadyPlan(plan.chat_key)?.id === plan.id : plan.status === 'requested' && lastPlan(plan.chat_key)?.id === plan.id);
     }
     function updatePlanAttempt(id, meta = {}) {
-        const columns = { stage: 'stage', outputChars: 'output_chars', internalRetries: 'internal_retries', finishReason: 'finish_reason', briefChars: 'brief_chars' };
+        const columns = { stage: 'stage', outputChars: 'output_chars', internalRetries: 'internal_retries', finishReason: 'finish_reason', briefChars: 'brief_chars', repairable: 'repairable', repairError: 'repair_error', repaired: 'repaired' };
         const values = [];
         for (const [key, col] of Object.entries(columns)) if (Object.hasOwn(meta, key)) {
             let value = meta[key];
             if (['outputChars','internalRetries','briefChars'].includes(key)) { if (!Number.isFinite(value) || value < 0) continue; value = Math.floor(value); }
-            else if (key === 'stage') { if (!['发出','备料','流式中','流中断','解析','落账','等外援'].includes(value)) continue; }
+            else if (['repairable','repaired'].includes(key)) value = value ? 1 : 0;
+            else if (key === 'repairError') value = typeof value === 'string' ? value.slice(0, 500) : null;
+            else if (key === 'stage') { if (!['发出','备料','流式中','流中断','解析','落账','等外援','续写','修格式'].includes(value)) continue; }
             else value = typeof value === 'string' ? value.slice(0, 80) : null;
             values.push([col, value]);
         }
         if (values.length) q(`update plan_attempts set ${values.map(([k]) => `${k} = ?`).join(',')} where id = ? and status = 'running'`).run(...values.map(([,v]) => v), id);
+    }
+    // 正文只留数据库，不随状态列表发送；两段合计至多二十万字。
+    function savePlanPartial(id, { partial = '', continuation = '', kind = 'limit' } = {}) {
+        const first = String(partial).slice(0, 200000), rest = String(continuation).slice(0, 200000 - first.length);
+        q("update plan_attempts set partial = ?, continuation = ?, partial_kind = ? where id = ? and status = 'running'").run(first, rest, ['thinking','limit','format'].includes(kind) ? kind : 'limit', id);
+    }
+    function planAttemptText(chatKey, id) {
+        const row = q('select * from plan_attempts where chat_key = ? and id = ?').get(chatKey, id);
+        return row ? { attemptId: row.id, planId: row.plan_id, partial: row.partial ?? '', continuation: row.continuation ?? '', kind: row.partial_kind } : null;
+    }
+    function planRepairCandidate(chatKey) {
+        const plan = lastPlan(chatKey);
+        if (!plan || plan.status !== 'requested') return null;
+        const row = q('select * from plan_attempts where chat_key = ? and plan_id = ? and repairable = 1 order by rowid desc limit 1').get(chatKey, plan.id);
+        return row ? { ...planAttemptText(chatKey, row.id), reason: row.repair_error } : null;
     }
     function finishPlanAttempt(id, { status = 'done', failure = null, ...meta } = {}) {
         updatePlanAttempt(id, meta);
@@ -790,7 +812,7 @@ export function openStore(file) {
     }
     function planAttempts(chatKey, limit = 20) {
         return q('select * from plan_attempts where chat_key = ? order by rowid desc limit ?').all(chatKey, Math.min(20, Math.max(1, limit)))
-            .map(r => ({ attemptId: r.id, planId: r.plan_id, nodeId: r.node_id, entry: r.entry, model: r.model, thinks: !!r.thinks, briefChars: r.brief_chars, outputChars: r.output_chars, internalRetries: r.internal_retries, stage: r.stage, finishReason: r.finish_reason, failure: r.failure, status: r.status, startedAt: r.started_at, finishedAt: r.finished_at, ms: r.elapsed_ms ?? Math.max(0, Date.now() - Date.parse(r.started_at)) }));
+            .map(r => ({ attemptId: r.id, planId: r.plan_id, nodeId: r.node_id, entry: r.entry, model: r.model, thinks: !!r.thinks, briefChars: r.brief_chars, outputChars: r.output_chars, internalRetries: r.internal_retries, stage: r.stage, finishReason: r.finish_reason, failure: r.failure, status: r.status, startedAt: r.started_at, finishedAt: r.finished_at, ms: r.elapsed_ms ?? Math.max(0, Date.now() - Date.parse(r.started_at)), hasPartial: !!(r.partial || r.continuation), partialKind: r.partial_kind, repaired: !!r.repaired }));
     }
     function planningState(chatKey) {
         const plan = lastPlan(chatKey), attempts = planAttempts(chatKey), latest = attempts.find(a => a.planId === plan?.id);
@@ -800,7 +822,8 @@ export function openStore(file) {
         const failure = latest?.status === 'done' ? null : failed?.failure ?? null;
         const labels = { timeout: '上游超时', connection: '连接断了', bad_answer: '答坏了', truncated: '被截断', unavailable: '线路未配置或到了花费上限' };
         const message = plan?.status === 'ready' && !running && !failure ? '' : [failure && `规划没成功（${labels[failure] ?? '连接断了'}），后台会再试；也可以点“重新规划”`, external && '规划交给外援了', running && '正在重新规划'].filter(Boolean).join('。');
-        return { planId: plan?.id ?? null, running: !!running, external, failure, message, attempts };
+        const repair = !running && planRepairCandidate(chatKey);
+        return { planId: plan?.id ?? null, running: !!running, external, failure, message: repair?.reason || message, repairAvailable: !!repair, repairReason: repair?.reason ?? null, attempts };
     }
     function intimateEvents(table, chatKey) {
         const h = historyOf(chatKey), plans = new Set(readyPlans(chatKey).map(p => p.id));
@@ -1101,5 +1124,5 @@ export function openStore(file) {
         };
     }
 
-    return { intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, storyActivity, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    return { savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, storyActivity, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

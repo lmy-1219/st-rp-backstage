@@ -28,7 +28,7 @@ export function stageOfSpeaker(speaker) {
     const s = String(speaker ?? '');
     if (!s.startsWith('(')) return 'assemble';
     if (s === '(检索词)') return 'keys';
-    if (s === '(转向检查)' || s === '(节点检查)' || s === '(前情大意)') return 'judge';
+    if (s === '(转向检查)' || s === '(节点检查)' || s === '(前情大意)' || s === '(规划·修格式)') return 'judge';
     if (s === '(规划)') return 'plan';
     if (s.startsWith('(离开推演')) return 'away';   // 含"按玩家改"那一次
     if (s === '(结算)') return 'scene';

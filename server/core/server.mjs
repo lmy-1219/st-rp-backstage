@@ -723,6 +723,21 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             }
             return { ...planPersonaOf(store, chatKey), awaitingPersona: awaitingPlanPersona(store, chatKey) };
         },
+        'POST /v1/plan-attempt': b => {
+            const chatKey = str(b.chatKey, 'chatKey');
+            store.requireChat(chatKey);
+            return store.planAttemptText(chatKey, str(b.attemptId, 'attemptId')) ?? bad('没有这次规划尝试');
+        },
+        'POST /v1/plan-repair': b => {
+            const chatKey = str(b.chatKey, 'chatKey');
+            store.requireChat(chatKey);
+            const stopped = playStop(store, chatKey); if (stopped) return stopped;
+            const candidate = store.planRepairCandidate(chatKey), repair = settings().planner?.repair;
+            if (!candidate || !repair) bad('没有可修格式的规划');
+            if (store.activePlanAttempt(chatKey, candidate.planId)) bad('正在重新规划');
+            void repair(chatKey).catch(() => {}); // 结果落在尝试记录，页面沿用规划状态轮询。
+            return { started: true };
+        },
         'POST /v1/plan': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             store.requireChat(chatKey);

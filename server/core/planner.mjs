@@ -792,10 +792,14 @@ export const MAX_EVENTS = 12;
 // afterCap："第几天后"最多几格（天尺度 60；年尺度 20，见 timescale）；maxEvents：一个节点至多几件（按这局的节奏，慢档 8，见 tempo）
 // categories：这一局开局单的类别（章程 J1）——给了的话，这一份里一件都没撑到的类别记一句提醒（不退件）
 // crew：主角团名单（章程 K1，setup.crewOf，含玩家的角色）——主角团的事不到六成提醒一句；不给就用这一份自己写的"主角团"
-export function parsePlan(text, { names = [], foreign = [], leaderOf = () => null, player = [], cells = false, afterCap = 60, maxEvents = MAX_EVENTS, unitCap = 3, categories = [], crew = [], intimate = null, intimateProgress = [], carded = null, pace = null } = {}) {
+export function parsePlan(text, { names = [], foreign = [], leaderOf = () => null, player = [], cells = false, afterCap = 60, maxEvents = MAX_EVENTS, unitCap = 3, strictFormat = false, categories = [], crew = [], intimate = null, intimateProgress = [], carded = null, pace = null } = {}) {
     const s = String(text ?? '').replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '');
     const body = s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1);
-    let raw = looseJson(body) ?? salvageEvents(s.slice(s.indexOf('{')));
+    let raw;
+    if (strictFormat) {
+        try { raw = JSON.parse(s.trim()); } catch { throw new Error('plan_bad_json'); }
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !(Array.isArray(raw.事件) || Array.isArray(raw.菜单))) throw new Error('plan_bad_structure');
+    } else raw = looseJson(body) ?? salvageEvents(s.slice(s.indexOf('{')));
     if (!raw) throw new Error('plan_bad_json');
     const str = (v, max = 400) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
     const REL_MAX = 400, LEFT_MAX = 160;
