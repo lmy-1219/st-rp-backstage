@@ -2567,7 +2567,7 @@ export function requestPlanNow(store, records, chatKey, planner, { reason = 'use
     if (last?.status === 'requested' && (!reroll || store.activePlanAttempt?.(chatKey, last.id))) return last.id;
     if (previous && store.activePlanAttempt?.(chatKey, previous.id)) return previous.id;
     const s = storyContext(store, records, chatKey, { present });
-    const opts = { present, reason, verdict, thread, factionNet, sit, prices, facts, ...(planner.briefChars ? { budget: planner.briefChars } : {}) };
+    const opts = { present, reason, verdict, thread, factionNet, sit, prices, facts, rerollOf: previous?.id ?? null, ...(planner.briefChars ? { budget: planner.briefChars } : {}) };
     const brief = planBrief(store, records, chatKey, opts);
     const retry = last?.status === 'requested';
     const id = retry ? last.id : store.requestPlan({ chatKey, storyDay: s.today, reason, provider: planner.provider, brief, basis, rerollOf: previous?.id ?? null });
@@ -2591,12 +2591,28 @@ function rhythmFor(store, chatKey, planId) {
 // 这一局此刻的规划简报（要规划时攒一次；"再试一次"、重启补包时按此刻的账重攒，别拿要规划那会儿的旧简报）。
 // prep：规划前备料、参谋备忘（各一段文字），放在设定之后、局面之前
 // budget：简报至多多少字（章程 H4，planner.briefChars）；超了按远近压（squeezeBrief），没超一个字不动
-export function planBrief(store, records, chatKey, { present = null, reason = null, verdict = null, thread = null, factionNet = null, sit = null, prices = null, facts = null, prep = [], budget = BRIEF_CHARS } = {}) {
+export function planBrief(store, records, chatKey, { present = null, reason = null, rerollOf = null, verdict = null, thread = null, factionNet = null, sit = null, prices = null, facts = null, prep = [], budget = BRIEF_CHARS } = {}) {
     const s = storyContext(store, records, chatKey, { present });
-    const last = store.lastReadyPlan?.(chatKey) ?? null;   // 上一份交回的规划（它的节点、"下次带上"）
+    const replaced = new Set(), ready = store.readyPlans?.(chatKey) ?? [];
+    let previous = rerollOf ?? (reason === 'reroll' ? store.lastReadyPlan?.(chatKey)?.id : null);
+    while (previous && !replaced.has(Number(previous)) && ready.some(p => p.id === Number(previous))) {
+        replaced.add(Number(previous)); previous = Number(store.getMeta?.(`replan_of:${previous}`)) || null;
+    }
+    const last = replaced.size ? ready.filter(p => !replaced.has(p.id) && p.id < Math.min(...replaced)).at(-1) ?? null : store.lastReadyPlan?.(chatKey) ?? null;
     const notes = store.notesOf?.(chatKey) ?? [];
     // taken：玩家接了没有（用上了，或拿出来以后玩家伸手了）——接了的带上"往后"，规划给它排后续（章程 F2）
-    const menu = store.menuOf(chatKey).map(m => ({ ...m, taken: takenOf(m, s.messages) }));
+    const unseen = m => replaced.has(m.plan_id) && (['waiting', 'pocket'].includes(m.status) || (m.status === 'void' && m.why === '被重新规划替换'));
+    const menu = store.menuOf(chatKey).filter(m => !unseen(m)).map(m => ({ ...m, taken: takenOf(m, s.messages) }));
+    const rerollTitles = replaced.size ? [...new Set(store.menuOf(chatKey, { all: true }).filter(unseen).map(m => m.title).filter(Boolean))].slice(0, 20) : [];
+    let setupChanges = [];
+    // 开局单改动跟这一串里最早那份比（连点几次重排，改动每次都点名）
+    const replacing = replaced.size ? ready.find(p => p.id === Math.min(...replaced)) : null;
+    const currentSetup = replaced.size ? store.setupOf?.(s.chat.story_id) : null;
+    if (replacing && currentSetup?.created_at > replacing.created_at) {
+        const old = store.setupAt?.(s.chat.story_id, replacing.created_at);
+        const before = new Set((old?.data ? setupText(old.data) : '').replaceAll('\r\n', '\n').split('\n'));
+        setupChanges = setupText(currentSetup.data).replaceAll('\r\n', '\n').split('\n').filter(line => line.trim() && !before.has(line));
+    }
     // 这一局到现在：账本要事按剧情日排（取代原先"最近两天的改变"＋"一直有效的改变"两段——一个窗口只跨两三天时，那样切会丢掉大半前情）。
     const digest = storyDigest(s.visible, { dayOf: s.dayOf, today: s.today, when: d => relativeDay(d, s.ts) });
     const rel = (r => (r ? normalizeRelations(r) : null))(store.relationsOf?.(s.chat.story_id));
@@ -2605,7 +2621,7 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
     // 三样对账（章程 J1，用户 10/12：基调写的轻松热闹，规划连着几份排伤病；开局单写好要来的主线在"往后"里推了六份）：
     // 最近几份交回的规划（新的在前）的节点和事件，交给 planner 里的纯函数数——类别排了几件、拖着的线、该来的还没来
     // （每份排过的事要全的：menuOf 只留眼下还算数的，旧规划里没放出来、被新规划接手的不在里面）
-    const recentRows = (store.readyPlans?.(chatKey) ?? []).slice(-LOOKBACK_PLANS).reverse();
+    const recentRows = ready.filter(p => !replaced.has(p.id)).slice(-LOOKBACK_PLANS).reverse();
     const planned = store.planItems?.(chatKey, recentRows.slice(0, 2).map(p => p.id)) ?? menu;
     const recentPlans = recentRows.map(p => ({ node: (() => { try { return p.node ? JSON.parse(p.node) : null; } catch { return null; } })(), items: planned.filter(m => m.plan_id === p.id) }));
     const castNames = s.roster.map(e => e.name).filter(Boolean);
@@ -2627,6 +2643,7 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
     const pace = paceOf(setup, s.ts);
     const close = Number.isFinite(pace.close) ? pace.close : CLOSE_UNITS[pace.name] ?? CLOSE_UNITS.中;
     const base = {
+        ...(replaced.size ? { reroll: { titles: rerollTitles, changes: setupChanges.slice(0, 40), more: Math.max(0, setupChanges.length - 40) } } : {}),
         ts: s.ts,
         rhythm: rhythmFor(store, chatKey, last?.id),
         // 玩家的人设（用户 10/12，M 数据约定第 1 条）：扩展交来的，存在 meta persona:<窗口>；简报里【玩家的角色】那一块，没有就不出
@@ -2641,10 +2658,10 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
         overdue: overdueAhead(recentPlans, { names: castNames }),
         reason: reason ?? store.lastPlan(chatKey)?.reason ?? null, verdict, thread,
         lastNode,
-        pastNodes: pastNodesOf(store, chatKey),
+        pastNodes: replaced.size ? ready.filter(p => !replaced.has(p.id)).slice(0, -1).filter(p => p.node).map(p => ({ id: p.id, 目标: JSON.parse(p.node).目标, verdict: verdictOf(store, chatKey, p.id) })).filter(n => n.目标) : pastNodesOf(store, chatKey),
         story: digest.days, storyCut: digest.cut,
         dice: rollDice(`${chatKey}:${s.lastPos}:${(store.readyPlans?.(chatKey) ?? []).length}`, 3),   // 同一处再要一份（比如弄断后接着要）也换一组骰子
-        motifs: motifLedger((store.menuOf?.(chatKey) ?? []).filter(m => m.plan_id === last?.id || m.status !== 'waiting')),
+        motifs: motifLedger((store.menuOf?.(chatKey) ?? []).filter(m => !unseen(m) && (m.plan_id === last?.id || m.status !== 'waiting'))),
         // 第几天和消息上的日期标签同一套数法（开局单的"开场是第几天"、日期）；时段单给
         day: s.today, ...(() => { try { const tl = timelineFor(store, records, chatKey, s.messages); return { start: tl.start, part: tl.part ?? null, clock: clockNow(tl.start, { today: tl.today, part: tl.part, seed: tl.seed }) }; } catch { return { clock: null }; } })(),
         prep: prep.filter(Boolean), userName: s.userName, present: s.present, notes: notes.filter(n => n.kind !== '聊' || n.used_in_plan == null),

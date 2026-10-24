@@ -99,12 +99,14 @@ sh /tmp/st-rp-installer/install.sh "$PWD"
 
 ## 更新
 
-**最稳的办法：关掉酒馆，重跑一次安装器，再开酒馆。** 安装器会把两份代码都拉到最新，设置和数据不动。
+在面板“设置 → 高级 → 检查更新”里点“更新”。一般不用关酒馆：后台自己重启，按提示刷新网页用上新面板；只有提示“这次改到了转发插件”时，才关掉酒馆再开一次。设置和数据不动。
+
+安装器仍可用于修复，两份代码没对上或面板连不上时可以重跑：
 
 - Windows：双击插件文件夹 `<ST>/plugins/st-rp-backstage/` 里的 `安装.bat`。
 - 手机 Termux、Mac、Linux：运行 `sh ~/SillyTavern/plugins/st-rp-backstage/install.sh ~/SillyTavern`（酒馆不在这儿就换成你的目录）。
 
-不想跑安装器也行：后台那份酒馆启动时会自己拉；面板那份，在酒馆"扩展 → 管理扩展"里看到 RP：幕后 有更新时点更新，再刷新页面。面板提示版本没对上时，重启一次酒馆。
+更新只快进干净的发布仓克隆；扩展那份有改动、来源不对或不是 git 安装时，面板会说明未更新的原因，请按提示修复。
 
 连 GitHub 报 `HTTP2 framing layer` 之类的错，先运行一次 `git config --global http.version HTTP/1.1` 再试。
 

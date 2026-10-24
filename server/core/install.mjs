@@ -5,7 +5,23 @@ import net from 'node:net';
 import {execFileSync} from 'node:child_process';
 import {createInterface} from 'node:readline/promises';
 import {INSTALL_PORT} from './local.mjs';
-import {RELEASE_REPOSITORY,isReleaseOrigin} from './update.mjs';
+export const RELEASE_REPOSITORY = 'https://github.com/lmy-1219/st-rp-backstage.git';
+export function isReleaseOrigin(value) {
+    const canonical = url => String(url ?? '').trim().replace(/^git@github\.com:/i, 'https://github.com/').replace(/^ssh:\/\/git@github\.com\//i, 'https://github.com/').replace(/\.git\/?$/i, '').replace(/\/$/, '').toLowerCase();
+    return canonical(value) === canonical(RELEASE_REPOSITORY);
+}
+export function assertReleaseTree(tree) {
+    if (tree.split('\0').filter(Boolean).some(row => {
+        const [meta, name] = row.split('\t');
+        return !name || /^120000 |^160000 /.test(meta) || name.split('/').some(p => p === '..' || p.toLowerCase() === 'secrets.json');
+    })) throw Error('新版含链接、子模块或密钥文件，未更新。');
+}
+export function releaseCloneProblem({origin, dirty, branch, ahead = 0}, acceptsOrigin = isReleaseOrigin) {
+    if (!acceptsOrigin(origin)) return '已有安装目录不是本发布仓，未覆盖。';
+    if (dirty || branch !== 'main') return '已有代码有改动或不在main，请先自行保存和核对。';
+    if (ahead) return '这份代码里有正本里没有的提交，没更新';
+    return null;
+}
 
 const NAME='st-rp-backstage';
 const upgrade='需要 Node.js 22.13 或以上及 Git。请从 nodejs.org 和 git-scm.com 升级后重试；本次没有修改文件。';
@@ -23,7 +39,7 @@ export function findSt(start,io=fs) {
     for(;;){if(stConfig(dir,io)&&io.existsSync(path.join(dir,'server.js')))return dir;const parent=path.dirname(dir);if(parent===dir)return null;dir=parent;}
 }
 const stConfig=(dir,io)=>[path.join(dir,'config.yaml'),path.join(dir,'config','config.yaml')].find(file=>io.existsSync(file));
-function noLinks(root,file,io) {
+export function noLinks(root,file,io = fs) {
     if(io.lstatSync(root).isSymbolicLink())throw Error('安装目录有链接，请先核对实际路径。');
     let at=root;
     for(const part of path.relative(root,file).split(path.sep).filter(Boolean)){
@@ -41,8 +57,7 @@ export async function firstFreePort({start=INSTALL_PORT,isFree=available}={}) {
 }
 function configOf(file,io){if(!io.existsSync(file))return{};const value=JSON.parse(io.readFileSync(file,'utf8'));if(!object(value))throw Error('插件 config.json 不是对象，原文件未覆盖。');return value;}
 function assertCloneTree(dir,git) {
-    const tree=git(['ls-tree','-rz','HEAD'],dir).split('\0').filter(Boolean);
-    if(tree.some(row=>{const [meta,name]=row.split('\t');return !name||/^120000 |^160000 /.test(meta)||name.split('/').some(p=>p==='..'||p.toLowerCase()==='secrets.json');}))throw Error('发布代码含链接、子模块或密钥文件，停止检出。');
+    assertReleaseTree(git(['ls-tree','-rz','HEAD'],dir));
 }
 function ensureClone(dir,{io,git}) {
     if(!io.existsSync(dir)){
@@ -50,11 +65,11 @@ function ensureClone(dir,{io,git}) {
         git(['clone','--no-checkout',RELEASE_REPOSITORY,dir]);
         assertCloneTree(dir,git);git(['checkout','main'],dir);
     }else{
-        if(!io.existsSync(path.join(dir,'.git'))||!isReleaseOrigin(git(['remote','get-url','origin'],dir)))throw Error('已有安装目录不是本发布仓，未覆盖。');
-        if(git(['status','--porcelain','--untracked-files=all'],dir)||git(['branch','--show-current'],dir)!=='main')throw Error('已有代码有改动或不在main，请先自行保存和核对。');
+        if(!io.existsSync(path.join(dir,'.git')))throw Error('已有安装目录不是本发布仓，未覆盖。');
+        const problem=releaseCloneProblem({origin:git(['remote','get-url','origin'],dir),dirty:git(['status','--porcelain','--untracked-files=all'],dir),branch:git(['branch','--show-current'],dir)});
+        if(problem)throw Error(problem);
         git(['fetch','origin'],dir);
-        const incoming=git(['ls-tree','-rz','origin/main'],dir).split('\0').filter(Boolean);
-        if(incoming.some(row=>/^120000 |^160000 /.test(row)||row.split('\t')[1]?.split('/').some(p=>p.toLowerCase()==='secrets.json')))throw Error('新版含链接、子模块或密钥文件，未更新。');
+        assertReleaseTree(git(['ls-tree','-rz','origin/main'],dir));
         git(['merge','--ff-only','origin/main'],dir);
     }
     const release=JSON.parse(io.readFileSync(path.join(dir,'release.json'),'utf8'));

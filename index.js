@@ -1080,13 +1080,13 @@ async function openUpdate() {
         return;
     }
     if (!r.ok) { await c.callGenericPopup(`<h3>检查更新</h3><p>没查成：${escapeHtml(r.error ?? '')}</p>`, c.POPUP_TYPE.TEXT); return; }
-    if (r.layout === 2) { await c.callGenericPopup('<h3>检查更新</h3><p>扩展和服务端由酒馆自己更新。版本还没对上时，重启一次酒馆就好。</p>', c.POPUP_TYPE.TEXT); return; }
-    if (!r.behind && !r.stale) { globalThis.toastr?.success(`已经是最新（${r.head}）。`); return; }
+    const currentVersion = r.label ? `v${r.label}` : r.head, targetVersion = r.targetLabel ? `v${r.targetLabel}` : r.target;
+    if (!r.behind && !r.stale) { globalThis.toastr?.success(`已经是最新（${currentVersion}）。`); return; }
     // 代码已经是新的、后台跑的还是旧的（D-163）：只要重启后台
     const ok = await c.callGenericPopup(!r.behind ? `<h3>后台该重启了</h3>
-        <p>代码已经是 ${escapeHtml(r.head)}，后台还在用启动时的 ${escapeHtml(r.running ?? '旧版本')}——重启一下才用上。</p>
+        <p>代码已经是 ${escapeHtml(currentVersion)}，后台还在用启动时的 ${escapeHtml(r.running ?? '旧版本')}——重启一下才用上。</p>
         <p><small>后台重启几秒，别在角色正生成时点。这一局的数据、调过的参数都不动。</small></p>` : `<h3>有新版本</h3>
-        <p>眼下 ${escapeHtml(r.head)}，正本已推送到 ${escapeHtml(r.target)}，差 ${r.behind} 个提交：</p>
+        <p>眼下 ${escapeHtml(currentVersion)}，新版本 ${escapeHtml(targetVersion)}，差 ${r.behind} 个提交：</p>
         <ul style="text-align:left">${(r.log ?? []).map(l => `<li><small>${escapeHtml(l)}</small></li>`).join('')}${r.behind > (r.log ?? []).length ? '<li><small>……</small></li>' : ''}</ul>
         <p><small>更新时后台重启几秒，别在角色正生成时点。你在面板上调过的参数、这一局的数据都不动；卡、书、预设也不动。${r.needsStRestart ? '<b>这次改到了转发插件：更新完关掉 ST 再开一次。</b>' : ''}</small></p>`,
         c.POPUP_TYPE.CONFIRM, '', { okButton: r.behind ? '更新' : '重启后台', cancelButton: '先不' });
@@ -1100,8 +1100,9 @@ async function openUpdate() {
         try { await api('update', {}, 60000); break; } catch { /* 还在重启 */ }
     }
     await checkRelease();
-    if (done.needsStRestart) await c.callGenericPopup('<p>更新好了。这次改到了转发插件：关掉 ST 再开一次才用上。</p>', c.POPUP_TYPE.TEXT);
-    else if (await c.callGenericPopup('<p>更新好了。刷新一下网页用上新的扩展？</p>', c.POPUP_TYPE.CONFIRM, '', { okButton: '刷新', cancelButton: '等会儿' })) location.reload();
+    const extensionNote = done.extensionWarning ? `<p>${escapeHtml(done.extensionWarning)}。重启酒馆或运行一次安装器也能补上。</p>` : '';
+    if (done.needsStRestart) await c.callGenericPopup(`<p>更新好了。这次改到了转发插件：关掉酒馆再开一次才用上。</p>${extensionNote}`, c.POPUP_TYPE.TEXT);
+    else if (await c.callGenericPopup(`<p>更新好了。刷新一下网页用上新的扩展？</p>${extensionNote}`, c.POPUP_TYPE.CONFIRM, '', { okButton: '刷新', cancelButton: '等会儿' })) location.reload();
 }
 
 // 调参（D-116）：后台的开关和数字，分组列出来，改了立刻存（下一轮就生效）；每项可以恢复默认。
@@ -2159,7 +2160,11 @@ function mountPanel() {
             const hid = Number(event.target.dataset.id);
             if (action === 'handoff-copy') {
                 const r = await api('handoff-ui', { action: 'prompt', id: hid });
-                if (r.ok === false) { globalThis.toastr?.warning(r.why); return; }
+                if (r.ok === false) {
+                    globalThis.toastr?.warning(r.why);
+                    if (['handoff_closed', 'handoff_stale'].includes(r.error)) { delete state.handoffDrafts?.[hid]; await refreshHandoffs(); render(); }
+                    return;
+                }
                 try {
                     await navigator.clipboard.writeText(r.prompt);
                     globalThis.toastr?.success('已复制，贴给任一个 AI');
@@ -2179,7 +2184,10 @@ function mountPanel() {
                 const draft = state.handoffDrafts[hid];
                 try {
                     const r = await api('handoff-ui', { action: 'submit', id: hid, text: draft.text });
-                    if (!r.ok) draft.why = r.why;
+                    if (!r.ok) {
+                        draft.why = r.why;
+                        if (['handoff_closed', 'handoff_stale'].includes(r.error)) { globalThis.toastr?.warning(r.why); delete state.handoffDrafts[hid]; await refreshHandoffs(); }
+                    }
                     else {
                         delete state.handoffDrafts[hid];
                         globalThis.toastr?.success('交上了');

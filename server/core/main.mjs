@@ -180,7 +180,7 @@ const freshBrief = planId => {
         const v = JSON.parse(store.getMeta(`plan_verdict:${planId}`) ?? 'null');   // 转向那一次的依据、参谋备忘，重攒时带上
         const memo = store.getMeta(`plan_memo:${planId}`), prep = store.getMeta(`plan_prep:${planId}`);
         // 备料、参谋备忘放在设定之后、局面之前（三家对比：接在末尾离输出最近，被原样搬进规划）
-        const brief = planBrief(store, records, plan.chat_key, { reason: plan.reason, verdict: v?.verdict ?? null, thread: v?.thread ?? null, factionNet: packOf(plan.chat_key)?.factions ?? null, sit: situation, prices: packOf(plan.chat_key)?.table ?? null, facts: packOf(plan.chat_key)?.facts ?? null, prep: [prep, memo], budget: getConfig().planner.briefChars });
+        const brief = planBrief(store, records, plan.chat_key, { reason: plan.reason, rerollOf: Number(store.getMeta(`replan_of:${planId}`)) || null, verdict: v?.verdict ?? null, thread: v?.thread ?? null, factionNet: packOf(plan.chat_key)?.factions ?? null, sit: situation, prices: packOf(plan.chat_key)?.table ?? null, facts: packOf(plan.chat_key)?.facts ?? null, prep: [prep, memo], budget: getConfig().planner.briefChars });
         store.setPlanBrief(plan.id, brief);
         return brief;
     } catch (error) { log(`plan ${planId} rebrief failed: ${error.message}`); return plan.brief; }

@@ -381,6 +381,10 @@ export function buildBrief(s) {
     // 母题账和骰子（白皮书 §5.7：多样性只能来自程序掷骰＋用过的母题记账）
     if (s.motifs?.length) out.push('', '【用过的母题】（这一局出过的事按类数的，多的在前）', ...s.motifs.slice(0, 16).map(m => `· ${m.motif} ×${m.n}`));
     if (s.dice?.length) out.push('', '【这一份的骰子】（类别 × 调性 × 尺度 × 物件 × 地点；至少两件事从这里长出来）', ...diceLines(s.dice));
+    if (s.reroll) {
+        out.push('', `这是重排。上一次（几次）排的是：${s.reroll.titles.map(t => `「${t}」`).join('') || '没有尚未拿出的件'}。玩家要重排，这次换个思路，别照着重写；已经拿出来的那几件照旧接着。`);
+        if (s.reroll.changes.length) out.push('开局单在上一次规划之后改过，改动的是：', ...s.reroll.changes, ...(s.reroll.more ? [`还有 ${s.reroll.more} 行。`] : []), '这次要用上。');
+    }
     return out.join('\n');
 }
 

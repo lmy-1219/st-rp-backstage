@@ -1030,8 +1030,8 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                         keys_bad_json: '回答里的 JSON 有语法错误。让它只输出 JSON 再试。',
                         model_bad_json: '回答里的 JSON 有语法错误。让它只输出 JSON 再试。',
                         messages_changed: '这件活已经不需要了（那几条消息改过、删过，或者已经做完）。',
-                        handoff_stale: '这件活已经不需要了（那几条消息改过、删过，或者已经做完）。',
-                        handoff_closed: '这件已经交过或放弃了。',
+                        handoff_stale: '这件活后来已经做完了或者不需要了（比如重新规划成功了），不用再交。',
+                        handoff_closed: '这件活后来已经做完了或者不需要了（比如重新规划成功了），不用再交。',
                         no_such_handoff: '没有这一件。',
                     };
                     return { ok: false, error: e.message, why: errors[e.message] ?? `格式不对：${e.message}` };

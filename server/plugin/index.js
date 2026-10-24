@@ -113,7 +113,7 @@ export async function followRelease(config) {
             const version = JSON.parse(fs.readFileSync(path.join(repo, 'release.json'), 'utf8')).version;
             const candidates = [path.join(stRoot, 'public', 'scripts', 'extensions', 'third-party', 'st-rp-backstage', 'release.json'), path.join(stRoot, 'data', 'default-user', 'extensions', 'st-rp-backstage', 'release.json')];
             const file = candidates.find(f => fs.existsSync(f));
-            if (file && JSON.parse(fs.readFileSync(file, 'utf8')).version !== version) console.warn('[rp-emergence] 扩展和后台版本还没对上，再重启一次酒馆。');
+            if (file && JSON.parse(fs.readFileSync(file, 'utf8')).version !== version) console.warn('[rp-emergence] 扩展和后台版本还没对上：在面板“设置 → 检查更新”里更新一次，或重启酒馆。');
         } catch (error) { console.warn('[rp-emergence] 没读到本地版本：', error.message); }
         return;
     }
