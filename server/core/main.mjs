@@ -1923,13 +1923,13 @@ const bootHead = (() => { try { return execFileSync('git', ['-C', repo, 'rev-par
 // 磁盘上已经是新的、自己跑的还是旧的（stale），也重启。
 const release = !follow ? null : {
     check: async () => {
-        const s = await checkRelease({ repo, follow });
+        const s = await checkRelease({ repo, stRoot, follow });
         return s.ok ? { ...s, running: bootHead?.slice(0, 7) ?? null, stale: !!bootHead && !!s.headFull && s.headFull !== bootHead } : s;
     },
     apply: async () => {
         const r = await applyRelease({ repo, stRoot, follow });
         const stale = r.ok && !!bootHead && !!r.headFull && r.headFull !== bootHead;
-        const restarted = r.ok && (r.updated || stale);
+        const restarted = r.ok && ((r.updated && r.pluginUpdated !== false) || stale);
         if (restarted) setTimeout(restartSelf, 500);
         return { ...r, stale, restarted };
     },

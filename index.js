@@ -1995,7 +1995,7 @@ export function installationHint({backendDown,backendStatus,localRelease,backend
     if(backendStatus==='starting')return '<p role="status">后台正在启动……</p>';
     if(backendStatus==='missing')return '<p>后台插件还没装上（只装了面板）。要在运行酒馆的那台机器上跑一次安装器：Windows 双击 安装.bat；手机 Termux、Mac、Linux、云服务器运行 install.sh；然后重启酒馆。用 Docker 或者云服务器部署的，看说明里“云服务器／Docker”一节。 <a href="https://github.com/lmy-1219/st-rp-backstage#安装" target="_blank" rel="noopener noreferrer">查看安装说明</a></p><small>酒馆的“安装扩展”只能装面板这一半；报“Directory already exists”是面板已经装过了，不用再装。</small>'+retry;
     if(backendStatus==='down'||backendDown)return '<p>插件装好了，但后台没起来。重启一次酒馆试试；还不行，把 data/rp-emergence/后台日志.txt 最后几十行发到群里或 Issues。</p>'+retry;
-    if(localRelease?.layout===2&&Number.isSafeInteger(localRelease.version)&&Number.isSafeInteger(backendRelease?.version)&&localRelease.version!==backendRelease.version)return '<p>扩展和后台版本还没对上，重启一次酒馆就好。</p>';
+    if(localRelease?.layout===2&&Number.isSafeInteger(localRelease.version)&&Number.isSafeInteger(backendRelease?.version)&&localRelease.version!==backendRelease.version)return '<p>扩展和后台版本还没对上：点下面“检查更新”同步一下，完成后刷新网页（或重启一次酒馆）。</p><button class="menu_button" type="button" data-action="update" title="同步扩展与后台版本，完成后刷新网页。">检查更新</button>';
     return '';
 }
 async function loadExtensionRelease() {
