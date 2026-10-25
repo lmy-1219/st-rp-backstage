@@ -822,6 +822,8 @@ const awayOff = (store, chatKey, absence) => absenceModeOf(store, chatKey, absen
 export function noteAbsence(store, chatKey, absence) {
     if (playModeOf(store, chatKey) === 'memory') {
         // 复用暂停计时的基点：恢复完整后不补算只记忆期间的离开。
+        // 键是 absence_resumed_at:<局>（记忆模式的基点）；全局键 absence_resumed_at（无后缀）是"暂停离开计时"的基点，
+        // 由 server.mjs 的暂停开关读写、下面第 832 行读取，两者各管各的，不是同一件事。
         store.setMeta?.('absence_resumed_at:' + store.requireChat(chatKey).story_id, String(Date.now()));
         return null;
     }
@@ -832,7 +834,8 @@ export function noteAbsence(store, chatKey, absence) {
     const resumed = Number(store.getMeta?.('absence_resumed_at'));
     // 这个窗口里删掉的消息上玩过的时间也算（10/3：删回去重来以后，删掉的那几条上玩过的时间被忘了，一下算出离开了 27.9 小时）
     const goneSent = Number(store.getMeta?.(`gone_sent:${chatKey}`));
-    const since = Math.max(Number.isFinite(resumed) && resumed > 0 ? resumed : -Infinity, store.storyActivity?.(chatKey) ?? -Infinity, Number.isFinite(goneSent) && goneSent > 0 ? goneSent : -Infinity);
+    // 离开按窗口算（A1/D-260）：不再用同一局别的窗口的动静抵消这个窗口的离开。
+    const since = Math.max(Number.isFinite(resumed) && resumed > 0 ? resumed : -Infinity, Number.isFinite(goneSent) && goneSent > 0 ? goneSent : -Infinity);
     const minHours = absence?.minHours ?? 24, maxDays = absence?.maxDays ?? 30;
     const messages = store.currentMessages(chatKey), now = Date.now();
     // 离开＝这个窗口多久没有任何动静（10/3 用户：没输入、没删、没改）。同步时记下的"没动静"那一段（store.touch），
@@ -844,15 +847,20 @@ export function noteAbsence(store, chatKey, absence) {
         store.setMeta(`act:${chatKey}`, JSON.stringify({ last: now }));
         if (!quiet) return null;
         store.setMeta(`gap:${chatKey}`, JSON.stringify({ ...quiet, used: true }));
-        const from = Math.max(quiet.from, Number.isFinite(resumed) && resumed > 0 ? resumed : -Infinity, store.storyActivity?.(chatKey) ?? -Infinity);
+        const from = Math.max(quiet.from, Number.isFinite(resumed) && resumed > 0 ? resumed : -Infinity);
         const hours = (quiet.to - from) / HOUR_MS;
         if (hours < minHours || !quiet.fromFp) return null;
         return store.putAbsence({ chatKey, fromFp: quiet.fromFp, toFp: null, startedAt: new Date(from).toISOString(), endedAt: new Date(quiet.to).toISOString(),
             hours: Math.round(hours * 10) / 10, days: Math.min(maxDays, Math.max(1, Math.round(hours / 24))) });
     }
-    // 还没记过动静的窗口（刚接入、老数据）：按消息时间算一次，从此刻起记动静
+    // 还没记过动静的窗口（刚接入、老数据）：按消息时间算一次，从此刻起记动静。
     store.setMeta?.(`act:${chatKey}`, JSON.stringify({ last: now }));
-    const gap = detectGap(messages, now, { minHours, maxDays, since: Number.isFinite(since) ? since : null });
+    // 分支刚开出来：分叉前继承的旧消息可能很久以前，起点不能早于开分支那一刻（joined_at），否则把继承来的旧消息当成离开的起点。
+    // 只对分支（有 parent_key）生效；新接入的独立局照旧按消息时间算（lead 拍板：A1 只要求别的窗口不抵消本窗口的离开）。
+    const chat = store.requireChat(chatKey);
+    const branchFloor = chat?.parent_key ? Date.parse(chat.joined_at ?? '') : -Infinity;
+    const floor = Math.max(Number.isFinite(since) ? since : -Infinity, Number.isFinite(branchFloor) ? branchFloor : -Infinity);
+    const gap = detectGap(messages, now, { minHours, maxDays, since: Number.isFinite(floor) ? floor : null });
     return gap ? store.putAbsence({ chatKey, ...gap }) : null;
 }
 const HOUR_MS = 3600000;
@@ -1270,7 +1278,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             if (imp.kind === '冒一句' && imp.tale?.text) {
                 let told = [];
                 try { told = JSON.parse(store.getMeta(`told:${storyId}`) ?? '[]'); } catch {}
-                store.setMeta(`told:${storyId}`, JSON.stringify([...told, { who: imp.who, n: imp.tale.n, text: imp.tale.text, at: lastPos }].slice(-80)));
+                store.setMeta(`told:${storyId}`, JSON.stringify([...told, { who: imp.who, n: imp.tale.n, text: imp.tale.text, at: lastPos, fp: messages.at(-1)?.fp }].slice(-80)));
             }
         }
     }
@@ -1420,14 +1428,17 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         const storyId = store.requireChat(chatKey).story_id;
         const dayKey = `world_day:${chatKey}`;
         if (store.getMeta(dayKey) !== String(today)) {
-            const used = JSON.parse(store.getMeta(`world_used:${storyId}`) ?? '[]');
+            // 用过的世界种子记成 { i, pos, fp }，挂在写它的那条消息上：那条还在本窗口才算用过（分叉前共有所以继承、分叉后各算各的、删回去也撤得掉）。旧格式纯数字照旧算用过。
+            const raw = JSON.parse(store.getMeta(`world_used:${storyId}`) ?? '[]');
+            const same = (a, b) => !!store.sameMessage?.(a, b);
+            const used = raw.filter(u => Number.isInteger(u) ? true : u && stillThere({ pos: u.pos, fp: u.fp }, messages, same)).map(u => Number.isInteger(u) ? u : u.i);
             const current = dateIn(setup?.时间, today, { calendar: true })?.d;
             const year = current?.y ?? storyYear(setup);
             const now = current ?? (year == null ? null : { y: year, m: null, d: null });
             const seed = pickSeed(world.seeds, { key: `${storyId}:${today}`, used, now, elapsed: { today, timeScale: ts } });
             if (world.record !== false) {
                 store.setMeta(dayKey, String(today));
-                if (seed) store.setMeta(`world_used:${storyId}`, JSON.stringify([...used, seed.i]));
+                if (seed) store.setMeta(`world_used:${storyId}`, JSON.stringify([...raw, { i: seed.i, pos: lastPos, fp: messages.at(-1)?.fp }]));
             }
             if (seed) add(3, seedLines(seed, { year, start: setup?.时间 }), 'world', 'scene');
         }
@@ -2856,6 +2867,8 @@ export function sceneMaterial(store, records, chatKey) {
     // 删回去以后，被删那段里冒过的兴头不算"刚冒过"（不然位置比眼下还靠后，隔多久都算没隔够，就地的一个也出不来）
     recent = recent.filter(x => stillThere(x.at, s.messages, (a, b) => !!store.sameMessage?.(a, b)));
     try { told = JSON.parse(store.getMeta?.(`told:${s.chat.story_id}`) ?? '[]'); } catch {}
+    // 讲过的往事挂在写它的那条消息上：那条还在本窗口才算讲过（分叉前共有的 fp 相同所以继承，分叉后各自不同所以不串，删回去也撤得掉）。旧数据只有 at 没有 fp，stillThere 按位置算。
+    told = told.filter(t => t && stillThere({ pos: t.at, fp: t.fp }, s.messages, (a, b) => !!store.sameMessage?.(a, b)));
     return {
         userName: s.userName ?? '玩家', today: s.today, setup: staleBackstory(store.setupOf?.(s.chat.story_id)?.data ?? null, s.visible, s.userName), present, offstage, recent, told,
         passive: passiveUser(s.messages), storyId: s.chat.story_id,

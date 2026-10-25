@@ -770,7 +770,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 playMode: playModeOf(store,chatKey), playReason: playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), awaitingPersona: playStop(store,chatKey) ? null : awaitingPlanPersona(store,chatKey),
                 provider: planner?.provider ?? 'off', last: last ? { id: last.id, status: last.status, reason: last.reason, createdAt: last.created_at, readyAt: last.ready_at } : null,
                 counts: { waiting: count('waiting'), pocket: count('pocket'), used: count('used'), sunk: count('sunk') + count('sunk_told'), void: count('void'), expired: count('expired') },
-                ...(b.reveal ? (ready => ({ goal: ready?.goal ?? null, node: ready?.node ? JSON.parse(ready.node) : null, menu: menu.map(m => ({ ...m, planNumber: store.planNumber(m.plan_id), currentPlan: m.plan_id === ready?.id })) }))(store.lastReadyPlan(chatKey)) : {}),
+                ...(b.reveal ? (ready => ({ goal: ready?.goal ?? null, node: ready?.node ? JSON.parse(ready.node) : null, menu: menu.map(m => ({ ...m, planNumber: store.planNumber(m.plan_id, chatKey), currentPlan: m.plan_id === ready?.id })) }))(store.lastReadyPlan(chatKey)) : {}),
             };
         },
         // 交回菜单（本机工具用；转发插件也会转过来（要先过 ST 登录））。
@@ -1066,10 +1066,11 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/status': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             const extract = worker ? worker.plan({ chatKey }) : null;
-            return { ...store.status({ chatKey }), playMode:playModeOf(store,chatKey), playReason:playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), intimateStopped: intimateStopped(store, records, chatKey), secretNotice: JSON.parse(store.getMeta(`secret_notice:${chatKey}`) ?? 'null'), secretCheckReason: secretCandidates(store, chatKey, records).length ? settings().secretCheckReason ?? (!settings().planner ? '规划没开，暂不检测秘密是否漏了' : null) : null, extract, leaveUnjudged: settings?.().auto?.unjudged?.({ chatKey }) ?? 0, handoffs: handoffs?.list().length ?? 0, notice: JSON.parse(store.getMeta(`notice:${chatKey}`) ?? 'null'), drift: JSON.parse(store.getMeta(`drift:${chatKey}`) ?? 'null'), cut: settings?.().modelTally?.() ?? null };
+            return { ...store.status({ chatKey }), playMode:playModeOf(store,chatKey), playReason:playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), intimateStopped: intimateStopped(store, records, chatKey), secretNotice: JSON.parse(store.getMeta(`secret_notice:${chatKey}`) ?? 'null'), secretCheckReason: secretCandidates(store, chatKey, records).length ? settings().secretCheckReason ?? (!settings().planner ? '规划没开，暂不检测秘密是否漏了' : null) : null, extract, leaveUnjudged: settings?.().auto?.unjudged?.({ chatKey }) ?? 0, handoffs: handoffs?.list({ chatKey })?.pending?.length ?? 0, notice: JSON.parse(store.getMeta(`notice:${chatKey}`) ?? 'null'), drift: JSON.parse(store.getMeta(`drift:${chatKey}`) ?? 'null'), cut: settings?.().modelTally?.() ?? null };
         },
-        // 外援队列面板：复制题目、贴回答案、再试 API、自动重试开关。
+        // 外援队列面板：复制题目、贴回答案、再试 API、自动重试开关。列表和开关按窗口（N-441/D-260）。
         'POST /v1/handoff-ui': async b => {
+            const chatKey = str(b.chatKey, 'chatKey', { optional: true });
             if (b.action === 'prompt' || b.action === 'submit') {
                 try {
                     if (!handoffs) throw new Error('no_such_handoff');
@@ -1096,10 +1097,37 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                     return { ok: false, error: e.message, why: errors[e.message] ?? `格式不对：${e.message}` };
                 }
             }
-            if (!handoffs) return { pending: [], auto: false };
-            if (b.action === 'retry') handoffs.retry(Number(b.id)).catch(() => {});
-            if (b.action === 'auto') store.setMeta('handoff_autoretry', b.on ? '1' : '0');
-            return { pending: handoffs.list().map(({ file, ...h }) => ({ ...h, chars: renderPrompt(store.handoffById(h.id)).length })), auto: store.getMeta('handoff_autoretry') === '1' };
+            if (!handoffs) return { pending: [], others: [], auto: false };
+            if (b.action === 'retry') { handoffs.retry(Number(b.id)).catch(() => {}); }
+            let dropped = null;
+            if (b.action === 'drop') {
+                const id = Number(b.id), h = store.handoffById(id);
+                if (h && h.status === 'pending') {
+                    const rawPlanId = h.kind === 'plan' ? (h.payload?.meta?.planId ?? h.key) : null;
+                    const planId = rawPlanId == null || rawPlanId === '' ? NaN : Number(rawPlanId);
+                    if (Number.isInteger(planId) && planId > 0) {
+                        // 正在跑的那份不放：整件都不收，等它跑完。
+                        if (store.activePlanAttempt(h.chat_key, planId)) return { ok: false, why: '正在规划，等它跑完再放弃' };
+                        // 规划外援的放弃走"幕后 → 放弃这次重抽"同一条路；那份已不挂着（不是该窗口最新、已不是 requested）时 abandon 失败不拦收外援。
+                        let note;
+                        try { store.abandonPlan(h.chat_key, planId, 'panel-abandon'); } catch (e) { note = e.message; }
+                        for (const p of store.pendingHandoffs().filter(p => p.kind === 'plan' && p.key === String(planId))) handoffs.drop(p.id, 'plan_abandoned');
+                        dropped = { ok: true, ...(note ? { note } : {}) };
+                    } else {
+                        handoffs.drop(id, 'panel_gave_up');
+                        dropped = { ok: true };
+                    }
+                }
+            }
+            if (b.action === 'auto' && chatKey) store.setMeta(`handoff_autoretry:${chatKey}`, b.on ? '1' : '0');
+            const { pending, others } = chatKey ? (handoffs.list({ chatKey }) ?? { pending: [], others: [] }) : { pending: handoffs.list(), others: [] };
+            const withChars = h => ({ ...h, chars: renderPrompt(store.handoffById(h.id)).length });
+            return {
+                ...(dropped ?? {}),
+                pending: pending.map(({ file, ...h }) => withChars(h)),
+                others: (others ?? []).map(g => ({ chatKey: g.chatKey, label: g.label, n: g.n, items: g.items.map(({ file, ...h }) => withChars(h)) })),
+                auto: chatKey ? store.getMeta(`handoff_autoretry:${chatKey}`) === '1' : false,
+            };
         },
         // 外援队列（本机工具用；转发插件也会转过来（要先过 ST 登录））：list 看等着的；submit 交回；drop 放弃（那一步以后照常再试）。
         'POST /v1/handoff': async b => {

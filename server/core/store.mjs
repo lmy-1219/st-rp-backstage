@@ -773,10 +773,19 @@ export function openStore(file) {
         return id;
     }
     function failPlan(id, error) { q("update plans set status = 'failed', error = ?, ready_at = ? where id = ?").run(String(error).slice(0, 1000), now(), id); }
-    // 按局编号，包含放弃/删稿已撤的规划；别把别局占用的数据库 ID 当成第几份。
-    function planNumber(id) {
+    // 按"本窗口能看见的"编号（N-441/D-260）：数这个窗口历史里、锚点还在的计划（requested/failed/withdrawn 都数，
+    // 只要它的 anchor 和 basis 那条消息还在本窗口），按锚点位置排；别把别的窗口、别的局占用的数据库 ID 当成第几份。
+    function planNumber(id, chatKey = null) {
         if (!id) return null;
-        return q(`select count(*) n from plans p join chats c on c.key=p.chat_key where c.story_id=(select c.story_id from plans p join chats c on c.key=p.chat_key where p.id=?) and p.id<=?`).get(id, id).n || null;
+        const key = chatKey ?? planById(id)?.chat_key;
+        if (!key) return null;
+        const h = historyOf(key);
+        const plans = q(`select * from plans where chat_key in (${h.keys.map(() => '?').join(', ')}) order by id`).all(...h.keys)
+            .filter(p => h.sees(p.chat_key, p.anchor_pos, p.anchor_fp))
+            .filter(p => (b => !b || h.sees(p.chat_key, b.pos, b.fp))(basisOf(p)))
+            .sort((a, b) => (a.anchor_pos ?? -1) - (b.anchor_pos ?? -1) || a.id - b.id);
+        const idx = plans.findIndex(p => p.id === id);
+        return idx >= 0 ? idx + 1 : null;
     }
     function setPlanSource(id, source) { setMeta(`plan_source:${id}`, safePlanSource(source)); }
     function abandonPlan(chatKey, id, source = 'panel-abandon') {
@@ -868,10 +877,10 @@ export function openStore(file) {
         const plan = lastPlan(chatKey), attempts = planAttempts(chatKey), latest = attempts.find(a => a.planId === plan?.id);
         const running = plan && activePlanAttempt(chatKey, plan.id);
         const external = !!plan && plan.status === 'requested' && !!pendingHandoff('plan', String(plan.id));
-        const pending = plan?.status === 'requested', ready = lastReadyPlan(chatKey), readyNumber = planNumber(ready?.id);
+        const pending = plan?.status === 'requested', ready = lastReadyPlan(chatKey), readyNumber = planNumber(ready?.id, chatKey);
         const failure = (pending || plan?.status === 'failed') && latest?.status === 'failed' ? latest.failure : null;
         const labels = { timeout: '上游超时', connection: '连接断了', bad_answer: '格式坏了', empty: '模型没返回正文', filtered: '内容被上游拦了', overloaded: '上游过载', truncated: '写一半断了', unavailable: '线路未配置或到了花费上限' };
-        const autoRetry = getMeta('handoff_autoretry') === '1';
+        const autoRetry = getMeta(`handoff_autoretry:${chatKey}`) === '1';
         const persona = pending && fromJson(getMeta(`plan_persona_wait:${chatKey}`))?.id === plan.id;
         const activeText = readyNumber ? `第 ${readyNumber} 份生效中` : '暂时没有规划';
         const samePlan = attempts.filter(a => a.planId === plan?.id), recent = [];
@@ -881,10 +890,10 @@ export function openStore(file) {
         }
         const repeated = recent.length >= 3 && Math.max(...recent.map(a => a.ms)) - Math.min(...recent.map(a => a.ms)) <= 10000;
         const timingHint = failure && repeated ? `连着几次都在约 ${(recent.reduce((n,a) => n+a.ms,0)/recent.length/60000).toFixed(1)} 分钟断开，可能是中转限时，换一条线或调低思考档试试。` : '';
-        const message = [failure && `规划没成功（${labels[failure] ?? '连接断了'}）；${external && autoRetry ? '后台会再试' : '可以点“再试一次”或交外援'}`, external && '规划交给外援了', running && '正在重新规划', timingHint].filter(Boolean).join('。');
+        const message = [failure && `规划没成功（${labels[failure] ?? '连接断了'}）；${external && autoRetry ? '后台会再试' : '可以点“再试一次”或交外援'}`, external && '规划交给外援了', running && (plan?.reason === 'reroll' ? '正在重新规划' : '正在规划'), timingHint].filter(Boolean).join('。');
         const summary = running ? '在规划……' : pending ? `${activeText}；${persona ? '等你确认人设' : external ? '新的一份没成功，交给外援了' : failure ? '新的一份没成功' : '新的一份暂未开始，等待处理'}` : activeText;
         const repair = !running && planRepairCandidate(chatKey);
-        return { planId: plan?.id ?? null, planNumber: planNumber(plan?.id), readyId: ready?.id ?? null, readyNumber, pending, canAbandon: !!pending && !running, running: !!running, external, failure, autoRetry, summary, timingHint, message, repairAvailable: !!repair, repairReason: repair?.reason ?? null, attempts };
+        return { planId: plan?.id ?? null, planNumber: planNumber(plan?.id, chatKey), readyId: ready?.id ?? null, readyNumber, reason: plan?.reason ?? null, pending, canAbandon: !!pending && !running, running: !!running, external, failure, autoRetry, summary, timingHint, message, repairAvailable: !!repair, repairReason: repair?.reason ?? null, attempts };
     }
     function intimateEvents(table, chatKey) {
         const h = historyOf(chatKey), plans = new Set(readyPlans(chatKey).map(p => p.id));
@@ -1146,14 +1155,6 @@ export function openStore(file) {
     function updateSetupData(id, data) { q('update setups set data = ?, updated_at = ? where id = ?').run(JSON.stringify(data), now(), id); }
     function discardSetupDraft(storyId) { q("update setups set status = 'superseded', updated_at = ? where story_id = ? and status in ('draft', 'failed')").run(now(), storyId); }
 
-    // 同一局里别的窗口最近一次有消息的时刻（在分支之间切来切去不算离开）。
-    function storyActivity(chatKey) {
-        const chat = requireChat(chatKey);
-        const rows = q(`select s.sent_at from chat_seq s join chats c on c.key = s.chat_key
-                        where c.story_id = ? and s.chat_key != ? and s.pos >= (select max(pos) - 2 from chat_seq where chat_key = s.chat_key)`).all(chat.story_id, chatKey);
-        return Math.max(-Infinity, ...rows.map(r => Date.parse(r.sent_at ?? '')).filter(Number.isFinite));
-    }
-
     // ---------- /写 /玩 /聊 ----------
     function addNote({ chatKey, kind, text, storyDay = null, pos = null }) {
         if (kind !== '聊') q('update notes set cleared = 1 where chat_key = ? and kind = ? and cleared = 0').run(chatKey, kind);   // 同类只留最新一条
@@ -1198,5 +1199,5 @@ export function openStore(file) {
         };
     }
 
-    return { planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, storyActivity, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    return { planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

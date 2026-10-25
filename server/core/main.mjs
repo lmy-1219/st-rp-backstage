@@ -1835,14 +1835,17 @@ async function recheckPromises({ chatKey, run = false }) {
 }
 
 // 外援自动重试（面板开关）：每 5 分钟把等着的、能走 API 重试的再试一次，直到成了为止。
-setInterval(() => {
-    if (store.getMeta('handoff_autoretry') !== '1') return;
+// 开关按窗口存（handoff_autoretry:<chatKey>）；每条外援只认它所属窗口的开关。chatKey 为空的全局活没有窗口开关，不自动重试（B1/D-260）。
+function autoRetryRound(store, handoffs, planRetryOrigins) {
     for (const h of handoffs.list()) if (h.retry && !h.busy) {
+        if (!h.chatKey) continue;
+        if (store.getMeta(`handoff_autoretry:${h.chatKey}`) !== '1') continue;
         const planId = h.kind === 'plan' ? store.handoffById(h.id)?.payload?.meta?.planId : null;
         if (planId != null) planRetryOrigins.set(planId, 'auto');
         handoffs.retry(h.id).catch(() => {}).finally(() => { if (planId != null) planRetryOrigins.delete(planId); });
     }
-}, 5 * 60 * 1000).unref();
+}
+setInterval(() => autoRetryRound(store, handoffs, planRetryOrigins), 5 * 60 * 1000).unref();
 
 // 价表、种子表按路径和改动时间缓存，改了文件自动重读。
 // 素材包按局选（D-104，T-22：换个题材不能带出别的题材的价码、时事、年表、专名）。meta pack:<局> 记这一局用 素材包/ 下哪个目录；

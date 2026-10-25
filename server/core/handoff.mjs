@@ -84,13 +84,23 @@ export function createHandoffs({ store, home, log = () => {} }) {
             return self.list();
         },
         // 等着的；已经不需要的（比如要它的那段消息删了）顺手撤掉。
-        list() {
-            return store.pendingHandoffs().filter(h => {
+        // 不带 chatKey：照旧返回全部（本机工具 tools/handoff.mjs 用）。带 chatKey：返回 { pending, others }，
+        // pending＝本窗口的（自己＋分叉点前继承的 keys，chat_key 为空的全局活每个窗口都算），others＝别的窗口的按窗口归并。
+        list({ chatKey = null } = {}) {
+            const all = store.pendingHandoffs().filter(h => {
                 if (!kinds.get(h.kind)?.stale?.(h.payload.meta, h)) return true;
                 store.closeHandoff(h.id, 'dropped', { reason: 'stale' });
                 remove(h.id);
                 return false;
             }).map(h => ({ id: h.id, kind: h.kind, title: TITLES[h.kind] ?? h.kind, chatKey: h.chat_key, why: h.payload.why, createdAt: h.created_at, file: file(h.id), retry: !!kinds.get(h.kind)?.retry, busy: retrying.has(h.id) }));
+            if (chatKey == null) return all;
+            const keys = new Set(store.historyOf(chatKey).keys);
+            const pending = all.filter(h => h.chatKey == null || keys.has(h.chatKey));
+            const others = all.filter(h => h.chatKey != null && !keys.has(h.chatKey));
+            const labelOf = key => { try { const c = store.requireChat(key); return c.label || c.st_chat_id || key; } catch { return key; } };
+            const groups = new Map();
+            for (const h of others) { const g = groups.get(h.chatKey) ?? { chatKey: h.chatKey, label: labelOf(h.chatKey), items: [] }; g.items.push(h); groups.set(h.chatKey, g); }
+            return { pending, others: [...groups.values()].map(g => ({ chatKey: g.chatKey, label: g.label, n: g.items.length, items: g.items })) };
         },
         async submit(id, text) {
             const h = store.handoffById(Number(id));

@@ -425,7 +425,7 @@ function driftHtml(d) {
 
 // 外援队列件数变多了：轻提示一次（后台调模型没响应，活已经写成外援包等 AI 窗口接手）。
 async function refreshHandoffs() {
-    try { state.handoffUi = await api('handoff-ui', { action: 'list' }); } catch { state.handoffUi = null; }
+    try { state.handoffUi = await api('handoff-ui', { action: 'list', chatKey: state.chatKey }); } catch { state.handoffUi = null; }
     if (state.relationsDraft?.status === 'handoff') void refreshRelationsDraft();
     render();
 }
@@ -2308,14 +2308,24 @@ function mountPanel() {
         ].filter(Boolean).join('；');
         const waiting = state.status?.handoffs ?? 0;
         const hu = state.handoffUi;
-        $('[data-role="handoffs"]').hidden = !waiting;
-        $('[data-role="handoffs"]').innerHTML = !waiting ? '' : `外援队列：${waiting} 件等着。复制题目贴给任何一个 AI（网页版也行），把回答贴回来点“交回”；也可以重试 API。`
-            + (hu?.pending ?? []).map(h => `<div style="margin:.2em 0">· ${escapeHtml(handoffLabel(h))}<small style="opacity:.8">（${escapeHtml(h.why)}）</small>${h.retry
-                ? ` <button class="menu_button" type="button" data-action="handoff-retry" data-id="${h.id}" ${h.busy ? 'disabled' : ''} title="重调原模型，建议先检查连接。">${h.busy ? '正在重试…' : h.kind === 'plan' ? '再试一次（调规划模型写一整个节点，约一两美元）' : '再试一次'}</button>` : ''}
-                <button class="menu_button" type="button" data-action="handoff-copy" data-id="${h.id}" title="复制完整题目，建议交给其他AI。">复制题目（约 ${h.chars ?? '?'} 字）</button>
-                <button class="menu_button" type="button" data-action="handoff-paste" data-id="${h.id}" title="粘贴AI回答，建议核对后交回。">贴回答</button>
-                ${state.handoffDrafts?.[h.id] ? `<div><textarea data-handoff-answer="${h.id}" rows="8" style="width:100%" aria-label="外援回答">${escapeHtml(state.handoffDrafts[h.id].text)}</textarea><button class="menu_button" type="button" data-action="handoff-submit" data-id="${h.id}" title="提交并核对回答，建议保留完整内容。">交回</button><button class="menu_button" type="button" data-action="handoff-cancel" data-id="${h.id}" title="收起未交回答，建议暂不交时用。">取消</button><div role="status">${escapeHtml(state.handoffDrafts[h.id].why ?? '')}</div></div>` : ''}</div>`).join('')
-            + `<label class="checkbox_label"><input type="checkbox" data-opt="handoffAuto" ${hu?.auto ? 'checked' : ''}> 每 5 分钟自动再试，直到成了<small>重试未完成的任务，建议先检查模型连接。</small></label><small>能跑命令的 AI 窗口也可以说“处理外援”。</small>`;
+        const others = hu?.others ?? [];
+        const othersN = others.reduce((s, g) => s + (g.n ?? 0), 0);
+        const row = h => `<div style="margin:.2em 0">· ${escapeHtml(handoffLabel(h))}<small style="opacity:.8">（${escapeHtml(h.why)}）</small>${h.retry
+            ? ` <button class="menu_button" type="button" data-action="handoff-retry" data-id="${h.id}" ${h.busy ? 'disabled' : ''} title="重调原模型，建议先检查连接。">${h.busy ? '正在重试…' : h.kind === 'plan' ? '再试一次（调规划模型写一整个节点，约一两美元）' : '再试一次'}</button>` : ''}
+            <button class="menu_button" type="button" data-action="handoff-copy" data-id="${h.id}" title="复制完整题目，建议交给其他AI。">复制题目（约 ${h.chars ?? '?'} 字）</button>
+            <button class="menu_button" type="button" data-action="handoff-paste" data-id="${h.id}" title="粘贴AI回答，建议核对后交回。">贴回答</button>
+            <button class="menu_button" type="button" data-action="handoff-drop" data-id="${h.id}" title="放弃这一件，不再等它。">放弃</button>
+            ${state.handoffDrafts?.[h.id] ? `<div><textarea data-handoff-answer="${h.id}" rows="8" style="width:100%" aria-label="外援回答">${escapeHtml(state.handoffDrafts[h.id].text)}</textarea><button class="menu_button" type="button" data-action="handoff-submit" data-id="${h.id}" title="提交并核对回答，建议保留完整内容。">交回</button><button class="menu_button" type="button" data-action="handoff-cancel" data-id="${h.id}" title="收起未交回答，建议暂不交时用。">取消</button><div role="status">${escapeHtml(state.handoffDrafts[h.id].why ?? '')}</div></div>` : ''}</div>`;
+        const othersLine = othersN ? `<details class="rpe-others"><summary>别的窗口还有 ${othersN} 份外援（${escapeHtml(others.map(g => g.label).join('、'))}）</summary>${others.map(g => `<div><small style="opacity:.7">${escapeHtml(g.label)}</small>${g.items.map(row).join('')}</div>`).join('')}</details>` : '';
+        const autoLine = `<label class="checkbox_label"><input type="checkbox" data-opt="handoffAuto" ${hu?.auto ? 'checked' : ''}> 这个窗口的外援每 5 分钟自动再试，直到成了<small>重试未完成的任务，建议先检查模型连接。</small></label>`;
+        $('[data-role="handoffs"]').hidden = !(waiting > 0 || othersN > 0);
+        $('[data-role="handoffs"]').innerHTML = !(waiting > 0 || othersN > 0) ? '' : [
+            waiting > 0 ? `外援队列：${waiting} 件等着。复制题目贴给任何一个 AI（网页版也行），把回答贴回来点“交回”；也可以重试 API。` : '',
+            waiting > 0 ? (hu?.pending ?? []).map(row).join('') : '',
+            waiting > 0 ? autoLine : '',
+            othersLine,
+            '<small>能跑命令的 AI 窗口也可以说“处理外援”。</small>',
+        ].filter(Boolean).join('');
         // 记账是一切的上游（D-174 第 5 步）：连败就亮红、能一键再试；判了"跳过"的能重记；落后几条也说一声
         const ex = st?.extract;
         $('[data-role="extract-alert"]').innerHTML = !ex ? '' : [
@@ -2433,6 +2443,20 @@ function mountPanel() {
                 globalThis.toastr?.info('在重试（走 API）。成了会从这里消失；没成就还在，可以再点。');
                 for (const wait of [5000, 20000, 60000, 180000]) setTimeout(() => api('status', { chatKey: state.chatKey }).then(st => { state.status = st; noticeHandoffs(st.handoffs); render(); }).catch(() => {}), wait);
             }
+            if (action === 'handoff-drop') {
+                const c = ctx(), chatKey = state.chatKey, id = Number(event.target.dataset.id);
+                const hu = state.handoffUi ?? {};
+                const item = [...(hu.pending ?? []), ...(hu.others ?? []).flatMap(g => g.items ?? [])].find(h => h.id === id);
+                const ask = item?.kind === 'plan' ? '放弃这份规划外援？那一份规划会一起撤掉，继续用已生效那份。' : '放弃这一件外援？';
+                const answer = await c.callGenericPopup(ask, c.POPUP_TYPE.CONFIRM);
+                if (answer !== c.POPUP_RESULT.AFFIRMATIVE || state.chatKey !== chatKey) return;
+                const result = await api('handoff-ui', { action: 'drop', id, chatKey });
+                if (result?.ok === false) globalThis.toastr?.warning(result.why ?? '没能放弃这一件。');
+                else if (result?.note) globalThis.toastr?.info('规划那份已经不挂着了，只收掉了外援');
+                else globalThis.toastr?.info('已放弃这一件。');
+                await refreshHandoffs();
+                state.status = await api('status', { chatKey: state.chatKey });
+            }
             if (action === 'sync') await syncNow();
             if (action === 'confirm') await syncNow(true);
             if (action === 'drift-clear') {
@@ -2534,7 +2558,7 @@ function mountPanel() {
                 const c = ctx(), chatKey = state.chatKey;
                 const current = await api('status', { chatKey });
                 if (state.chatKey !== chatKey) return;
-                if (current.planning?.running) { globalThis.toastr?.info('正在重新规划'); return; }
+                if (current.planning?.running) { globalThis.toastr?.info(current.planning?.reason === 'reroll' ? '正在重新规划' : '正在规划'); return; }
                 const answer = await c.callGenericPopup('重抽这一份规划？抽成功以前，现在这份照常用。', c.POPUP_TYPE.CONFIRM);
                 if (answer !== c.POPUP_RESULT.AFFIRMATIVE || state.chatKey !== chatKey) return;
                 const result = await api('plan', { chatKey, reroll: true, source: target.dataset.source === 'pending-reroll' ? 'pending-reroll' : 'behind-reroll' });
@@ -2606,7 +2630,7 @@ function mountPanel() {
             return;
         }
         if (opt === 'handoffAuto') {
-            try { state.handoffUi = await api('handoff-ui', { action: 'auto', on: event.target.checked }); }
+            try { state.handoffUi = await api('handoff-ui', { action: 'auto', on: event.target.checked, chatKey: state.chatKey }); }
             catch { state.note = '后台暂时连不上。'; }
         } else if (opt === 'awayMode') {
             try { state.absence = await api('absence', { chatKey: state.chatKey, mode: event.target.value }); }

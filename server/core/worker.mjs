@@ -13,7 +13,8 @@ const MAX_FAILURES = 3;
 // 外援（D-73）：API 没响应（超时、断连、5xx）时，这一小窗写成外援包交给 AI 窗口，这个窗口的记账先停着等它交回；
 // extractor.provider = 'window' 时一律交给窗口（测试期不走中转）。交回的回答和模型的走同一套核对。
 export function createWorker({ store, records, getConfig, clientFactory = createModelClient, log = () => {}, intervalMs = 20000, handoffs = null }) {
-    let busy = false, timer = null, lastError = null;
+    let busy = false, timer = null;
+    const lastError = new Map();   // 记账出错提示按窗口记（N-441/D-260）：A 出错不影响 B 的 plan().lastError
     const startedAt = new Date().toISOString();   // 失败次数只算这次启动以后的：改了代码重启后给坏段落一次新机会
 
     function messagesFor(chatKey) {
@@ -80,7 +81,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
             // 接入以前的旧消息没记的：补记要多少（面板上由用户点）
             olderMessages: older.reduce((n, w) => n + w.length, 0), olderEstimate: estimateCost(older, config.extractor),
             spentTodayUsd: records.spentToday(), dailyBudgetUsd: config.extractor.dailyBudgetUsd,
-            running: busy, lastError, failing: records.recentFailures?.(chatKey, startedAt) ?? 0, skipped,
+            running: busy, lastError: lastError.get(chatKey) ?? null, failing: records.recentFailures?.(chatKey, startedAt) ?? 0, skipped,
         };
     }
 
@@ -188,9 +189,9 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                     break;
                 }
             }
-            lastError = null;
+            lastError.delete(chatKey);
         } catch (error) {
-            lastError = error.message;
+            lastError.set(chatKey, error.message);
             log(`extract failed ${chatKey}: ${error.message}`);
             results.push({ error: error.message });
         } finally {
