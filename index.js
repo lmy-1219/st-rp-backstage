@@ -354,9 +354,32 @@ async function showPending() {
 // 后台给的一句不剧透的提示（比如剧情转向、重新规划了）：蓝色轻提示，每条只提示一次（记在本机，刷新页面也不重复）。
 export function planAttemptsHtml(planning, esc) {
     const entries = { auto: '自动', button: '按钮', supplement: '补规划', handoff: '外援交回', repair: '修格式' };
-    const kinds = { thinking: '想的吃光了', limit: '写到上限还没写完', format: '格式待修' };
-    const rows = (planning?.attempts ?? []).map(a => `<tr><td>${esc(a.attemptId)}<br>规划 ${esc(String(a.planId))}</td><td>${esc(entries[a.entry] ?? a.entry)}</td><td>${esc(a.model ?? '未知')}<br>思考${a.thinks ? '开' : '关'}</td><td>${a.briefChars} / ${a.outputChars}</td><td>${(a.ms / 1000).toFixed(1)} 秒</td><td>${esc(a.stage)}<br>${esc(a.status)}</td><td>${esc(a.finishReason ?? '未知')}</td><td>${esc(a.failure ?? '无')}</td><td>${a.internalRetries}</td><td>${esc(kinds[a.partialKind] ?? '')}${a.hasPartial ? `<button type="button" class="menu_button" data-plan-partial="${esc(a.attemptId)}" title="只读查看已保存半截，建议规划失败时查。">看半截全文</button>` : ''}${a.repaired ? ' · 自动修过格式' : ''}</td></tr>`).join('');
-    return `<h3>最近 20 次规划尝试</h3><p><small>每行是一次逻辑尝试，内部重发另计次数；正文只在本机数据库里；有半截的可以点开看。</small></p><table><thead><tr><th>尝试 / 规划</th><th>入口</th><th>型号 / 思考</th><th>简报 / 输出字数</th><th>耗时</th><th>阶段 / 状态</th><th>结束原因</th><th>失败类别</th><th>内部重发</th><th>半截与格式</th></tr></thead><tbody>${rows || '<tr><td colspan="10">还没有记录</td></tr>'}</tbody></table>`;
+    const sources = { auto: '自动触发', 'auto-retry': '外援自动重试', 'behind-reroll': '幕后：重新规划', 'pending-reroll': '待处理：重新规划', 'next-node': '要下一个节点的规划', 'panel-repair': '修格式按钮', 'handoff-retry': '外援：再试一次', handoff: '外援交回', button: '旧按钮记录（来源未细分）', repair: '修格式', supplement: '补规划' };
+    const failures = { timeout: '上游超时', connection: '连接断了', empty: '模型没返回正文', filtered: '内容被上游拦了', overloaded: '上游过载', truncated: '写一半断了', bad_answer: '格式坏了', unavailable: '线路未配置或到了花费上限', late: '迟到作废' };
+    const kinds = { thinking: '想的吃光了', limit: '写到上限还没写完', format: '格式待修', cut: '写一半断了' };
+    const timings = a => (a.requestTimings ?? []).map((r, i) => {
+        const seconds = at => Number.isFinite(at) && Number.isFinite(r.sentAt) ? ((at - r.sentAt) / 1000).toFixed(1) + ' 秒' : '未收到';
+        const why = { complete: '正常读完', error: '出错', retry: '内部重发' };
+        return '<div><small>请求 ' + (i + 1) + ' · 发出 ' + esc(new Date(r.sentAt).toISOString()) + '<br>响应头 ' + seconds(r.headersAt) + ' · 首数据 ' + seconds(r.firstDataAt) + ' · 首字 ' + seconds(r.firstTextAt) + '<br>末数据 ' + seconds(r.lastDataAt) + ' · ' + (r.endReason === 'error' ? '断在 ' : '结束 ') + (r.endedAt === null ? '进行中' : seconds(r.endedAt)) + ' · 原因 ' + esc([r.errorCode ?? why[r.endReason] ?? '进行中', r.httpStatus ? 'HTTP ' + r.httpStatus : '', r.finishReason].filter(Boolean).join(' / ')) + ' · 收到 ' + (Number(r.receivedBytes) || 0) + ' 字节</small></div>';
+    }).join('') || '旧记录无时间点';
+    const rows = (planning?.attempts ?? []).map(a => `<tr><td>${esc(a.attemptId)}<br>规划 ${esc(String(a.planId))}</td><td>${esc(sources[a.source] ?? entries[a.entry] ?? a.entry)}</td><td>${esc(a.model ?? '未知')}<br>思考${a.thinks ? '开' : '关'}</td><td>${a.briefChars} / ${a.outputChars}</td><td>${(a.ms / 1000).toFixed(1)} 秒</td><td>${esc(a.stage)}<br>${esc(a.actionSource === 'panel-abandon' ? a.status + '（放弃按钮已放弃）' : a.status)}</td><td>${esc(a.finishReason ?? '未知')}</td><td>${esc(failures[a.failure] ?? a.failure ?? '无')}</td><td>${a.internalRetries}</td><td>${timings(a)}</td><td>${esc(kinds[a.partialKind] ?? '')}${a.hasPartial ? `<button type="button" class="menu_button" data-plan-partial="${esc(a.attemptId)}" title="只读查看已保存半截，建议规划失败时查。">看半截全文</button>` : ''}${a.repaired ? ' · 自动修过格式' : ''}</td></tr>`).join('');
+    return `<h3>最近 20 次规划尝试</h3><p><small>每行是一次逻辑尝试，内部重发另计次数；正文只在本机数据库里；有半截的可以点开看。</small></p><table><thead><tr><th>尝试 / 规划</th><th>入口</th><th>型号 / 思考</th><th>简报 / 输出字数</th><th>耗时</th><th>阶段 / 状态</th><th>结束原因</th><th>失败类别</th><th>内部重发</th><th>请求时间线</th><th>半截与格式</th></tr></thead><tbody>${rows || '<tr><td colspan="11">还没有记录</td></tr>'}</tbody></table>`;
+}
+export function planStatusText(ps, planning) {
+    if (!ps) return '';
+    if (ps.playReason) return ps.playReason + '，规划已停';
+    if (ps.provider === 'off') return '规划关着';
+    return [planning?.summary ?? '暂时没有规划', `口袋 ${ps.counts?.pocket ?? 0} 件`, `等着 ${ps.counts?.waiting ?? 0} 件`, planning?.message, planning?.repairAvailable ? planning.repairReason : ''].filter(Boolean).join(' · ');
+}
+export function planRevealHtml(p, esc) {
+    const ended = new Set(['void','expired','sunk','sunk_told','used']);
+    const current = (p.menu ?? []).filter(m => !ended.has(m.status)), old = (p.menu ?? []).filter(m => ended.has(m.status));
+    const statuses = { waiting: '还没放出来', pocket: '在口袋里', shown: '拿出来了', kept: '留下了', used: '用上了', sunk: '沉底了', sunk_told: '沉底了', void: '不成立了，撤了', expired: '没赶上，过期了' };
+    const row = m => `<div style="margin:.5em 0"><b>${esc(m.who)}「${esc(m.title)}」</b> <small>（第 ${esc(String(m.planNumber ?? '？'))} 份${m.currentPlan ? '，当前生效' : ''}；${esc(statuses[m.status] ?? m.status)}，第 ${m.ready_day + 1} 天起${m.after_title ? `，在「${esc(m.after_title)}」之后` : ''}）</small><br>露面：${esc(m.surface)}<br>应答：${esc(m.respond)}<br>沉底：${esc(m.sink ?? '')}${m.know ? `<br><small>知情：${esc(m.know)}</small>` : ''}</div>`;
+    const lines = [...new Set(current.map(m => m.line ?? ''))];
+    const rows = lines.map(l => `${l ? `<h4>${esc(l)}</h4>` : ''}${current.filter(m => (m.line ?? '') === l).map(row).join('')}`).join('');
+    const n = p.node, head = n ? [n.局面 && `<p><b>局面</b>：${esc(n.局面)}</p>`, `<p><b>这个节点</b>：${esc(n.目标 || p.goal || '')}${n.跨度 ? `（大概${esc(n.跨度)}）` : ''}</p>`, (n.算成 || n.落空) && `<p><small>算成：${esc(n.算成 || '—')}；落空：${esc(n.落空 || '—')}</small></p>`, n.线?.length && `<p>${n.线.map(l => `<b>${esc(l.名)}</b>：${esc(l.走向)}`).join('<br>')}</p>`, n.往后?.length && `<p><small>往后：${n.往后.map(esc).join('；')}</small></p>`].filter(Boolean).join('') : `<p>${esc(p.goal ?? '（还没有）')}</p>`;
+    return `<h3>幕后规划</h3><h4>当前</h4>${head}${rows || '<p>当前没有待用的件。</p>'}<details><summary>已结束的旧件（${old.length} 件）</summary>${old.map(row).join('')}</details>`;
 }
 function noticeStory(chatKey, notice, scope = '') {
     if (!notice?.id || !notice.text) return;
@@ -2045,13 +2068,13 @@ export function pendingTasks({ status = null, release = null, planStatus = null 
     if (status?.leaveUnjudged > 0) rows.push({ kind: 'leave', text: `有 ${status.leaveUnjudged} 人离场待判`, action: 'board-edit', label: '看场面 ›', note: '下一次同步时后台会再看一眼' });
     if (ex?.failing > 0 || ex?.skipped?.length) rows.push({ kind: 'extract', text: ex.failing > 0 ? '每条总结没成功' : `有 ${ex.skipped.length} 条总结被跳过`, action: ex.failing > 0 ? 'extract-retry' : 'extract-retry-skipped', label: '重记 ›' });
     const planning = status?.planning ?? planStatus?.planning;
-    if (planning?.failure || planStatus?.last?.status === 'failed') rows.push({ kind: 'plan', text: planning?.message || '规划没成功', action: 'plan-reroll', label: '重新规划 ›' });
+    if (planStatus?.last?.status !== 'ready' && (planning?.failure || planStatus?.last?.status === 'failed')) rows.push({ kind: 'plan', text: planning?.message || '规划没成功', action: 'plan-reroll', label: '重新规划 ›' });
     if (status?.handoffs > 0) rows.push({ kind: 'handoff', text: `有 ${status.handoffs} 份外援待处理`, action: 'handoffs-open', label: '处理外援 ›' });
     if (release?.release && (release.behind > 0 || release.stale)) rows.push({ kind: 'update', text: '有新版本待更新', action: 'update', label: '更新 ›' });
     return rows;
 }
 export function pendingTasksHtml(rows) {
-    return rows.map(r => `<div class="rpe-task"><span>${escapeHtml(r.text)}${r.note ? `<small>${escapeHtml(r.note)}</small>` : ''}</span><button type="button" class="menu_button" data-action="${escapeHtml(r.action)}" title="打开这项待办，建议看清原因再处理。">${escapeHtml(r.label)}</button></div>`).join('');
+    return rows.map(r => `<div class="rpe-task"><span>${escapeHtml(r.text)}${r.note ? `<small>${escapeHtml(r.note)}</small>` : ''}</span><button type="button" class="menu_button" data-action="${escapeHtml(r.action)}"${r.action === 'plan-reroll' ? ' data-source="pending-reroll"' : ''} title="打开这项待办，建议看清原因再处理。">${escapeHtml(r.label)}</button></div>`).join('');
 }
 export function sceneCardHtml(board, roster = [], date = null) {
     if (!board) return '<p>场面还没算好</p>';
@@ -2100,7 +2123,7 @@ export function panelPageHtml(page) {
     const card = (title, html) => `<section class="rpe-card"><h4>${title}</h4>${html}</section>`;
     if (page === 'now') return `<div data-role="start-guide"></div><div data-joined>${card('此刻的场面', '<div data-role="board-row"></div><div class="rpe-grid">' + button('board-edit', '纠正场面') + button('camera-now', '旁白来一段') + '</div>')}
         <section class="rpe-card" data-role="tasks-card" hidden><h4>待处理</h4><div data-role="tasks"></div></section>
-        ${card('幕后', '<p data-role="plan"></p><small data-role="secret-hint"></small><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + '<button class="menu_button" type="button" data-action="plan-repair" hidden title="只修已保存规划的格式，建议先看失败原因。">修格式</button>' + button('plan-reveal', '看幕后（剧透）') + '</div>')}
+        ${card('幕后', '<p data-role="plan"></p><small data-role="secret-hint"></small><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + '<button class="menu_button" type="button" data-action="plan-repair" hidden title="只修已保存规划的格式，建议先看失败原因。">修格式</button><button class="menu_button" type="button" data-action="plan-abandon" hidden title="放弃挂着的规划，继续用已生效那份。">放弃这次重抽</button>' + button('plan-reveal', '看幕后（剧透）') + '</div>')}
         <details class="rpe-card" data-role="handoff-details"><summary>外援</summary><small>把未完成任务交给其他AI，建议按题目交回。</small><div data-role="handoffs" hidden></div><div data-role="extract-alert"></div></details></div>`;
     if (page === 'story') return `<div data-joined><div data-role="relations-draft"></div>${card('这一局', '<p><small>有局预设：套上就行。没有：用“填写表单”编辑，或“填写大纲”让后台拆，核对确认后可保存、导出为局预设。开局包是作者用 skill 生成的整套卡、书和设定，点“导入开局包”会新建群。</small></p><div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
         <div class="rpe-grid">${button('setup', '开局单')}${button('cast', '名册')}${button('relations', '关系表')}${button('presets', '局预设')}${button('opening-pack', '导入开局包')}</div></div>`;
@@ -2181,9 +2204,9 @@ function mountPanel() {
         const planning = st?.planning ?? ps?.planning;
         $('[data-action="plan-repair"]').hidden = !planning?.repairAvailable;
         $('[data-action="plan-repair"]').disabled = !!planning?.running || !!ps?.playReason;
-        $('[data-role="plan"]').textContent = !state.chatKey || !ps ? '' : ps.playReason ? ps.playReason + '，规划已停' : ps.provider === 'off' ? '规划关着'
-            : (planning?.repairAvailable ? planning.repairReason : ps.awaitingPersona ? '等你确认人设' : planning?.running || ps.last?.status === 'requested' ? '在规划' : planning?.failure || ps.last?.status === 'failed' ? '没成功（' + (planning?.message || '上次没写成') + '）' : ps.last?.status === 'ready' ? '规划好了' : '还没有规划')
-              + ' · 口袋 ' + (ps.counts?.pocket ?? 0) + ' 件 · 等着 ' + (ps.counts?.waiting ?? 0) + ' 件';
+        $('[data-action="plan-abandon"]').hidden = !planning?.canAbandon;
+        $('[data-action="plan-abandon"]').textContent = planning?.readyId ? '放弃这次重抽' : '放弃这次规划';
+        $('[data-role="plan"]').textContent = !state.chatKey ? '' : planStatusText(ps, planning);
         $('[data-opt="windowConnected"]').checked = !!state.chatKey && st?.enabled !== false;
         $('[data-opt="windowConnected"]').disabled = !s.enabled;
         const daily = $('[data-opt="dailyBudget"]');
@@ -2449,8 +2472,17 @@ function mountPanel() {
                 } });
             }
             if (action === 'update') await openUpdate();
-            if (action === 'plan-repair') { await api('plan-repair', { chatKey: state.chatKey }); refreshPlanStatus(); }
-            if (action === 'plan-request') { state.planStatus = await api('plan', { chatKey: state.chatKey, request: true }); refreshPlanStatus(); }
+            if (action === 'plan-repair') { await api('plan-repair', { chatKey: state.chatKey, source: 'panel-repair' }); refreshPlanStatus(); }
+            if (action === 'plan-request') { state.planStatus = await api('plan', { chatKey: state.chatKey, request: true, source: 'next-node' }); refreshPlanStatus(); }
+            if (action === 'plan-abandon') {
+                const chatKey = state.chatKey, planning = state.status?.planning ?? state.planStatus?.planning;
+                if (!planning?.canAbandon) return;
+                const text = planning.readyNumber ? `放弃以后照用第 ${planning.readyNumber} 份，挂着的外援也撤掉。` : '放弃以后暂时没有规划，挂着的外援也撤掉。';
+                const answer = await ctx().callGenericPopup(text, ctx().POPUP_TYPE.CONFIRM);
+                if (answer !== ctx().POPUP_RESULT.AFFIRMATIVE || state.chatKey !== chatKey) return;
+                state.planStatus = await api('plan', { chatKey, abandon: true, planId: planning.planId, source: 'panel-abandon' });
+                await refreshHandoffs(); refreshPlanStatus();
+            }
             if (action === 'plan-reroll') {
                 const c = ctx(), chatKey = state.chatKey;
                 const current = await api('status', { chatKey });
@@ -2458,7 +2490,7 @@ function mountPanel() {
                 if (current.planning?.running) { globalThis.toastr?.info('正在重新规划'); return; }
                 const answer = await c.callGenericPopup('重抽这一份规划？抽成功以前，现在这份照常用。', c.POPUP_TYPE.CONFIRM);
                 if (answer !== c.POPUP_RESULT.AFFIRMATIVE || state.chatKey !== chatKey) return;
-                const result = await api('plan', { chatKey, reroll: true });
+                const result = await api('plan', { chatKey, reroll: true, source: target.dataset.source === 'pending-reroll' ? 'pending-reroll' : 'behind-reroll' });
                 if (state.chatKey !== chatKey) return;
                 state.planStatus = result;
                 const status = await api('status', { chatKey });
@@ -2470,20 +2502,7 @@ function mountPanel() {
             if (action === 'plan-reveal') {
                 if (!(await ctx().callGenericPopup('幕后规划会剧透：接下来排着什么事、谁会来。确定要看？', ctx().POPUP_TYPE.CONFIRM))) return;
                 const p = await api('plan', { chatKey: state.chatKey, reveal: true });
-                const STATUS = { waiting: '还没放出来', pocket: '在口袋里', shown: '拿出来了', used: '用上了', sunk: '沉底了', sunk_told: '沉底了', void: '不成立了，撤了', expired: '没赶上，过期了' };
-                const row = m => `<div style="margin:.5em 0"><b>${escapeHtml(m.who)}「${escapeHtml(m.title)}」</b> <small>（${STATUS[m.status] ?? escapeHtml(m.status)}，第 ${m.ready_day + 1} 天起${m.after_title ? `，在「${escapeHtml(m.after_title)}」之后` : ''}）</small><br>露面：${escapeHtml(m.surface)}<br>应答：${escapeHtml(m.respond)}<br>沉底：${escapeHtml(m.sink ?? '')}${m.know ? `<br><small>知情：${escapeHtml(m.know)}</small>` : ''}</div>`;
-                // 按线分组（节点规划有"线"；老的一张菜单没有，就不分）
-                const lines = [...new Set((p.menu ?? []).map(m => m.line ?? ''))];
-                const rows = lines.map(l => `${l ? `<h4 style="margin:.8em 0 .2em">${escapeHtml(l)}</h4>` : ''}${(p.menu ?? []).filter(m => (m.line ?? '') === l).map(row).join('')}`).join('');
-                const n = p.node;
-                const head = n ? [
-                    n.局面 && `<p><b>局面</b>：${escapeHtml(n.局面)}</p>`,
-                    `<p><b>这个节点</b>：${escapeHtml(n.目标 || p.goal || '')}${n.跨度 ? `（大概${escapeHtml(n.跨度)}）` : ''}</p>`,
-                    (n.算成 || n.落空) && `<p><small>算成：${escapeHtml(n.算成 || '—')}；落空：${escapeHtml(n.落空 || '—')}</small></p>`,
-                    n.线?.length && `<p>${n.线.map(l => `<b>${escapeHtml(l.名)}</b>：${escapeHtml(l.走向)}`).join('<br>')}</p>`,
-                    n.往后?.length && `<p><small>往后：${n.往后.map(escapeHtml).join('；')}</small></p>`,
-                ].filter(Boolean).join('') : `<p>${escapeHtml(p.goal ?? '（还没有）')}</p>`;
-                await ctx().callGenericPopup(`<h3>幕后规划</h3>${head}${rows}`, ctx().POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
+                await ctx().callGenericPopup(planRevealHtml(p, escapeHtml), ctx().POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
             }
             if (action === 'toggle' && state.status) {
                 await api('enabled', { chatKey: state.chatKey, enabled: !state.status.enabled });

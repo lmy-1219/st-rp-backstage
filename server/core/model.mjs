@@ -24,6 +24,16 @@ const hitLimit = reason => /^(length|max_tokens)$/i.test(String(reason ?? ''));
 // 原生接口会把思考摘要一段段转过来（最长 4 秒一段），连接就一直活着。摘要只当心跳，读到就丢，不存、不给谁看（用户只要结果）。
 // 中转不认原生接口（404／405）就记下这个地址，退回兼容接口。
 const noNative = new Set();
+const errorCodes = new Set(['UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT','UND_ERR_CONNECT_TIMEOUT','UND_ERR_SOCKET','UND_ERR_ABORTED','ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','EPIPE','ABORT_ERR','ERR_STREAM_PREMATURE_CLOSE']);
+const finishReasons = new Set(['stop','length','max_tokens','end_turn','stop_sequence','tool_calls','function_call','content_filter','refusal','pause_turn','model_context_window_exceeded']);
+const causeCode = error => { for (let n = 0; error && n < 8; n++, error = error.cause) if (errorCodes.has(error.code)) return error.code; return null; };
+async function readBody(response, observe) {
+    const reader = response.body?.getReader(), decoder = new TextDecoder();
+    if (!reader) return '';
+    let text = '';
+    for (;;) { const { value, done } = await reader.read(); if (done) break; observe({ bytes: value.byteLength }); text += decoder.decode(value, { stream: true }); }
+    return text + decoder.decode();
+}
 
 // maxCap：写到上限放大重来时至多放到多少（默认 MAX_OUT；想得多、写得长的活可以给更大的，按实际用量计费）。
 // heartbeat：走原生接口时要不要思考摘要当心跳（默认要；关了想久了会被中转掐断）。
@@ -59,7 +69,7 @@ export function createModelClient({ baseUrl, apiKey, model, temperature = null, 
             const gave = new AbortController();
             const first = setTimeout(() => gave.abort(new Error('model_no_response')), idleMs);
             try {
-                return await fetch(native ? `${baseUrl}/messages` : `${baseUrl}/chat/completions`, {
+                const response = await fetch(native ? `${baseUrl}/messages` : `${baseUrl}/chat/completions`, {
                     method: 'POST',
                     headers: native
                         ? { 'content-type': 'application/json', 'x-api-key': apiKey, authorization: `Bearer ${apiKey}`, 'anthropic-version': '2023-06-01' }
@@ -67,8 +77,11 @@ export function createModelClient({ baseUrl, apiKey, model, temperature = null, 
                     body: JSON.stringify(body),
                     signal: AbortSignal.any([AbortSignal.timeout(total), gave.signal]),
                 });
+                observe({ headers: true, httpStatus: response.status });
+                return response;
             } catch (error) {
-                throw error.cause?.code ? new Error(`${error.message} (${error.cause.code})`) : error;
+                observe({ requestEnd: 'error', errorCode: causeCode(error) });
+                throw error.cause?.code ? new Error(`${error.message} (${error.cause.code})`, { cause: error }) : error;
             } finally {
                 clearTimeout(first);
             }
@@ -76,16 +89,17 @@ export function createModelClient({ baseUrl, apiKey, model, temperature = null, 
         let response;
         try { response = await send(); } catch (error) { if (!/model_no_response|fetch failed|ECONN|socket/i.test(String(error?.message))) throw error; response = await send(); }
         // 中转偶尔回"暂时不可用"（503 之类，实测隔几秒就好）：等 3 秒再要一次
-        if ([502, 503, 504, 529].includes(response.status)) { await response.text().catch(() => {}); await new Promise(r => setTimeout(r, RETRY_WAIT_MS.value)); response = await send(); }
+        if ([502, 503, 504, 529].includes(response.status)) { await readBody(response, observe).catch(error => observe({ requestEnd: 'error', errorCode: causeCode(error) })); observe({ requestEnd: 'retry' }); await new Promise(r => setTimeout(r, RETRY_WAIT_MS.value)); response = await send(); }
         if (native) {
             if ([404, 405].includes(response.status)) { noNative.add(baseUrl); return once(max, { system, user, messages }, observe); }   // 中转没有原生接口：退回兼容接口
-            if (!response.ok) throw new Error(`model_http_${response.status}: ${(await response.text()).slice(0, 300)}`);
+            if (!response.ok) throw new Error(`model_http_${response.status}: ${(await readBody(response, observe)).slice(0, 300)}`);
             return readNative(response, idleMs, firstIdle, observe);
         }
         // 要了流式、对方却回了一整块 JSON（有的中转不认 stream）：照整块读
         if (stream && response.ok && !/json/i.test(response.headers?.get?.('content-type') ?? '')) return readStream(response, idleMs, firstIdle, observe);
         observe({ stage: '流式中' });
-        const text = await response.text();
+        // 整块 JSON 也按收到的字节记时；不保留原始块或思考内容。
+        const text = await readBody(response, observe);
         if (!response.ok) throw new Error(`model_http_${response.status}: ${text.slice(0, 300)}`);
         let data;
         try { data = JSON.parse(text); } catch { throw new Error('model_bad_json'); }
@@ -107,14 +121,33 @@ export function createModelClient({ baseUrl, apiKey, model, temperature = null, 
             let max = firstMax, recut = 0;
             let sends = 0;
             const telemetry = { stage: '发出', outputChars: 0, finishReason: null, internalRetries: 0 };
-            const observed = () => typeof onMeta === 'function' ? { telemetry: { ...telemetry } } : {};
+            const timings = [];
+            const snapshot = () => ({ ...telemetry, requestTimings: timings.map(t => ({ ...t })) });
+            const observed = () => typeof onMeta === 'function' ? { telemetry: snapshot() } : {};
             const observe = change => {
-                if (change.send) telemetry.internalRetries = Math.max(0, ++sends - 1);
+                const at = Date.now();
+                if (change.send) {
+                    const previous = timings.at(-1);
+                    if (previous && previous.endedAt === null) { previous.endedAt = at; previous.endReason = 'retry'; }
+                    timings.push({ sentAt: at, headersAt: null, firstDataAt: null, firstTextAt: null, lastDataAt: null, endedAt: null, endReason: null, errorCode: null, receivedBytes: 0, httpStatus: null, finishReason: null });
+                    telemetry.internalRetries = Math.max(0, ++sends - 1);
+                }
+                const timing = timings.at(-1);
+                if (timing) {
+                    if (change.headers) { timing.headersAt = at; timing.httpStatus = change.httpStatus; }
+                    if (change.bytes > 0) { timing.firstDataAt ??= at; timing.lastDataAt = at; timing.receivedBytes += change.bytes; }
+                    if (change.outputChars > 0) timing.firstTextAt ??= at;
+                    if (Object.hasOwn(change, 'finishReason')) timing.finishReason = finishReasons.has(change.finishReason) ? change.finishReason : null;
+                    if (change.requestEnd && timing.endedAt === null) {
+                        timing.endedAt = at; timing.endReason = change.requestEnd;
+                        timing.errorCode = change.errorCode ?? null;
+                    }
+                }
                 if (typeof change.stage === 'string') telemetry.stage = change.stage;
                 if (Number.isFinite(change.outputChars)) telemetry.outputChars = change.outputChars;
                 if (Object.hasOwn(change, 'finishReason')) telemetry.finishReason = typeof change.finishReason === 'string' ? change.finishReason.slice(0, 80) : null;
                 // 只出元数据，观测器出错不能改变原请求、重发或超时行为。
-                try { onMeta?.({ ...telemetry }); } catch {}
+                try { onMeta?.(snapshot()); } catch {}
             };
             const used = { input: null, output: null };
             const add = u => { for (const k of ['input', 'output']) if (Number.isFinite(u?.[k])) used[k] = (used[k] ?? 0) + u[k]; };
@@ -122,11 +155,13 @@ export function createModelClient({ baseUrl, apiKey, model, temperature = null, 
                 let r;
                 try { r = await once(max, prompt, observe); }
                 catch (error) {
+                    observe({ requestEnd: 'error', errorCode: causeCode(error) });
                     add(error.usage);
                     if (/model_stream_cut/.test(error.message) && recut++ < 1) continue;
                     if (/model_stream_cut/.test(error.message)) giveUp(error.message);
                     throw Object.assign(error, { usage: used, ...observed() });
                 }
+                observe({ requestEnd: 'complete' });
                 add(r.usage);
                 // 想的部分把输出上限几乎吃光、正文只写了几个字（10/11 实测 Opus 5.5 高档规划：48000 里 47990 在想，正文五个字，结束原因却报 end_turn）：
                 // 也当写到上限，放大重来；放到顶还这样就按截断算，不拿那几个字当完整的用
@@ -181,6 +216,7 @@ async function readStream(response, idleMs, firstIdle = idleMs, observe = () => 
         for (;;) {
             const { value, done } = await next();
             if (done) break;
+            observe({ bytes: value.byteLength });
             buffer += decoder.decode(value, { stream: true });
             let i;
             while ((i = buffer.indexOf('\n')) >= 0) { take(buffer.slice(0, i).trim()); buffer = buffer.slice(i + 1); }
@@ -190,7 +226,7 @@ async function readStream(response, idleMs, firstIdle = idleMs, observe = () => 
         reader.cancel().catch(() => {});
         observe({ stage: '流中断', outputChars: text.length, finishReason });
         // 断在半路时说清收到了多少（分得清是一直没开始写，还是写到一半被掐）
-        throw Object.assign(new Error(`${error.message}（已收 ${text.length} 字）`), { usage: spent() });
+        throw Object.assign(new Error(`${error.message}（已收 ${text.length} 字）`, { cause: error }), { usage: spent() });
     }
     // 想的部分把输出上限吃光了、一个正文字还没写（实测 deepseek-flash 去复读，上限 1500 时次次如此）：当成写到上限，交给上面放大重来
     if (saw && !text && hitLimit(finishReason)) return { text: '', finishReason, servedModel, usage: spent() };
@@ -227,6 +263,7 @@ async function readNative(response, idleMs, firstIdle = idleMs, observe = () => 
         for (;;) {
             const { value, done } = await next();
             if (done) break;
+            observe({ bytes: value.byteLength });
             buffer += decoder.decode(value, { stream: true });
             let i;
             while ((i = buffer.indexOf('\n')) >= 0) { take(buffer.slice(0, i).trim()); buffer = buffer.slice(i + 1); }
@@ -235,7 +272,7 @@ async function readNative(response, idleMs, firstIdle = idleMs, observe = () => 
     } catch (error) {
         reader.cancel().catch(() => {});
         observe({ stage: '流中断', outputChars: text.length, finishReason });
-        throw Object.assign(new Error(`${error.message}（已收 ${text.length} 字）`), { usage: spent() });
+        throw Object.assign(new Error(`${error.message}（已收 ${text.length} 字）`, { cause: error }), { usage: spent() });
     }
     if (failed) { observe({ stage: '流中断', outputChars: text.length, finishReason }); throw Object.assign(new Error(`model_stream_error: ${String(failed).slice(0, 200)}（已收 ${text.length} 字）`), { usage: spent() }); }
     if (finishReason === 'refusal') throw Object.assign(new Error('model_refusal'), { usage: spent() });

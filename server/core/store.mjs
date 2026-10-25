@@ -10,13 +10,33 @@ import { liveAnchors } from './landing.mjs';
 export const RETIRES_POCKET = new Set(['turn', 'broken', 'shift']);
 // 菜单日志里的"留下"（章程 H3）：新规划的规划者答了留的旧件——不改它在哪一步，只让它换了规划也接着排、接着在口袋里（menuOf）
 export const KEPT = 'kept';
+const PLAN_SOURCES = new Set(['auto','auto-retry','behind-reroll','pending-reroll','next-node','panel-repair','panel-abandon','handoff-retry','handoff','supplement','button','repair']);
+const safePlanSource = value => PLAN_SOURCES.has(value) ? value : null;
+// 请求诊断只收时间、长度与固定原因；任何正文、地址或错误原文都不进这格。
+function safePlanTimings(value) {
+    if (!Array.isArray(value)) return [];
+    const codes = new Set(['UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT','UND_ERR_CONNECT_TIMEOUT','UND_ERR_SOCKET','UND_ERR_ABORTED','ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','EPIPE','ABORT_ERR','ERR_STREAM_PREMATURE_CLOSE']);
+    return value.slice(0, 128).filter(t => t && Number.isSafeInteger(t.sentAt) && t.sentAt >= 0).map(t => {
+        const row = {};
+        for (const k of ['sentAt','headersAt','firstDataAt','firstTextAt','lastDataAt','endedAt']) row[k] = Number.isSafeInteger(t[k]) && t[k] >= t.sentAt ? t[k] : null;
+        row.receivedBytes = Number.isSafeInteger(t.receivedBytes) && t.receivedBytes >= 0 ? t.receivedBytes : 0;
+        row.endReason = ['complete','error','retry'].includes(t.endReason) ? t.endReason : null;
+        row.errorCode = codes.has(t.errorCode) ? t.errorCode : null;
+        row.httpStatus = Number.isInteger(t.httpStatus) && t.httpStatus >= 100 && t.httpStatus <= 599 ? t.httpStatus : null;
+        row.finishReason = ['stop','length','max_tokens','end_turn','stop_sequence','tool_calls','function_call','content_filter','refusal','pause_turn','model_context_window_exceeded'].includes(t.finishReason) ? t.finishReason : null;
+        return row;
+    });
+}
 
 export function planFailure(error) {
     if (error?.planRepair) return 'bad_answer';
     const text = String(error?.message ?? error ?? '');
     if (/plan_(?:withdrawn|superseded|late)/.test(text)) return 'late';
-    if (/model_truncated/.test(text)) return 'truncated';
+    if (/content_filter|refusal/.test(text)) return 'filtered';
+    if (/model_http_(?:502|503|504|529)/.test(text)) return 'overloaded';
+    if (/model_truncated|model_stream_cut/.test(text)) return 'truncated';
     if (/timeout|超时|model_no_response/i.test(text)) return 'timeout';
+    if (/no_content/.test(text)) return 'empty';
     if (/bad_json|bad_structure|no_content|refusal|一件都没过|一条都没过/.test(text)) return 'bad_answer';
     if (/budget|no_api/.test(text)) return 'unavailable';
     return 'connection';
@@ -176,9 +196,10 @@ export function openStore(file) {
     const db = new DatabaseSync(file);
     db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma busy_timeout = 3000;');
     db.exec(SCHEMA);
-    for (const column of ['partial text', 'continuation text', 'partial_kind text', 'repairable integer not null default 0', 'repair_error text', 'repaired integer not null default 0']) {
+    for (const column of ['partial text', 'continuation text', 'partial_kind text', 'repairable integer not null default 0', 'repair_error text', 'repaired integer not null default 0', 'source text']) {
         try { db.exec(`alter table plan_attempts add column ${column}`); } catch {}
     }
+    try { db.exec("alter table plan_attempts add column request_timings text not null default '[]'"); } catch {}
     try { db.exec('alter table slots add column ids text'); } catch {}
     try { db.exec('alter table chat_seq add column mark text'); } catch {}   // 用户在这条消息上点的剧情日期：day＝从这条起算新的一天｜same＝这里没有跨天｜d:N＝这条是第 N 天（存在消息的附加字段里，同步时带过来）
     try { db.exec('alter table slots add column carry text'); } catch {}   // 老地方：余波原来跟着钉住的格子存，现在搬到 carries（下面）
@@ -221,6 +242,7 @@ export function openStore(file) {
     // 六格（章程 F1）：用意、触发（JSON）、时效（JSON）、前提、接了会怎样、没接会怎样；菜单项上读作 purpose、trigger、ttl、premise、ifTaken、ifSunk
     for (const col of ['purpose', 'trig', 'ttl', 'premise', 'if_taken', 'if_sunk', 'category', 'close_text', 'twist', 'lead', 'intimate']) { try { db.exec(`alter table menu add column ${col} text`); } catch {} }   // intimate：亲密线四格 JSON，旧件为 null
     try { db.exec('alter table menu_log add column why text'); } catch {}   // 这一步为什么（过期了"没赶上：……"、前提不成立、被新规划替换）
+    try { db.exec('alter table menu_log add column by_plan integer'); } catch {}
     // 每条消息当最后一条时的小快照（rewind.mjs：删回去以后拿重算的和它比，对不上的亮出来）
     db.exec('create table if not exists snapshots(chat_key text not null, pos integer not null, fp text not null, data text not null, at text not null, primary key(chat_key, fp))');   // 交给某人那一格里的一步（递给他、用上了、顺带提了）：等他那条回复（方案 删消息等于没发生过）
     try { db.exec('alter table messages add column lore text'); } catch {}
@@ -748,20 +770,40 @@ export function openStore(file) {
         return id;
     }
     function failPlan(id, error) { q("update plans set status = 'failed', error = ?, ready_at = ? where id = ?").run(String(error).slice(0, 1000), now(), id); }
+    // 按局编号，包含放弃/删稿已撤的规划；别把别局占用的数据库 ID 当成第几份。
+    function planNumber(id) {
+        if (!id) return null;
+        return q(`select count(*) n from plans p join chats c on c.key=p.chat_key where c.story_id=(select c.story_id from plans p join chats c on c.key=p.chat_key where p.id=?) and p.id<=?`).get(id, id).n || null;
+    }
+    function setPlanSource(id, source) { setMeta(`plan_source:${id}`, safePlanSource(source)); }
+    function abandonPlan(chatKey, id, source = 'panel-abandon') {
+        const plan = lastPlan(chatKey);
+        if (!plan || plan.id !== id || plan.status !== 'requested') throw Object.assign(new Error('这份规划已经不再挂着，请刷新后查看'), { status: 409 });
+        if (activePlanAttempt(chatKey, id)) throw Object.assign(new Error('正在规划，不能放弃'), { status: 409 });
+        tx(() => {
+            q("update plans set status='withdrawn', error='用户放弃', ready_at=? where id=?").run(now(), id);
+            q('update plan_attempts set repairable=0 where plan_id=?').run(id);
+            const wait = fromJson(getMeta(`plan_persona_wait:${chatKey}`));
+            if (wait?.id === id) setMeta(`plan_persona_wait:${chatKey}`, null);
+            setMeta(`plan_abandon:${id}`, 'panel-abandon');
+            log(chatKey, 'plan_abandoned', { planId: id, source: safePlanSource(source) ?? 'panel-abandon' });
+        });
+        return true;
+    }
     // 一个节点一次只跑一个逻辑尝试，备料也算进行中；长时间等外援不占调用登记。
     const planFlights = new Map();
     const nodeOf = id => { let next = Number(id), seen = new Set(); while (!seen.has(next)) { seen.add(next); const parent = Number(getMeta(`replan_of:${next}`)); if (!parent) break; next = parent; } return next; };
     const flightKey = (chatKey, id) => `${chatKey}:${nodeOf(id)}`;
     function activePlanAttempt(chatKey, id) { return planFlights.get(flightKey(chatKey, id)) ?? null; }
-    function beginPlanAttempt(planId, { entry = 'auto', model = null, thinks = false, briefChars = 0, supplement = false } = {}) {
+    function beginPlanAttempt(planId, { entry = 'auto', source = null, model = null, thinks = false, briefChars = 0, supplement = false } = {}) {
         const plan = planById(planId);
         if (!plan || !stillWanted(plan) || (supplement ? plan.status !== 'ready' || lastReadyPlan(plan.chat_key)?.id !== plan.id : plan.status !== 'requested' || lastPlan(plan.chat_key)?.id !== plan.id)) return null;
         const key = flightKey(plan.chat_key, plan.id);
         if (planFlights.has(key)) return null;
         const id = randomUUID();
         q('update plan_attempts set repairable = 0 where plan_id = ?').run(plan.id);
-        q("insert into plan_attempts(id,plan_id,node_id,chat_key,entry,model,thinks,brief_chars,stage,status,started_at) values (?,?,?,?,?,?,?,?,'发出','running',?)")
-            .run(id, plan.id, nodeOf(plan.id), plan.chat_key, ['auto','button','supplement','handoff','repair'].includes(entry) ? entry : 'auto', typeof model === 'string' ? model.slice(0, 200) : null, thinks ? 1 : 0, Math.max(0, Number(briefChars) || 0), now());
+        q("insert into plan_attempts(id,plan_id,node_id,chat_key,entry,source,model,thinks,brief_chars,stage,status,started_at) values (?,?,?,?,?,?,?,?,?,'发出','running',?)")
+            .run(id, plan.id, nodeOf(plan.id), plan.chat_key, ['auto','button','supplement','handoff','repair'].includes(entry) ? entry : 'auto', safePlanSource(source) ?? (['handoff','repair','supplement'].includes(entry) ? entry : safePlanSource(getMeta(`plan_source:${plan.id}`))) ?? safePlanSource(entry) ?? 'auto', typeof model === 'string' ? model.slice(0, 200) : null, thinks ? 1 : 0, Math.max(0, Number(briefChars) || 0), now());
         planFlights.set(key, { id, planId: plan.id, supplement, started: Date.now() });
         return id;
     }
@@ -774,6 +816,7 @@ export function openStore(file) {
     function updatePlanAttempt(id, meta = {}) {
         const columns = { stage: 'stage', outputChars: 'output_chars', internalRetries: 'internal_retries', finishReason: 'finish_reason', briefChars: 'brief_chars', repairable: 'repairable', repairError: 'repair_error', repaired: 'repaired' };
         const values = [];
+        if (Array.isArray(meta.requestTimings)) values.push(['request_timings', JSON.stringify(safePlanTimings(meta.requestTimings))]);
         for (const [key, col] of Object.entries(columns)) if (Object.hasOwn(meta, key)) {
             let value = meta[key];
             if (['outputChars','internalRetries','briefChars'].includes(key)) { if (!Number.isFinite(value) || value < 0) continue; value = Math.floor(value); }
@@ -785,10 +828,14 @@ export function openStore(file) {
         }
         if (values.length) q(`update plan_attempts set ${values.map(([k]) => `${k} = ?`).join(',')} where id = ? and status = 'running'`).run(...values.map(([,v]) => v), id);
     }
+    function planAttemptTimings(id) {
+        const raw = q('select request_timings from plan_attempts where id = ?').get(id)?.request_timings;
+        try { return safePlanTimings(JSON.parse(raw ?? '[]')); } catch { return []; }
+    }
     // 正文只留数据库，不随状态列表发送；两段合计至多二十万字。
     function savePlanPartial(id, { partial = '', continuation = '', kind = 'limit' } = {}) {
         const first = String(partial).slice(0, 200000), rest = String(continuation).slice(0, 200000 - first.length);
-        q("update plan_attempts set partial = ?, continuation = ?, partial_kind = ? where id = ? and status = 'running'").run(first, rest, ['thinking','limit','format'].includes(kind) ? kind : 'limit', id);
+        q("update plan_attempts set partial = ?, continuation = ?, partial_kind = ? where id = ? and status = 'running'").run(first, rest, ['thinking','limit','format','cut'].includes(kind) ? kind : 'limit', id);
     }
     function planAttemptText(chatKey, id) {
         const row = q('select * from plan_attempts where chat_key = ? and id = ?').get(chatKey, id);
@@ -805,25 +852,36 @@ export function openStore(file) {
         const row = q('select * from plan_attempts where id = ?').get(id);
         if (!row || row.status !== 'running') return;
         const key = flightKey(row.chat_key, row.plan_id), flight = planFlights.get(key);
-        const safeFailure = ['timeout','connection','truncated','bad_answer','unavailable','late'].includes(failure) ? failure : null;
+        const safeFailure = ['timeout','connection','truncated','bad_answer','empty','filtered','overloaded','unavailable','late'].includes(failure) ? failure : null;
         q('update plan_attempts set status = ?, failure = ?, finished_at = ?, elapsed_ms = ? where id = ?').run(['done','failed','late','queued'].includes(status) ? status : 'failed', safeFailure, now(), Math.max(0, Date.now() - (flight?.started ?? Date.parse(row.started_at))), id);
         if (flight?.id === id) planFlights.delete(key);
         if (status === 'late') log(row.chat_key, 'plan_late', { attemptId: id, planId: row.plan_id, why: '迟到作废' });
     }
     function planAttempts(chatKey, limit = 20) {
         return q('select * from plan_attempts where chat_key = ? order by rowid desc limit ?').all(chatKey, Math.min(20, Math.max(1, limit)))
-            .map(r => ({ attemptId: r.id, planId: r.plan_id, nodeId: r.node_id, entry: r.entry, model: r.model, thinks: !!r.thinks, briefChars: r.brief_chars, outputChars: r.output_chars, internalRetries: r.internal_retries, stage: r.stage, finishReason: r.finish_reason, failure: r.failure, status: r.status, startedAt: r.started_at, finishedAt: r.finished_at, ms: r.elapsed_ms ?? Math.max(0, Date.now() - Date.parse(r.started_at)), hasPartial: !!(r.partial || r.continuation), partialKind: r.partial_kind, repaired: !!r.repaired }));
+            .map(r => ({ attemptId: r.id, planId: r.plan_id, nodeId: r.node_id, entry: r.entry, actionSource: getMeta('plan_abandon:'+r.plan_id) === 'panel-abandon' ? 'panel-abandon' : null, source: safePlanSource(r.source), model: r.model, thinks: !!r.thinks, briefChars: r.brief_chars, outputChars: r.output_chars, internalRetries: r.internal_retries, stage: r.stage, finishReason: r.finish_reason, failure: r.failure, status: r.status, startedAt: r.started_at, finishedAt: r.finished_at, ms: r.elapsed_ms ?? Math.max(0, Date.now() - Date.parse(r.started_at)), hasPartial: !!(r.partial || r.continuation), partialKind: r.partial_kind, repaired: !!r.repaired, requestTimings: planAttemptTimings(r.id) }));
     }
     function planningState(chatKey) {
         const plan = lastPlan(chatKey), attempts = planAttempts(chatKey), latest = attempts.find(a => a.planId === plan?.id);
         const running = plan && activePlanAttempt(chatKey, plan.id);
         const external = !!plan && plan.status === 'requested' && !!pendingHandoff('plan', String(plan.id));
-        const failed = attempts.find(a => a.planId === plan?.id && a.status === 'failed');
-        const failure = latest?.status === 'done' ? null : failed?.failure ?? null;
-        const labels = { timeout: '上游超时', connection: '连接断了', bad_answer: '答坏了', truncated: '被截断', unavailable: '线路未配置或到了花费上限' };
-        const message = plan?.status === 'ready' && !running && !failure ? '' : [failure && `规划没成功（${labels[failure] ?? '连接断了'}），后台会再试；也可以点“重新规划”`, external && '规划交给外援了', running && '正在重新规划'].filter(Boolean).join('。');
+        const pending = plan?.status === 'requested', ready = lastReadyPlan(chatKey), readyNumber = planNumber(ready?.id);
+        const failure = (pending || plan?.status === 'failed') && latest?.status === 'failed' ? latest.failure : null;
+        const labels = { timeout: '上游超时', connection: '连接断了', bad_answer: '格式坏了', empty: '模型没返回正文', filtered: '内容被上游拦了', overloaded: '上游过载', truncated: '写一半断了', unavailable: '线路未配置或到了花费上限' };
+        const autoRetry = getMeta('handoff_autoretry') === '1';
+        const persona = pending && fromJson(getMeta(`plan_persona_wait:${chatKey}`))?.id === plan.id;
+        const activeText = readyNumber ? `第 ${readyNumber} 份生效中` : '暂时没有规划';
+        const samePlan = attempts.filter(a => a.planId === plan?.id), recent = [];
+        for (const a of samePlan) {
+            if (a.status !== 'failed' || !['empty','truncated','timeout','connection'].includes(a.failure) || a.ms < 60000) break;
+            recent.push(a); if (recent.length === 3) break;
+        }
+        const repeated = recent.length >= 3 && Math.max(...recent.map(a => a.ms)) - Math.min(...recent.map(a => a.ms)) <= 10000;
+        const timingHint = failure && repeated ? `连着几次都在约 ${(recent.reduce((n,a) => n+a.ms,0)/recent.length/60000).toFixed(1)} 分钟断开，可能是中转限时，换一条线或调低思考档试试。` : '';
+        const message = [failure && `规划没成功（${labels[failure] ?? '连接断了'}）；${external && autoRetry ? '后台会再试' : '可以点“再试一次”或交外援'}`, external && '规划交给外援了', running && '正在重新规划', timingHint].filter(Boolean).join('。');
+        const summary = running ? '在规划……' : pending ? `${activeText}；${persona ? '等你确认人设' : external ? '新的一份没成功，交给外援了' : failure ? '新的一份没成功' : '新的一份暂未开始，等待处理'}` : activeText;
         const repair = !running && planRepairCandidate(chatKey);
-        return { planId: plan?.id ?? null, running: !!running, external, failure, message: repair?.reason || message, repairAvailable: !!repair, repairReason: repair?.reason ?? null, attempts };
+        return { planId: plan?.id ?? null, planNumber: planNumber(plan?.id), readyId: ready?.id ?? null, readyNumber, pending, canAbandon: !!pending && !running, running: !!running, external, failure, autoRetry, summary, timingHint, message, repairAvailable: !!repair, repairReason: repair?.reason ?? null, attempts };
     }
     function intimateEvents(table, chatKey) {
         const h = historyOf(chatKey), plans = new Set(readyPlans(chatKey).map(p => p.id));
@@ -867,13 +925,16 @@ export function openStore(file) {
         // 规划者对旧件的回答（章程 H3）：留／撤／换，按题对上此刻还排着、在口袋里的旧件（同题的几件一起）。
         // 换：接替它的那件（"换成"）这一份里收下了才算——没收下（缺格退了、没写）当没答，照下面 F1 的规矩
         if (rerollOf && lastReadyPlan(plan.chat_key)?.id !== rerollOf) throw Object.assign(new Error('plan_superseded'), { status: 409 });
-        const rerolled = rerollOf ? menuOf(plan.chat_key).filter(m => m.plan_id === rerollOf && ['waiting','pocket'].includes(m.status)) : [];
-        const rerolledIds = new Set(rerolled.map(m => m.id));
-        const open = menuOf(plan.chat_key).filter(m => !rerolledIds.has(m.id) && m.plan_id !== id && (m.status === 'waiting' || m.status === 'pocket'));
+        const chain = rerollOf ? rerollChain(rerollOf, new Set(readyPlans(plan.chat_key).map(p => p.id))) : new Set();
+        // 先按“这串已被替换”还原旧件，才判新回答与重复；不要拿被替换者的留撤结果继续筛。
+        const view = rerollOf ? { replacing: rerollOf } : {};
+        const before = menuOf(plan.chat_key, view);
+        const rerolled = rerollOf ? menuOf(plan.chat_key, { ...view, all: true }).filter(m => chain.has(m.plan_id) && ['waiting','pocket'].includes(m.status)) : [];
+        const open = before.filter(m => !chain.has(m.plan_id) && m.plan_id !== id && (m.status === 'waiting' || m.status === 'pocket'));
         const offeredTitle = t => offeredItems.find(n => nameOf(n.title) === nameOf(t)) ?? offeredItems.find(n => bare(n.title) === bare(t));
         const answer = new Map();   // 旧件 id → { how, by }
         const unmatched = [];
-        for (const o of rerollOf ? [] : olds ?? []) {
+        for (const o of olds ?? []) {
             const hits = open.filter(m => bare(m.title) === bare(o.title));
             if (!hits.length) { unmatched.push(`「${o.title}」（${o.how}）`); continue; }
             const by = o.how === '换' ? offeredTitle(o.to) : null;
@@ -887,7 +948,7 @@ export function openStore(file) {
         const follow = m => m.motif === '后续' || m.motif === '后续·当下';
         const retire = RETIRES_POCKET.has(plan.reason);
         const stays = m => follow(m) || m.kept_pos != null || answer.get(m.id)?.how === '留';   // 换了规划也留着的：局势排的后续、规划者留下的
-        const alive = menuOf(plan.chat_key).filter(m => !rerolledIds.has(m.id) && ((m.status === 'pocket' && (stays(m) || !retire)) || (m.status === 'waiting' && stays(m))));
+        const alive = before.filter(m => !chain.has(m.plan_id) && ((m.status === 'pocket' && (stays(m) || !retire)) || (m.status === 'waiting' && stays(m))));
         const items = [], replaced = [];
         for (const n of offeredItems) {
             // 撤了、换了的旧件不算活着（换的那件就是接替它的，照收）；答了留的，新件和它同一拍子就不收（说了留，又写了一遍）
@@ -914,7 +975,7 @@ export function openStore(file) {
             if (items.length) putIntimateProgress(plan.chat_key, intimateProgress, { planId: id, storyDay: plan.story_day });
         });
         for (const { old, by } of plan.anchor_pos == null ? [] : replaced) {
-            updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', why: `新规划里同一拍子的「${by.title}」替换了它`, at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
+            updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', byPlan: id, why: `新规划里同一拍子的「${by.title}」替换了它`, at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
             log(plan.chat_key, 'menu_void', { id: old.id, title: old.title, plan: id, why: `同一拍子（${old.line}／${old.purpose}）新规划又写了一回「${by.title}」，留新的，旧的「${old.title}」收了` });
         }
         // 照规划者的答办：撤 → 撤下；换 → 旧件撤下（接替它的那件上面照收了）；留 → 不动——旧规划里还排着的本来由新规划接手（menuOf），
@@ -922,19 +983,19 @@ export function openStore(file) {
         const at = { pos: plan.anchor_pos, fp: plan.anchor_fp };
         for (const [oldId, { how, by }] of plan.anchor_pos == null ? [] : answer) {
             const old = open.find(m => m.id === oldId);
-            if (how === '留') { updateMenu(plan.chat_key, oldId, { status: KEPT, by: '规划', why: '规划者留下的', at }); continue; }
-            if (how === '换' && !items.includes(by)) { updateMenu(plan.chat_key, oldId, { status: KEPT, by: '规划', why: `规划者要换成「${by.title}」，那件没收下，旧的留着`, at }); continue; }
+            if (how === '留') { updateMenu(plan.chat_key, oldId, { status: KEPT, by: '规划', byPlan: id, why: '规划者留下的', at }); continue; }
+            if (how === '换' && !items.includes(by)) { updateMenu(plan.chat_key, oldId, { status: KEPT, by: '规划', byPlan: id, why: `规划者要换成「${by.title}」，那件没收下，旧的留着`, at }); continue; }
             const why = how === '撤' ? '规划者撤的' : `规划者换成了「${by.title}」`;
-            updateMenu(plan.chat_key, oldId, { status: 'void', by: '规划', why, at });
+            updateMenu(plan.chat_key, oldId, { status: 'void', by: '规划', byPlan: id, why, at });
             log(plan.chat_key, 'menu_void', { id: oldId, title: old?.title ?? '', plan: id, why });
         }
-        const left = plan.anchor_pos == null || rerollOf ? [] : menuOf(plan.chat_key).filter(m => m.plan_id !== id && (m.status === 'waiting' || m.status === 'pocket') && !answer.has(m.id));
+        const left = plan.anchor_pos == null ? [] : menuOf(plan.chat_key).filter(m => !chain.has(m.plan_id) && m.plan_id !== id && (m.status === 'waiting' || m.status === 'pocket') && !answer.has(m.id));
         for (const { old, by } of left.map(old => ({ old, by: overtakenBy(old) })).filter(x => x.by)) {
-            updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', why: `新规划给${old.who}排了后续「${by.title}」`, at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
+            updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', byPlan: id, why: `新规划给${old.who}排了后续「${by.title}」`, at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
             log(plan.chat_key, 'menu_void', { id: old.id, title: old.title, plan: id, why: `新规划给${old.who}排了后续「${by.title}」${nameOf(by.line) && nameOf(by.line) === nameOf(old.line) ? `（同一条线：${old.line}）` : ''}，旧的「${old.title}」收了` });
         }
         if (rerollOf) {
-            for (const old of rerolled) updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', why: '被重新规划替换', at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
+            for (const old of rerolled) updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', byPlan: id, why: '被重新规划替换', at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
             setMeta(`plan_revision:${plan.chat_key}`, String(Number(getMeta(`plan_revision:${plan.chat_key}`) ?? 0) + 1));
         }
         if (rerollOf || activePlanAttempt(plan.chat_key, id)) setMeta(`notice:${plan.chat_key}`, JSON.stringify({ id: `plan-ready-${id}`, text: '新规划已生效' }));
@@ -955,7 +1016,12 @@ export function openStore(file) {
     // 交给某人那一格里的一步（pending）挂在它真正落到纸面上的那条（方案 删消息等于没发生过，10/9）：被回的那条后面紧跟着的就是他这条回复，
     // 这一步才算数；回复删了、换成了别人在这条后面开口，这一步就撤，那件回到之前那一步。还没回（被回的那条就是最后一条）照算——他正在写；
     // speaker 给了（组那一格时）：在同一条上换了个人开口，别人那一步不算。settledOnly：还没回的不算（对账用）。logUpTo：只认到这一步为止（对账用）
-    function menuOf(chatKey, { speaker = null, settledOnly = false, logUpTo = null, all = false } = {}) {
+    function rerollChain(id, live) {
+        const chain = new Set();
+        while (live.has(id) && !chain.has(id)) { chain.add(id); id = Number(getMeta(`replan_of:${id}`)); }
+        return chain;
+    }
+    function menuOf(chatKey, { speaker = null, settledOnly = false, logUpTo = null, all = false, replacing = null } = {}) {
         const h = historyOf(chatKey);
         const info = q(`select s.pos, m.is_user, m.speaker, m.name from chat_seq s join chats c on c.key = s.chat_key
                          join messages m on m.story_id = c.story_id and m.fp = s.fp where s.chat_key = ? order by s.pos`).all(chatKey);
@@ -968,11 +1034,15 @@ export function openStore(file) {
         };
         const plans = plansOf(chatKey, h).filter(p => p.status === 'ready');
         if (!plans.length) return [];
+        const live = new Set(plans.map(p => p.id)), replaced = new Set();
+        for (const p of plans) for (const old of rerollChain(Number(getMeta(`replan_of:${p.id}`)), live)) replaced.add(old);
+        // replacing 只供已校验替换目标的落账预读；真实读法仅认锚点/basis 仍有效的 ready 规划。
+        if (replacing != null) for (const old of rerollChain(replacing, live)) replaced.add(old);
         const ids = plans.map(p => p.id), marks = ids.map(() => '?').join(', ');
         const items = q(`select * from menu where plan_id in (${marks}) order by id`).all(...ids)
             .filter(m => m.anchor_pos == null || h.sees(m.chat_key, m.anchor_pos, m.anchor_fp));
         const steps = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids)
-            .filter(s => (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && replied(s));
+            .filter(s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && replied(s));
         for (const m of items) {
             readCells(m);
             if (all) { const stopped = steps.filter(s => s.item_id === m.id && s.why?.startsWith('/停：')).at(-1); if (stopped) m.intimate_stop = { pos: stopped.pos, fp: stopped.fp }; }
@@ -983,9 +1053,10 @@ export function openStore(file) {
             else if (s.item_id === m.id && s.status === KEPT) m.kept_pos = s.pos;
             else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, held_by: null, held_pos: null, settled_pos: null, settled_by: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_by: s.by_name ?? null } : {});
         }
-        const current = plans.at(-1).id;
+        const active = plans.filter(p => !replaced.has(p.id)).at(-1);
+        const current = active?.id;
         // 转向、弄断、局面变了以后的新规划：旧节点里还在口袋里的也撤下（新规划里要用的已经重写进去了）
-        const retire = RETIRES_POCKET.has(plans.at(-1).reason);
+        const retire = RETIRES_POCKET.has(active?.reason);
         // 局势排的后续（发生过的事引来的，不是哪一份规划的）：换了规划也接着排、接着在口袋里（D-171：以前一重新规划就跟着旧节点一起撤了）
         const follow = m => m.motif === '后续' || m.motif === '后续·当下';
         // 规划者答了留的旧件（章程 H3）：和局势排的后续一样，换了规划也接着排、接着在口袋里
@@ -1015,8 +1086,8 @@ export function openStore(file) {
         const h = historyOf(chatKey);
         const at = patch.at ?? { pos: h.last, fp: h.lastFp };
         // pending：交给某人那一格里的一步，等他那条回复（见 menuOf）；只有写了是谁的才等
-        q('insert into menu_log(chat_key, item_id, status, story_day, pos, fp, by_name, pending, why, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-            .run(chatKey, id, patch.status, patch.pocket_day ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now());
+        q('insert into menu_log(chat_key, item_id, status, story_day, pos, fp, by_name, pending, why, created_at, by_plan) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(chatKey, id, patch.status, patch.pocket_day ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now(), Number.isSafeInteger(patch.byPlan) && patch.byPlan > 0 ? patch.byPlan : null);
     }
 
     // ---------- 外援（API 没响应时交给桌面应用里的 AI 窗口做的活） ----------
@@ -1124,5 +1195,5 @@ export function openStore(file) {
         };
     }
 
-    return { savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, storyActivity, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    return { planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, storyActivity, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

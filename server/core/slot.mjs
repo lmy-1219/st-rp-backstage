@@ -2539,8 +2539,8 @@ export function planPersonaOf(store, chatKey) {
 export function holdPlanPersona(store, request) {
     const { current, previous } = planPersonaOf(store, request.chatKey);
     if (current && current === previous) { store.setMeta(`plan_persona_wait:${request.chatKey}`, null); return null; }
-    const { id, chatKey, reason = 'user', verdict = null, thread = null, force = null, entry = 'auto' } = request;
-    store.setMeta(`plan_persona_wait:${chatKey}`, JSON.stringify({ id, chatKey, reason, verdict, thread, force, entry }));
+    const { id, chatKey, reason = 'user', verdict = null, thread = null, force = null, entry = 'auto', source = null } = request;
+    store.setMeta(`plan_persona_wait:${chatKey}`, JSON.stringify({ id, chatKey, reason, verdict, thread, force, entry, source }));
     return { current, previous };
 }
 
@@ -2562,7 +2562,7 @@ export function confirmPlanPersona(store, chatKey, expected = null) {
     return wait && store.planById(wait.id)?.status === 'requested' ? wait : null;
 }
 
-export function requestPlanNow(store, records, chatKey, planner, { reason = 'user', present = null, verdict = null, thread = null, basis = null, force = null, entry = 'auto' } = {}) {
+export function requestPlanNow(store, records, chatKey, planner, { reason = 'user', present = null, verdict = null, thread = null, basis = null, force = null, entry = 'auto', source = null } = {}) {
     const stopped = playStop(store, chatKey); if (stopped) return stopped;
     const factionNet = planner.factionNet?.(chatKey) ?? null, sit = planner.situation ?? null, prices = planner.prices?.(chatKey) ?? null, facts = planner.facts?.(chatKey) ?? null;
     const last = store.lastPlan(chatKey);
@@ -2574,9 +2574,10 @@ export function requestPlanNow(store, records, chatKey, planner, { reason = 'use
     const brief = planBrief(store, records, chatKey, opts);
     const retry = last?.status === 'requested';
     const id = retry ? last.id : store.requestPlan({ chatKey, storyDay: s.today, reason, provider: planner.provider, brief, basis, rerollOf: previous?.id ?? null });
+    store.setPlanSource?.(id, source ?? (reroll ? 'button' : entry));
     if (retry) { store.setPlanBrief(id, brief); if (previous) store.setMeta(`replan_of:${id}`, String(previous.id)); }
     // rebrief：备料、参谋备忘回来以后带上它们按同样的参数重攒（备料也算进预算，章程 H4）
-    planner.onRequest?.({ id, chatKey, brief, reason, verdict, thread, entry: reroll ? 'button' : entry, rebrief: prep => planBrief(store, records, chatKey, { ...opts, prep }), ...(force ? { force } : {}) });
+    planner.onRequest?.({ id, chatKey, brief, reason, verdict, thread, source, entry: reroll ? 'button' : entry, rebrief: prep => planBrief(store, records, chatKey, { ...opts, prep }), ...(force ? { force } : {}) });
     return id;
 }
 

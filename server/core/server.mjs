@@ -736,19 +736,25 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const candidate = store.planRepairCandidate(chatKey), repair = settings().planner?.repair;
             if (!candidate || !repair) bad('没有可修格式的规划');
             if (store.activePlanAttempt(chatKey, candidate.planId)) bad('正在重新规划');
-            void repair(chatKey).catch(() => {}); // 结果落在尝试记录，页面沿用规划状态轮询。
+            void repair(chatKey, { source: 'panel-repair' }).catch(() => {}); // 结果落在尝试记录，页面沿用规划状态轮询。
             return { started: true };
         },
         'POST /v1/plan': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             store.requireChat(chatKey);
             const planner = settings().planner;
+            if (b.abandon === true) {
+                if (b.reroll || b.request) bad('放弃和新请求不能同时提交');
+                const id = Number(b.planId), packets = store.pendingHandoffs().filter(h => h.kind === 'plan' && h.key === String(id));
+                store.abandonPlan(chatKey, id, 'panel-abandon');
+                for (const h of packets) { if (handoffs?.drop) handoffs.drop(h.id, 'plan_abandoned'); else store.closeHandoff(h.id, 'dropped', { reason: 'plan_abandoned' }); }
+            }
             const stopped = playStop(store, chatKey);
             if ((b.request || b.reroll) && stopped) return { ...stopped, message: stopped.reason + '，规划已停' };
             // provider: 'queue'：这一次只出外援包、不调 API（本机工具把写好的规划交回来用；转发插件不传这个）
             if (b.reroll && !planner) bad('规划目前关闭');
-            if (b.reroll && planner) requestPlanNow(store, records, chatKey, planner, { reason: 'reroll' });
-            if (!b.reroll && b.request && planner) requestPlanNow(store, records, chatKey, planner, { reason: 'user', entry: 'button', ...(b.provider === 'queue' ? { force: 'queue' } : {}) });
+            if (b.reroll && planner) requestPlanNow(store, records, chatKey, planner, { reason: 'reroll', source: ['behind-reroll','pending-reroll'].includes(b.source) ? b.source : 'button' });
+            if (!b.reroll && b.request && planner) requestPlanNow(store, records, chatKey, planner, { reason: 'user', entry: 'button', source: b.source === 'next-node' ? b.source : 'button', ...(b.provider === 'queue' ? { force: 'queue' } : {}) });
             const last = store.lastPlan(chatKey);
             const menu = store.menuOf(chatKey);
             const count = st => menu.filter(m => m.status === st).length;
@@ -756,7 +762,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 playMode: playModeOf(store,chatKey), playReason: playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), awaitingPersona: playStop(store,chatKey) ? null : awaitingPlanPersona(store,chatKey),
                 provider: planner?.provider ?? 'off', last: last ? { id: last.id, status: last.status, reason: last.reason, createdAt: last.created_at, readyAt: last.ready_at } : null,
                 counts: { waiting: count('waiting'), pocket: count('pocket'), used: count('used'), sunk: count('sunk') + count('sunk_told'), void: count('void'), expired: count('expired') },
-                ...(b.reveal ? (ready => ({ goal: ready?.goal ?? null, node: ready?.node ? JSON.parse(ready.node) : null, menu }))(store.lastReadyPlan(chatKey)) : {}),
+                ...(b.reveal ? (ready => ({ goal: ready?.goal ?? null, node: ready?.node ? JSON.parse(ready.node) : null, menu: menu.map(m => ({ ...m, planNumber: store.planNumber(m.plan_id), currentPlan: m.plan_id === ready?.id })) }))(store.lastReadyPlan(chatKey)) : {}),
             };
         },
         // 交回菜单（本机工具用；转发插件也会转过来（要先过 ST 登录））。
