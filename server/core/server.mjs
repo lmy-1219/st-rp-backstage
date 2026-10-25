@@ -159,6 +159,14 @@ export function createRoutes(store, { worker = null, records = null, assembler =
     });
     // 确认了一版开局单 ⇒ 人物开场状态里要记成记录的那几类当场落到这个窗口的第一条消息上（别的窗口下次同步时补）
     const seedOpening = chatKey => { if (records) try { ensureOpening(store, records, chatKey); } catch {} };
+    const openingAbsent = chat => {
+        const config = promptOptionsFor(store, chat.key).config;
+        if (!chat.group_id || config.auto?.enabled !== true || store.currentMessages(chat.key).some(m => m.is_user)) return [];
+        const members = JSON.parse(chat.members ?? '[]'), players = store.playerNames(chat.story_id);
+        return boardFor(store, records, chat.key).people
+            .filter(p => !['present', 'remote'].includes(p.status) && p.card && p.name !== '旁白' && !players.includes(p.name) && members.some(m => m.avatar === p.avatar))
+            .map(p => p.avatar);
+    };
     const keysFor = (storyId, chatKey) => {
         const c = store.setupOf(storyId);
         if (!c?.data?.前史?.length) return;
@@ -830,7 +838,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 // 填表时"人物开场状态"那几行的初值：和表交上来时并进的是同一份（有草稿就是草稿）
                 const base = checked(d?.status === 'draft' ? d.data : c?.data);
                 return {
-                    ready: !!setupMaker, receipt,
+                    ready: !!setupMaker, receipt, ...(receipt ? { openingAbsent: openingAbsent(chat) } : {}),
                     intimateWarnings: intimateRows(base).filter(x => x.error).map(x => `${x.谁.join('、')}：${x.error}`),
                     confirmed: c ? { text: toText(checked(c.data)), at: c.created_at, data: checked(c.data) } : null,
                     draft: d ? { status: d.status, text: d.data ? toText(checked(d.data)) : null, unchecked: d.unchecked.length, error: d.error, at: d.updated_at } : null,
@@ -924,7 +932,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 store.setMeta(`roster_listed:${chat.story_id}`, '1');
                 // 前史还没配检索词的（预设是没配完就存的）补一次
                 if (one.setup?.前史?.some(x => !x.keys?.length)) keysFor(chat.story_id, chat.key);
-                return { applied, presets: p.list() };
+                return { applied, presets: p.list(), openingAbsent: openingAbsent(chat) };
             }
             return { presets: p.list() };
         },

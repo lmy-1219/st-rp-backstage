@@ -1513,7 +1513,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             const now = segs(card.avatar), old = seen?.[card.avatar] ?? [];
             next[card.avatar] = now;
             if (!seen || !plans) continue;
-            const ended = now.some(s => s.to != null && s.to >= lastPos - 3 && !old.some(o => o.from === s.from && o.to === s.to));
+            const ended = now.filter(s => s.to != null && s.to >= lastPos - 3 && !old.some(o => o.from === s.from && o.to === s.to)).sort((a, b) => a.to - b.to).at(-1);
             if (!ended) continue;
             // 他牵头、当面办过了的那几件收起来
             if (!present.some(n => sameName(n, card.name, rosterNames))) try { closeLed({ records, chatKey, storyId, who: card.name, fp: last.fp, same: (a, b) => sameName(a, b, rosterNames) }); } catch {}
@@ -1523,7 +1523,10 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             // 挡下的这回先不记成"见过"，同步那次（没名单）再看一遍
             if (present.some(n => sameName(n, card.name, rosterNames))) { next[card.avatar] = old; continue; }
             const hasPlan = Object.values(plans).some(p => (p?.who === card.name || (card.avatar && p?.avatar === card.avatar)) && !!validAwayPlan(p, messages));
-            if (!hasPlan && leave) leave({ chatKey, who: card.name, avatar: card.avatar })?.catch?.(() => {});
+            // 区间的 to 不含在段内：最后在场的 to - 1 才是这次离场来源。
+            // 后面可能已经接了几句；不能把补记挂在那些新句上，否则删离场原文撤不掉。
+            const source = messages.find(m => !m.hidden && m.pos === ended.to - 1);
+            if (!hasPlan && source && leave) leave({ chatKey, who: card.name, avatar: card.avatar, anchor: { at: source.pos, fp: source.fp } })?.catch?.(() => {});
         }
         const nowSeen = JSON.stringify(next);
         if (nowSeen !== seenRaw) store.setMeta?.(`segments_seen:${chatKey}`, nowSeen);

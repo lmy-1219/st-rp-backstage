@@ -208,13 +208,6 @@ const refreshPlanPackets = () => {
         } catch (error) { log(`plan handoff ${handoff.id} prompt refresh failed: ${error.message}`); }
     }
 };
-// 重启前就在等、还没有外援包的规划（比如这个功能上线前要的），补一份包。
-for (const row of store.db.prepare("select id from plan_attempts where status = 'running'").all()) store.finishPlanAttempt(row.id, { status: 'failed', failure: 'connection' });
-for (const p of store.pendingPlans()) {
-    if (store.pendingHandoff('plan', String(p.id)) || store.planRepairCandidate(p.chat_key)) continue;
-    planPacket({ id: p.id, chatKey: p.chat_key, brief: freshBrief(p.id) }, '要一份新的节点规划（设成了交给窗口写，不走 API）');
-}
-refreshPlanPackets();
 // 调规划模型写一个节点的规划（api 模式；面板"再试一次"也走这里）。成了就落账，没成抛错。长规划输出多，给足长度和时间。
 const PLAN_LIMITS = { full: 64000, reduced: 32000 };
 const PLAN_CONTINUE_NOTE = '上面没写完，从断的地方接着写，只输出剩下的部分，不要重复已经写过的，也不要加解释。';
@@ -1907,6 +1900,15 @@ const talk = createTalk({
     },
     plan: chatKey => { const planner = settings().planner; if (planner) requestPlanNow(store, records, chatKey, planner, { reason: 'notes' }); },
 });
+// 重启前就在等、还没有外援包的规划（比如这个功能上线前要的），补一份包。
+// 放在 packsDir/packRoots/packOf 这一整块（上面"跟后台说话"之前的素材包段）之后：补包会重攒在等的外援包
+// （freshBrief → packOf → packRoots），走得太早会报"用在了定义之前"（10/25 用户报）。
+for (const row of store.db.prepare("select id from plan_attempts where status = 'running'").all()) store.finishPlanAttempt(row.id, { status: 'failed', failure: 'connection' });
+for (const p of store.pendingPlans()) {
+    if (store.pendingHandoff('plan', String(p.id)) || store.planRepairCandidate(p.chat_key)) continue;
+    planPacket({ id: p.id, chatKey: p.chat_key, brief: freshBrief(p.id) }, '要一份新的节点规划（设成了交给窗口写，不走 API）');
+}
+refreshPlanPackets();
 const stagesAdmin = createStagesAdmin({ home, db: store.db, onKeys: () => { refreshVectors(); } });
 const vectors = createVectors({ db: store.db, getConfig, log });
 const presets = createPresets({ home });

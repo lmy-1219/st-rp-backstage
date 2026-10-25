@@ -397,7 +397,10 @@ export function leaveEvents(store, chatKey) {
         if(source) e.at=source.pos;
         if(action==='undo') {
             const plans=read(store,`away_plan:${chatKey}`,{});
-            for(const [key,p] of Object.entries(plans)) if(p?.who===e.who&&p.fp===e.fp) delete plans[key];
+            // 就地改稿会由 store.sync 把去向的指纹接到新字上；事件仍保留原离场证据。
+            // 只撤同一位置、同一条改稿链的补记，别把另一回离场的去向一起撤掉。
+            for(const [key,p] of Object.entries(plans)) if(p?.who===e.who && (p.fp===e.fp
+                || (p.at===e.at+1 && store.sameMessage?.(p.fp,e.fp)))) delete plans[key];
             write(store,`away_plan:${chatKey}`,plans);
         }
     }

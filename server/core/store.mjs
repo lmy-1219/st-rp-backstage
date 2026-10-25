@@ -324,7 +324,10 @@ export function openStore(file) {
         const chat = getChat.get(chatKey);
         if (!chat) return { status: 'unknown' };
         if (chat.st_chat_id === stChatId) return { status: 'same', chatKey, storyId: chat.story_id, enabled: !!chat.enabled };
-        const oldStillThere = Array.isArray(siblings) ? siblings.includes(chat.st_chat_id) : !!mainChat;
+        // 单聊↔群聊、或从一个群换到另一个群：换了个"窝"，ST 改名不会动它属于单聊还是哪个群，
+        // 所以不可能是改名，是另一个窗口——按分支办（D-67/D-93：带上分叉点之前已生效的规划，之后各记各的）。
+        const changedHome = (chat.group_id ?? null) !== (groupId ?? null);
+        const oldStillThere = changedHome || (Array.isArray(siblings) ? siblings.includes(chat.st_chat_id) : !!mainChat);
         return tx(() => {
             if (!oldStillThere) {
                 q('update chats set st_chat_id = ? where key = ?').run(stChatId, chatKey);
