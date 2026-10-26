@@ -39,12 +39,16 @@ export function findSt(start,io=fs) {
     for(;;){if(stConfig(dir,io)&&io.existsSync(path.join(dir,'server.js')))return dir;const parent=path.dirname(dir);if(parent===dir)return null;dir=parent;}
 }
 const stConfig=(dir,io)=>[path.join(dir,'config.yaml'),path.join(dir,'config','config.yaml')].find(file=>io.existsSync(file));
-export function noLinks(root,file,io = fs) {
+// 只有酒馆根目录下的 data 这一层可以是指向文件夹的链接（手机上常把数据放到共享存储）；它往下、以及插件和配置，仍不许有链接。
+export function noLinks(root,file,io = fs,{dataMayLink=false}={}) {
     if(io.lstatSync(root).isSymbolicLink())throw Error('安装目录有链接，请先核对实际路径。');
     let at=root;
     for(const part of path.relative(root,file).split(path.sep).filter(Boolean)){
         if(part==='..'||part.toLowerCase()==='secrets.json')throw Error('安装路径不安全。');
-        at=path.join(at,part);if(io.existsSync(at)&&io.lstatSync(at).isSymbolicLink())throw Error('安装路径有链接，未修改。');
+        const parent=at;at=path.join(at,part);
+        if(!io.existsSync(at)||!io.lstatSync(at).isSymbolicLink())continue;
+        if(dataMayLink&&parent===root&&part==='data'&&io.statSync(at).isDirectory())continue;
+        throw Error(`安装路径有链接，未修改：${at}`);
     }
 }
 async function available(port) {
@@ -84,7 +88,7 @@ export async function installLayout2({stRoot,dry=false,nodeVersion=process.versi
     const st=path.resolve(stRoot),plugin=path.join(st,'plugins',NAME),thirdParty=path.join(st,'public','scripts','extensions','third-party',NAME),extension=io.existsSync(thirdParty)?thirdParty:path.join(st,'data','default-user','extensions',NAME),yamlFile=stConfig(st,io),configFile=path.join(plugin,'config.json'),backup=yamlFile+'.rp-emergence.bak';
     // 用酒馆“安装扩展”装给所有用户的，扩展在 third-party 下：就地更新那一份，不再给 default-user 另装一份（否则会出两个面板）。
     if(io.existsSync(path.join(st,'plugins','rp-emergence'))||io.existsSync(path.join(st,'data','default-user','extensions','rp-emergence')))throw Error('发现旧版rp-emergence目录。请先备份并移出旧扩展和插件，避免重复加载；安装器不会替你移动。');
-    for(const file of [plugin,extension,yamlFile,configFile,backup,path.join(st,'data','rp-emergence')])noLinks(st,file,io);
+    for(const file of [plugin,extension,yamlFile,configFile,backup,path.join(st,'data','rp-emergence')])noLinks(st,file,io,{dataMayLink:true});
     const yaml=io.readFileSync(yamlFile,'utf8'),lines=[...yaml.matchAll(/^enableServerPlugins:[^\r\n]*$/gm)];
     if(lines.length!==1)throw Error('config.yaml的enableServerPlugins行缺失或重复，未修改。');
     const nextYaml=yaml.replace(/^enableServerPlugins:[^\r\n]*$/m,'enableServerPlugins: true');

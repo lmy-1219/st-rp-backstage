@@ -123,7 +123,7 @@ async function applyLayout2({ repo, stRoot, follow, fetch, acceptsOrigin, status
     const ext = extensionClone(stRoot);
     try {
         if (!ext) throw Error('扩展不是用 git 装的，刷新网页前请自己替换');
-        noLinks(stRoot, ext);
+        noLinks(stRoot, ext, fs, { dataMayLink: true });
         extension = await prepareClone(ext, { follow, fetch, acceptsOrigin });
         if (extension.target !== plugin.target) { warning = '两份克隆查到的版本不同，扩展那份没更新，请再检查一次更新'; extension = null; }
     } catch (error) {
