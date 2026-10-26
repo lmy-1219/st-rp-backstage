@@ -66,6 +66,7 @@ export const DEFAULT_STRIP = ['<#[0-9.]+#>', '\\([A-Za-z][A-Za-z ]{0,24}\\)'];
 export const CAST_PROMOTION_DEFAULTS = Object.freeze({ promoteRecords: 30, promoteWeight: 2 });
 
 import { CONTENT_TIERS, allowedTiers, DEFAULT_TIER } from './prompt-slots.mjs';
+import { chainOf } from './director.mjs';
 export function loadConfig(home) {
     let raw = {};
     try { raw = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')); } catch {}
@@ -191,10 +192,10 @@ export function loadConfig(home) {
         stay: { enabled: raw.stay?.enabled === true },
         // 自动进离场与调度（core/auto.mjs，D-201、D-210）：默认开——开了以后该来的人自己在聊天里发消息、打电话、敲门（knock），玩家不回不算进场；
         // 谁接话由后台排（turn）；走了自动记（leave）；快捷按钮（buttons）。maxTurns＝玩家几句没回算没接；cap＝一句之后至多几人（不填按节奏档）；
-        // remoteQuiet＝远程的人连着几句玩家没对他说算结束
+        // remoteQuiet＝远程的人连着几句玩家没对他说算结束；chain＝角色之间点名、问话连着接，这一句之后至多几手（默认、范围见 director.CHAIN，T071；没填、乱填按默认）
         auto: { enabled: raw.auto?.enabled !== false, knock: raw.auto?.knock !== false, turn: raw.auto?.turn !== false, leave: raw.auto?.leave !== false, buttons: raw.auto?.buttons !== false,
             maxTurns: Math.max(1, Number(raw.auto?.maxTurns ?? 2) || 2), cap: Number.isFinite(Number(raw.auto?.cap)) && Number(raw.auto?.cap) > 0 ? Number(raw.auto.cap) : null,
-            remoteQuiet: Math.max(1, Number(raw.auto?.remoteQuiet ?? 3) || 3) },
+            remoteQuiet: Math.max(1, Number(raw.auto?.remoteQuiet ?? 3) || 3), chain: chainOf(raw.auto?.chain) },
         // 局势（core/situation.mjs，Q-8②）：一个剧情日推一次各方的动向、消息怎么传开；默认关。model 不填用叙事组装那档（同一条线路）
         situation: { enabled: raw.situation?.enabled === true, model: typeof raw.situation?.model === 'string' && raw.situation.model ? raw.situation.model : null },
         fresh: { enabled: raw.fresh?.enabled !== false, ways: raw.fresh?.enabled !== false, dropEchoes: raw.fresh?.dropEchoes !== false, voice: raw.fresh?.voice !== false, model: typeof raw.fresh?.model === 'string' && raw.fresh.model ? raw.fresh.model : null,

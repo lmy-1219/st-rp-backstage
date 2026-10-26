@@ -6,6 +6,7 @@ import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { KINDS as TASTE_KINDS, TASTE_CHOICES, CHOICE_LABELS } from './taste.mjs';
 import { CONTENT_TIERS, allowedTiers } from './prompt-slots.mjs';
+import { CHAIN } from './director.mjs';
 
 // 模型口味（core/taste.mjs）：每类环节按哪一家补口味
 const TASTE_OPTIONS = TASTE_CHOICES.map(c => [c, CHOICE_LABELS[c]]);
@@ -72,6 +73,7 @@ export const KNOBS = [
     { path: 'auto.buttons', group: '自动进离场', type: 'bool', label: "叩门下面的快捷按钮", help: "提供叩门快捷回应，建议开启。" },
     { path: 'auto.maxTurns', group: '自动进离场', type: 'num', min: 1, max: 6, label: "几句没回算没接", help: "设不回应的等待量，建议用默认。" },
     { path: 'auto.remoteQuiet', group: '自动进离场', type: 'num', min: 1, max: 8, label: "远程的人几句没理算结束", help: "设远程联系结束量，建议用默认。" },
+    { path: 'auto.chain', group: '自动进离场', type: 'int', min: CHAIN.min, max: CHAIN.max, label: "角色之间连着接话至多几手", help: "角色互相点名时连着接几手，建议用默认。" },
     // 模型口味：总开关默认开；规划/检查默认自动认，前台/旁白需另行启用。
     { path: 'taste.enabled', group: '模型口味', type: 'bool', label: "按模型补口味", help: "按模型调整演法，建议保持默认。" },
     ...TASTE_KINDS.map(k => ({ path: `taste.${k}`, group: '模型口味', type: 'enum', options: TASTE_OPTIONS, label: TASTE_LABELS[k], help: TASTE_HELP[k] })),

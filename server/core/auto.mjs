@@ -285,7 +285,7 @@ export function turnFor(store, records, chatKey, { present = [], recentUser = ''
     })};
     present=present.filter(name=>board ? !excluded.has(name) : !departed.some(e=>e.who===name));
     const d = turnDetail({ text: recentUser || null, messages, board, roster, relations, wants: wantsFor(store, records, chatKey, { messages, timeline: tl }), pace: paceFor(store, chatKey), userName, present,
-        stateNotes: store.stateNotesOf?.(chatKey) ?? [], cap: Number(auto.cap) > 0 ? Number(auto.cap) : null });   // 没填（null）按节奏档，别算成 0
+        stateNotes: store.stateNotesOf?.(chatKey) ?? [], cap: Number(auto.cap) > 0 ? Number(auto.cap) : null, chain: auto.chain ?? null });   // 没填（null）按节奏档，别算成 0；chain 没填按默认
     const avatarOf = who => roster.find(e => sameName(e.name, who, names))?.avatar ?? null;
     // back：刚走的人被点名，直接叫回来（不走进场那套）——扩展要先取消静音、开区间
     return { queue: d.queue.map(q => ({ who: q.who, avatar: q.who === '旁白' ? null : avatarOf(q.who), role: q.role, why: q.why, noRepeat: !!q.noRepeat, ...(/叫回来/.test(q.why ?? '') ? { back: true } : {}) })), why: d.why };

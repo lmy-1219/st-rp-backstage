@@ -18,6 +18,9 @@ const CAMERA_NAME = '旁白';
 export const CAP = Object.freeze({ 慢: 2, 中: 2, 快: 3 });
 const paceOf = pace => paceName(pace && typeof pace === 'object' ? pace.name : pace) ?? MID;
 export const capOf = pace => CAP[paceOf(pace)];
+// 角色之间点名、问话连着接，这一句之后至多几手（T071，用户 10/25 定 6）；配置 auto.chain 可改，面板范围 min～max
+export const CHAIN = Object.freeze({ default: 6, min: 1, max: 12 });
+export const chainOf = v => { const n = Number(v); return v != null && v !== '' && Number.isInteger(n) && n >= CHAIN.min && n <= CHAIN.max ? n : CHAIN.default; };
 // 此刻要说的四种由头，排的先后：来意没说 > 口袋到了 > 等回音 > 兴头；慢档只排前两种
 const WANT_RANK = { 来意: 0, 口袋: 1, 等回音: 2, 兴头: 3 };
 const STRONG = new Set(['来意', '口袋']);
@@ -113,7 +116,7 @@ function replyTargets(text, { names = [], self = null, rel = null, all = [] } = 
  * 输出：{ queue: [{ who, role, why, noRepeat? }], why }，queue 空时 why 说为什么停
  */
 export function turnDetail(input = {}) {
-    const { text = null, messages = [], roster = [], relations = null, wants = [], pace = null, present = [], stateNotes = [], cap = null } = input;
+    const { text = null, messages = [], roster = [], relations = null, wants = [], pace = null, present = [], stateNotes = [], cap = null, chain = null } = input;
     const userAt = messages.findLastIndex(m => m?.is_user);
     if (userAt < 0) return { queue: [], why: '还没有玩家的话' };
     const userName = input.userName ?? messages[userAt].name ?? null;
@@ -132,21 +135,24 @@ export function turnDetail(input = {}) {
     const paceN = paceOf(pace);
     const limit = cap ?? CAP[paceN];
     const since = messages.slice(userAt + 1);
+    const last = messages.at(-1);
+    const reply = last && !last.is_user ? last : null;
+    // 上一条是某人答的、他点了、问了在场的别人：角色之间连着接，不看节奏档的手数、不看这一句之后说没说过，只看 chain（T071）；
+    // 这一手只排被点的那一个，别的由头让路。没点别人的照下面原来的排法
+    const r = reply ? replyTargets(reply.text, { names: [...here, ...phone], self: reply.name, rel, all: names }) : null;
+    if (r?.who && !same(r.who, reply.name)) {
+        const most = chainOf(chain);
+        if (since.length >= most) return { queue: [], why: `角色之间已经连着说了 ${since.length} 手，至多 ${most} 手` };
+        return { queue: [{ who: r.who, role: '接', why: `${reply.name}那条点了他`, noRepeat: true }], why: '' };
+    }
     const room = limit - since.length;
     if (room <= 0) return { queue: [], why: `这一句之后已经说了 ${since.length} 手，${paceN}档至多 ${limit} 手` };
     const spoken = since.filter(m => !isNarrator(m)).map(m => m.name).filter(Boolean);
     const said = who => spoken.some(n => same(n, who));
-    const last = messages.at(-1);
-    const reply = last && !last.is_user ? last : null;
     const queue = [];
     const add = (who, role, why) => { if (who && !queue.some(q => same(q.who, who)) && !(reply && same(reply.name, who))) queue.push({ who, role, why }); };
-    // 上一条是某人答的：问了玩家就停；点了、问了在场的别人，那人接（答过的人被问也接——他不是上一条，不算连着说）
-    let follow = null;
-    if (reply) {
-        const r = replyTargets(reply.text, { names: [...here, ...phone], self: reply.name, rel, all: names });
-        if (r.player) return { queue: [], why: `${reply.name}那条问了${userName ?? '玩家'}，停下等玩家` };
-        if (r.who) follow = { who: r.who, why: `${reply.name}那条点了他` };
-    }
+    // 上一条是某人答的：问了玩家就停（点了别人的已在上面接走）
+    if (r?.player) return { queue: [], why: `${reply.name}那条问了${userName ?? '玩家'}，停下等玩家` };
     // 这句对谁说
     const lastSpeaker = messages.slice(0, userAt).findLast(m => !m.is_user && !isNarrator(m))?.name ?? null;
     const to = addressee(line, [...here, ...phone, ...texting, ...justLeft], lastSpeaker, { rel, names, userName });
@@ -155,7 +161,6 @@ export function turnDetail(input = {}) {
         else if (to.how === '点名') add(to.who, '答', '玩家点了他的名');
         else add(to.who, '接', '玩家这句接着他上一条说的');
     }
-    if (follow) add(follow.who, '接', follow.why);
     // 旁白：玩家点名了没卡的人、接着跟上一条旁白里开口的人说话 → 旁白写那人的回应；排在被点名的有卡的人之后（没有就最先）
     const cam = cameraShouldSpeak({ messages, recentUser: line, present, roster, board, stateNotes, relations });
     if (cam.speak) add(CAMERA_NAME, '旁白', cam.why);

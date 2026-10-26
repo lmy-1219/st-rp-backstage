@@ -460,6 +460,17 @@ export function arrivalToastLines({ all = [], entered = [], muted = [] }) {
     return lines;
 }
 export function autoTurnEnabled(reply) { return reply?.enabled===true && reply.turnEnabled!==false; }
+// 玩家在打字（T071）：打字框里有非空白的字，或者最近 TYPING_RECENT_MS 毫秒内按过键。角色说完这条，玩家在打字就不再叫下一个
+export const TYPING_RECENT_MS = 3000;
+export function playerTyping(text, lastKeyAt, now, recentMs = TYPING_RECENT_MS) {
+    if (String(text ?? '').trim()) return true;
+    const at = Number(lastKeyAt);
+    return Number.isFinite(at) && at > 0 && now - at >= 0 && now - at < recentMs;
+}
+// ST 群面板的"自动模式"开着、谁接话又交给了后台：两边抢着叫人，提示一次（T071）。told＝这次打开窗口已经提示过的群；读不到（不是 true）不提示
+export function automodeHintDue({ turnEnabled, automode, groupId, told = null }) {
+    return turnEnabled === true && automode === true && !!groupId && told !== groupId;
+}
 // close / mute 必须验证实际状态；确认失败时也允许再次执行这两个幂等步骤。
 export async function applyLeaveEvent(event,{close,mute,reopen,unmute,ack}) {
     if(event.action==='undo') { await reopen(); await unmute(); }

@@ -2,7 +2,7 @@
 // ① 接入的窗口里，消息一有变化就把"当前序列"增量同步给后台（只传指纹，后台缺哪条正文才补传哪条）；
 // ② 每次某个角色要发言前，向后台要"只给他的那一格"，临时塞进这次请求，用完即清；
 // ③ 设置面板里的开关与状态。后台连不上时什么都不做，ST 照常。
-import { visibleTo, filterVisible, knockHtml, autoDoorHtml, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, applyLeaveEvent, isolateLeaveSupportsIndex, closeIsolationAt, runLeaveAttempt, resetLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
+import { visibleTo, filterVisible, knockHtml, autoDoorHtml, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, isolateLeaveSupportsIndex, closeIsolationAt, runLeaveAttempt, resetLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 
 const MODULE = 'rp_emergence';
@@ -1837,7 +1837,7 @@ async function onChatChanged() {
     state.relationsDraft = null;
     clearPrompts();
     Object.assign(state, { chatKey: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
-    Object.assign(auto, { on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map() });
+    Object.assign(auto, { on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null });
     state.memberBase = memberSnapshot();   // 换了窗口：群成员名单的基线重记（不触发），不拿上一个窗口的名单比
     arrivals.cancel();   // 拉进群攒着的那批（T070 二）作废
     dayLabels = []; boardLabels = []; state.boardCast = [];
@@ -3082,7 +3082,7 @@ async function importOpeningPack(pathIn, say, { overwrite = false, together = nu
 let stGroups = null;
 import('../../../group-chats.js').then(m => { stGroups = m; }).catch(() => {});
 const MANUAL_STRATEGY = 2;   // ST 群的 activation_strategy：0 自然 1 列表 2 手动 3 池
-const auto = { on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map() };
+const auto = { on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null };
 function presentNames(c) { return [c.name1, ...members(c).filter(m => !m.disabled).map(m => m.name)].filter(Boolean); }
 // 群的回复方式：开了改成手动（记下原来的），关了改回去。改的是 ST 的群设置，记在搬迁清单
 async function autoStrategy(enable) {
@@ -3103,6 +3103,13 @@ async function autoStrategy(enable) {
         saveExtensionSettings();
         globalThis.toastr?.info('这个群的回复方式改回原来的了。', 'RP：幕后', { timeOut: 6000 });
     }
+}
+// ST 群面板的“自动模式”开着：ST 每隔几秒自己随便叫一个人，和后台排的谁接话抢。只提醒，不替玩家关（T071）；每个群每次打开窗口至多一次
+function automodeHint() {
+    const g = currentGroup(ctx());
+    if (!automodeHintDue({ turnEnabled: auto.turnEnabled, automode: stGroups?.is_group_automode_enabled, groupId: g?.id, told: auto.automodeTold })) return;
+    auto.automodeTold = g.id;
+    globalThis.toastr?.warning('这个群开着 ST 自带的“自动模式”：ST 会每隔几秒自己随便叫一个人说话，和后台排的谁接话抢。建议在群设置里关掉“自动模式”。', 'RP：幕后', { timeOut: 15000 });
 }
 // 开没开、谁候着、谁刚作废：打开窗口时问一次；关着时每条之后也问一下（便宜，纯程序），开了就立刻跟上
 async function autoPeek({ onlyUndo = false } = {}) {
@@ -3128,6 +3135,7 @@ async function autoApply(r) {
     auto.on = !!r?.enabled;
     auto.unavailable=false;
     auto.turnEnabled=enableTurn;
+    automodeHint();
     auto.buttons=r?.buttons!==false;
     auto.waiting = r?.waiting ?? null;
     if (Array.isArray(r?.remote)) auto.remote = new Map(r.remote.map(x => [x.avatar ?? x.who, { who: x.who, way: x.way }]));
@@ -3148,6 +3156,9 @@ async function autoDrive(type) {
     if (!group || c.is_group_generating) return false;
     const last = c.chat?.at(-1);
     if (!last) return false;
+    // 角色说完这条（最后一条不是玩家的）、玩家在打字：不问后台、不叫人，停着等玩家下一句（T071）；玩家刚发的那条照旧走
+    const afterReply = !last.is_user;
+    if (afterReply && typingNow()) { console.log('[RP：幕后] 玩家在打字，先停'); return false; }
     // 同一条之后只问一次：叫的人没生成成（断网、被拒）群聊收尾又会走到这里，别一直重叫
     const key = `${c.chat.length}:${fingerprintMessage(last, speakerOf(last, fallbackAvatar(c)))}`;
     const chatKey = state.chatKey, epoch = state.epoch, length = c.chat.length;
@@ -3174,6 +3185,8 @@ async function autoDrive(type) {
         if (r.knock) return await autoKnock(r.knock);
         if (!auto.turnEnabled) return 'off';
         const next = (r.queue ?? [])[0];
+        // 问回来这会儿玩家开始打字了：不叫下一个（叩门在上面已经照旧让他写那一条）
+        if (next && afterReply && typingNow()) { console.log('[RP：幕后] 玩家在打字，先停'); return false; }
         return next ? await autoSpeak(next) : false;
     } finally { driving.delete(claim); }
 }
@@ -3744,11 +3757,15 @@ for (const name of ['CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED', 'MORE
 // 打字时预跑（D-100：前台速度）：停下来 2.5 秒，把草稿递给后台先配词、替在场的人组装；发出去的和草稿一样，轮到谁开口时就不用等。
 // 斜杠命令不算；后台一轮至多预跑两份草稿。
 let draftTimer = null;
+// 玩家在打字（T071）：只记真按键（ST 发送后自己派一个 input 清空框，那个不算），有没有字和时长的判法在 sync.playerTyping
+let lastKeyAt = 0;
+function typingNow() { return playerTyping(document.querySelector('#send_textarea')?.value, lastKeyAt, Date.now()); }
 function watchDraft() {
     const box = document.querySelector('#send_textarea');
     if (!box || box.dataset.rpDraft) return;
     box.dataset.rpDraft = '1';
-    box.addEventListener('input', () => {
+    box.addEventListener('input', e => {
+        if (e?.isTrusted) lastKeyAt = Date.now();
         clearTimeout(draftTimer);
         draftTimer = setTimeout(() => {
             if (!settings().enabled || !state.chatKey) return;
