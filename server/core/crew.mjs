@@ -48,19 +48,15 @@ export function keyPersonEntry(node, who, same = (a, b) => a === b) {
     return (Array.isArray(node?.要紧的人) ? node.要紧的人 : []).find(x => x && typeof x === 'object' && tidy(x.谁) && same(tidy(x.谁), who)) ?? null;
 }
 
-// 他心里的打算那一句（只给他本人）。用户 10/12：自己人的心思一写成"利用、拿捏"一类，前台就把他演成反派——所以整句过 warmWords；
-// 心思是他手上的料；到哪为止只留在规划，不拼到前台。
-// 小心思（示弱、激将、苦肉计一类，规划标了"小心思"）得有出发点撑着（出发点是在乎）：出发点空着的，只递"想……"，不递怎么做——
-// 不然前台只拿到一套手法、没有为什么，演出来就是耍人。keep：说她伤病的那一截拿掉（body 的守门）。
-const truthy = v => v === true || v === 'true';
+// 他心里想的那一句（只给他本人）。用户 10/12：自己人的心思一写成"利用、拿捏"一类，前台就把他演成反派——所以整句过 warmWords；
+// 心思是他手上的料；到哪为止只留在规划，不拼到前台。keep：说她伤病的那一截拿掉（body 的守门）。
+// 没到时间点的不递（T073，用户 10/25："提前泄露认知和所有事全让前台在一轮里丢出来都玩得很难受"）：规划写的"打算"那截常带具体日子和步骤
+// （"第 5 天一早……"），前台拿到就一轮说完——只递"想……，因为……"；打算、先别让人知道留在规划（他出手的那几拍照样落成事件，到点了才到前台）。
+// 小心思（示弱、激将一类）的手法本来就只在"打算"里，这下一律不递，出发点空着也只有"想……"
 export function mindLine(mind, { keep = () => true } = {}) {
     if (!mind || typeof mind !== 'object') return null;
-    const want = tidy(mind.想要).replace(/^想要?/, ''), why = tidy(mind.出发点).replace(/^因为/, ''), plan = tidy(mind.打算).replace(/^打算/, '');
-    const hide = tidy(mind.瞒着);
-    const bare = truthy(mind.小心思) && !why;
-    const head = [want && `想${want}`, why && `因为${why}`].filter(Boolean).join('，');
-    const tail = bare || !plan ? '' : `打算${plan}${hide ? `；先别让人知道：${hide}` : ''}`;
-    const body = [head, tail].filter(Boolean).join('；');
+    const want = tidy(mind.想要).replace(/^想要?/, ''), why = tidy(mind.出发点).replace(/^因为/, '');
+    const body = [want && `想${want}`, why && `因为${why}`].filter(Boolean).join('，');
     if (!body) return null;
     const line = warmWords(`你心里的打算（你自己的事，别说破）：${body}`);
     return keep(line) ? line : null;
@@ -84,11 +80,11 @@ export function pushedText(visible = [], { name, same = (a, b) => a === b, since
 export function crewLines({ name, userName = null, entry = null, present = [], trouble = false, same = (a, b) => a === b, keep = () => true, pushed = null } = {}) {
     if (!name || !entry || (userName && same(name, userName))) return { own: [], team: [] };
     const her = userName ?? '玩家的角色';
-    const segs = [['想办成', tidy(entry.想干)], ['接下来想做', tidy(entry.下一步)], [`想拉${her}一起`, tidy(entry.拉她)]]
-        .filter(([, v]) => v).map(([k, v]) => `${k}——${v}`).filter(s => keep(s));
+    // 只给"想办成"（T073）：接下来想做（下一步）、想拉她一起（拉她）是具体步骤，前台拿到就一轮说完；镜头外推一步照旧读下一步，办过了的由 pushed 那句带到前台
+    const segs = [['想办成', tidy(entry.想干)]].filter(([, v]) => v).map(([k, v]) => `${k}——${v}`).filter(s => keep(s));
     const own = [];
-    if (segs.length) own.push(`${name}这阵子自己的打算（${personWord(name)}自己的事：场面闲了会去办、会提起，不用每轮都提）：${segs.join('；')}`);
-    // 心思跟在"这阵子自己的打算"后面（数据约定第 2、3 条）
+    if (segs.length) own.push(`${name}这阵子自己想办成的事（${personWord(name)}自己的事：心里惦记着，场面合适了自然会去办、会提起，不用每轮都提）：${segs.join('；')}`);
+    // 心思跟在"这阵子自己想办成的事"后面（数据约定第 2、3 条）
     const mind = mindLine(entry.心思, { keep });
     if (mind) own.push(mind);
     if (trouble && tidy(entry.为她)) own.push(`${her}这会儿有难处：${tidy(entry.为她)}——去做，别光说。`);

@@ -1058,12 +1058,13 @@ export function openStore(file) {
         for (const m of items) {
             readCells(m);
             if (all) { const stopped = steps.filter(s => s.item_id === m.id && s.why?.startsWith('/停：')).at(-1); if (stopped) m.intimate_stop = { pos: stopped.pos, fp: stopped.fp }; }
-            Object.assign(m, { status: 'waiting', pocket_day: null, pocket_pos: null, settled_pos: null, settled_by: null, held_by: null, held_pos: null, why: null });
+            Object.assign(m, { status: 'waiting', pocket_day: null, pocket_pos: null, pocket_by: null, settled_pos: null, settled_by: null, held_by: null, held_pos: null, why: null });
             // settled_pos：有了结果（拿出来了、用上了、沉了、撤了）的那一步在哪条消息上——局势推演按它找"刚有了结果的事"
             // offered：这一件递给了谁（N-277），不改它在哪一步
+            // pocket_by：谁把它放进口袋的（"引子"＝活动快到了替它挂上门的；门上按它判引子自己到点没，T073）
             for (const s of steps) if (s.item_id === m.id && s.status === 'offered') Object.assign(m, { held_by: s.by_name, held_pos: s.pos });
             else if (s.item_id === m.id && s.status === KEPT) m.kept_pos = s.pos;
-            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, held_by: null, held_pos: null, settled_pos: null, settled_by: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_by: s.by_name ?? null } : {});
+            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_by: null, held_by: null, held_pos: null, settled_pos: null, settled_by: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_by: s.by_name ?? null } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_by: s.by_name ?? null } : {});
         }
         const active = plans.filter(p => !replaced.has(p.id)).at(-1);
         const current = active?.id;

@@ -1162,7 +1162,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     add(1, factionSlotLines({ ledger, name, present, talk: [talk, ...queryKeys].join('\n'), homes, today, relDay: ago }), 'world', 'person');
 
     // 主角团的打算（用户 10/12，N-363／N-365："角色是活的，有问题自己找办法……角色没有自己想干的事、没有驱动，和没后台的时候一样"）：
-    // 轮到主角团里的人开口（不是玩家、不是旁白），带上最新一份规划给他写的打算——想办成什么、手上在做什么、想拉她一起做什么；
+    // 轮到主角团里的人开口（不是玩家、不是旁白），带上最新一份规划给他写的想办成什么（具体步骤不给，到点办过了才由镜头外那句带来，T073）；
     // 她眼下有难处时多一句"会为她做什么——去做，别光说"；团里两人这一段之间的事，对方此刻在场才给；镜头外他按打算办到哪也带着（crew.mjs）。
     // 放在"他这阵子心里、手上还挂着的"那一层（back），长度算进那一格；他自己的打算不让位（让掉了就又是没有驱动），团里那句跟他牵头的事同一档
     if (drama && !camera && userName && !sameName(name, userName, rosterNames)) {

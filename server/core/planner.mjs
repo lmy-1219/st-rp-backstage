@@ -1141,7 +1141,9 @@ export function parseNodeCheck(text) {
 
 // 掷骰（可复现）：同一条、同一天，结果不变。
 // shown＝角色已经把这件事拿出来了（记账认出来的，D-100）；接下来给后半截，然后算 used。
-const SETTLED = new Set(['used', 'shown', 'sunk', 'sunk_told', 'void', 'expired']);
+export const SETTLED = new Set(['used', 'shown', 'sunk', 'sunk_told', 'void', 'expired']);
+// "在哪件之后"：同一份规划里那件还没了结，这件就先等着；题目对不上就不拦（stepPocket、引子到点没都用这一个）
+export const afterBlocked = (m, menu = [], statusOf = x => x.status) => !!m?.after_title && menu.some(x => x.id !== m.id && x.plan_id === m.plan_id && x.title === m.after_title && !SETTLED.has(statusOf(x)));
 
 export const roll = (key, sides) => parseInt(createHash('sha256').update(String(key)).digest('hex').slice(0, 8), 16) % sides;
 
@@ -1191,7 +1193,7 @@ export function stepPocket(menu, { today, dayOf = null, at = 0, firm = null, hol
     const stillIn = menu.filter(m => m.status === 'pocket' && !out(m));
     // "在哪件之后"：同一份规划里那件还没了结（接了或沉了），这件就先等着；题目对不上就不拦。
     const statusOf = m => changes.find(c => c.id === m.id)?.status ?? m.status;
-    const blocked = m => !!m.after_title && menu.some(x => x.id !== m.id && x.plan_id === m.plan_id && x.title === m.after_title && !SETTLED.has(statusOf(x)));
+    const blocked = m => afterBlocked(m, menu, statusOf);
     // 进口袋的先后按用意（章程 F1）：主线 > 关系 > 意外 > 氛围（没写用意的旧件排在关系后头），同一档再按日子
     const ready = menu.filter(m => m.status === 'waiting' && !out(m) && today >= m.ready_day && !blocked(m)).sort((a, b) => rankOf(a, intimateFirst) - rankOf(b, intimateFirst) || a.ready_day - b.ready_day || a.id - b.id);
     const budget = pocketBudget(menu, ready.length, p);

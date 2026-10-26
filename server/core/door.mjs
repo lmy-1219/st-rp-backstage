@@ -10,8 +10,18 @@ import { absentPeople, pickContact } from './contacts.mjs';
 import { sharedMatter } from './matters.mjs';
 import { narrationOf, PARTS } from './timeline.mjs';
 // slot.mjs 也 import 这里（旁白那一格读名单）：两边都只在调用时用对方，循环引用没事
-import { timelineFor, playModeOf } from './slot.mjs';
+import { timelineFor, playModeOf, menuDays } from './slot.mjs';
 import { enteredSince, emptySegment } from './landing.mjs';
+import { leadReady } from './eventlead.mjs';
+
+// 被"引子"挂上门的那几件（活动快到了替它放进口袋，eventlead.eventStep）：按套过日子的菜单（和 eventStep 同一套）判引子自己到点没，
+// 没到点标 early——门上不算到时候了。别的进口袋路径（stepPocket、改期、局势当下）一概不动（T073）
+export function earlyLeads(store, menu = [], timeline = null) {
+    if (!menu.some(m => m.status === 'pocket' && m.pocket_by === '引子')) return menu;
+    const days = menuDays(store, menu, timeline?.dayOf ?? null);
+    const today = timeline?.today;
+    return menu.map((m, i) => m.status === 'pocket' && m.pocket_by === '引子' && !leadReady(days[i], days, today) ? { ...m, early: true } : m);
+}
 
 // 旁白留的记号"（该来：名字／方式）"：方式可缺；不一定在最末（模型常在后面又补一句），几处都有就认最后一个、全剥掉
 const MARK = /[（(]\s*该来\s*[:：]\s*([^()（）\r\n/／]+?)\s*(?:[/／]\s*(去找他|他过来|消息|电话)\s*)?[）)]/g;
@@ -94,7 +104,8 @@ export function doorAt(input = {}) {
                 continue;
             }
             const label = way === '打来电话' ? '来电' : way === '发来消息' ? '发来短讯' : /上门|来找|敲门/.test(`${m.title ?? ''}${m.surface ?? ''}`) ? '上门' : '可能会来';
-            add('pocket', m.id, true, false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m));
+            // 活动快到了、替它挂上门的引子，引子自己没到点（doorFor 标 early）：门上列着，但不算到时候了（T073）
+            add('pocket', m.id, !m.early, false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m));
         }
         if (reached) add('reach', reach.id ?? who, true, false, reach.matter ? `可能来联系：${reach.matter}` : '可能来联系', [...new Set([reach.matterText, reach.hook, ...(reach.threads ?? []).map(r => r.text)].filter(Boolean))].join('；'));
         candidates.sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b));
@@ -131,7 +142,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const pending = pendingFor(store, records, chatKey, options);
     const roster = store.getCast?.(chat.story_id) ?? [];
     const relations = store.relationsOf?.(chat.story_id) ?? null;
-    const menu = store.menuOf?.(chatKey) ?? [];
+    const menu = earlyLeads(store, store.menuOf?.(chatKey) ?? [], timeline);
     const holds = read(store, `arrival_hold:${chatKey}`, []);
     const arrivals = read(store, `arrivals:${chatKey}`, []);
     let anchors = null, members = [];

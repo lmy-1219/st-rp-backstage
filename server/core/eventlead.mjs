@@ -12,7 +12,7 @@
 //       再排一件很轻的找上门的回音（他自己提起、有人带话、发来照片视频），内容用活动的"没接会怎样"，没有就用题拼一句。
 // 记的几笔都挂在消息上（删回那条之前就当没发生，下次折再算）：event_lead（升级过的）、event_moves（改期）、event_echo（回音排过的）。
 // 题材无关：地方、日子、谁、题都来自规划。
-import { entryOf, WORLD, ifSunkOf } from './planner.mjs';
+import { entryOf, WORLD, ifSunkOf, afterBlocked } from './planner.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
 import { hasCard } from './arrival.mjs';
 import { sameName } from './setup.mjs';
@@ -56,6 +56,9 @@ const moveOf = (m, moves = []) => m?.moved ?? moves.filter(x => x.id === m?.id).
 const entryFor = (m, done = {}, moves = []) => { const e = done?.[m.id]; const mv = moveOf(m, moves); return e && !(mv && e.at?.pos < mv.at?.pos) ? e : null; };
 // 引子拿出来过了没有（改期那一下以前拿出来的不算）
 export const leadOut = (lead, move = null) => !!lead && DONE.has(lead.status) && !(move && Number.isFinite(lead.settled_pos) && lead.settled_pos < move.at?.pos);
+// 引子自己到点了没（用户 10/25：没到时间点的东西不递给前台）：自己的日子到了（没写日子的当到了），"在哪件之后"那件也了结了（判法同 stepPocket）。
+// 活动快到了不等于引子能先拿出来：没到点的不挂门，预告只给模糊风声
+export const leadReady = (lead, menu = [], today) => !!lead && !(Number.isFinite(lead.ready_day) && Number.isFinite(today) && today < lead.ready_day) && !afterBlocked(lead, menu);
 
 // 该升级的那几件（折一次时）：活动还排着、在口袋里，到了它那一格的前一格（只有当格的就当格），引子还没拿出来，也还没升级过。
 // canDoor(引子)：挂得上门（找上门、牵头的人有卡又不在场）。返回 [{ event, lead, how: 'door'|'line' }]
@@ -70,7 +73,7 @@ export function leadSteps(menu = [], { today, node = null, done = {}, moves = []
         if (leadOut(lead, moveOf(m, moves))) continue;
         if (lead && leads.has(lead.id)) { out.push({ event: m, lead, how: 'shared' }); continue; }   // 几件活动共用一个引子：只送一回，后面几件跟着记成升级过
         if (lead) leads.add(lead.id);
-        out.push({ event: m, lead, how: lead && canDoor(lead) ? 'door' : 'line' });
+        out.push({ event: m, lead, how: lead && canDoor(lead) && leadReady(lead, menu, today) ? 'door' : 'line' });
     }
     return out;
 }
@@ -213,7 +216,8 @@ export function leadNotice(store, chatKey, { menu = [], messages = [], anchorMsg
         const lead = e.lead != null ? menu.find(x => x.id === e.lead) : null;
         if (lead && DONE.has(lead.status) && Number.isFinite(lead.settled_pos) && lead.settled_pos >= e.at.pos) continue;
         const when = whenText(m.ready_day, today, timeScale, m.trigger?.time);
-        rows.push({ text: (lead ? tidy(retime(lead.surface, lead.said_day)) : '') || rumorText(m, when), when, place: tidy(m.place), title: tidy(m.title), moved: !!m.moved });
+        // 引子自己没到点（日子没到、前置那件没了结）：只给模糊风声，不把引子原文（具体日子、地点、谁写的信）提前递出去
+        rows.push({ text: (lead && leadReady(lead, menu, today) ? tidy(retime(lead.surface, lead.said_day)) : '') || rumorText(m, when), when, place: tidy(m.place), title: tidy(m.title), moved: !!m.moved });
         if (record && anchorMsg && !(e.given && e.given.pos === anchorMsg.pos && e.given.fp === anchorMsg.fp)) { all[id] = { ...e, given: { pos: anchorMsg.pos, fp: anchorMsg.fp } }; changed = true; }
     }
     if (changed) store.setMeta?.(LEADS_KEY(chatKey), JSON.stringify(all));
