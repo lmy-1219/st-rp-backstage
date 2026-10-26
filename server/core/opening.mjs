@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { amountsIn } from './money.mjs';
 import { dueOf } from './promises.mjs';
 import { hasCard } from './arrival.mjs';
+import { emptySegment } from './landing.mjs';
 import { sameName, knowsRow } from './setup.mjs';
 
 export const SEED = 'setup:开场:';
@@ -168,7 +169,8 @@ export function awayPlansOf(store, chatKey, { messages = null } = {}) {
         const same = (a, b) => sameName(a, b, names);
         for (const [k, p] of Object.entries(seedPlans(data, { roster, first: msgs[0], same, userName }))) {
             const his = x => !!x && (same(x.who ?? x.name ?? '', p.who) || (!!p.avatar && x.avatar === p.avatar));
-            if (Object.values(plans).some(his) || (Array.isArray(arrivals) ? arrivals : []).some(his) || (p.avatar && (anchors?.[p.avatar]?.segments ?? []).length)) continue;
+            // 进过场才不算开局去向；零长度的封段（拉进来判不在场当场封上，T070）不算进过场（用户 10/15）
+            if (Object.values(plans).some(his) || (Array.isArray(arrivals) ? arrivals : []).some(his) || (p.avatar && (anchors?.[p.avatar]?.segments ?? []).some(s => !emptySegment(s)))) continue;
             plans[k] = p;
         }
     } catch {}

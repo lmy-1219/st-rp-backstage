@@ -2,7 +2,7 @@
 // ① 接入的窗口里，消息一有变化就把"当前序列"增量同步给后台（只传指纹，后台缺哪条正文才补传哪条）；
 // ② 每次某个角色要发言前，向后台要"只给他的那一格"，临时塞进这次请求，用完即清；
 // ③ 设置面板里的开关与状态。后台连不上时什么都不做，ST 照常。
-import { visibleTo, filterVisible, knockHtml, autoDoorHtml, autoTurnEnabled, applyLeaveEvent, isolateLeaveSupportsIndex, closeIsolationAt, runLeaveAttempt, resetLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
+import { visibleTo, filterVisible, knockHtml, autoDoorHtml, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, applyLeaveEvent, isolateLeaveSupportsIndex, closeIsolationAt, runLeaveAttempt, resetLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 
 const MODULE = 'rp_emergence';
@@ -152,6 +152,16 @@ async function api(route, body, timeout = 30000) {
 
 const state = { epoch: 0, chatKey: null, syncing: false, dirty: false, timer: null, status: null, plan: null, planTimer: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null, entering: new Set() };
 
+// ---------- T070 新加的数值（用户 10/25：决定过的数值要报；回执"新加的数值"一节逐条列） ----------
+// 单聊门上"某人该来了"那条提示停留多久（毫秒）。话比较长（带怎么转群聊），比现有 8000 稍长
+const SOLO_DOOR_TOAST_MS = 10000;
+// 单聊门上弹过的提示记几件（聊天元数据 rpeDoorNoticed）：只留最近这么多，免得元数据越攒越大；超出的最早那几件万一又挂上门会再弹一次
+const DOOR_NOTICE_KEEP = 200;
+// 拉人进群攒一小会儿再一起处理（毫秒）：玩家在群面板连着点好几个人，ST 每点一次发一次 GROUP_UPDATED；最后一次点完这么久没再点才处理
+const ARRIVAL_BATCH_MS = 1500;
+// 拉人进群／取消静音那条合并提示停留多久（毫秒）：好几行（谁在场、谁静音、各自看不见几条），比现有 8000 稍长
+const ARRIVAL_TOAST_MS = 12000;
+
 // 不依赖打开聊天：短暂启动失败先等两分钟，404 则直接告诉玩家插件没加载。
 export function createBackendConnection({ request, now = Date.now, schedule = setTimeout, cancel = clearTimeout, changed = () => {} }) {
     let kind = 'starting', since = null, timer = null, busy = false, revision = 0;
@@ -225,15 +235,29 @@ async function refreshPlan() {
     render();
 }
 
+// 单聊（T070）：不管自动进离场开没开都取门——单聊里不叩门，到时候了的人只能挂在门上、弹一次提示；群聊照旧（自动进离场开着时不取）
 async function refreshDoor() {
-    if (!state.chatKey || !settings().enabled || auto.on !== false) { state.door = { items: [], lit: null }; render(); return; }
+    const solo = !currentGroup(ctx());
+    if (!state.chatKey || !settings().enabled || (!solo && auto.on !== false)) { state.door = { items: [], lit: null }; render(); return; }
     const c = ctx(), present = members(c).filter(m => !m.disabled).map(m => m.name).filter(Boolean);
     const recentUser = [...(c.chat ?? [])].reverse().find(m => m.is_user)?.mes ?? '';
+    const chatKey = state.chatKey;
     try {
         const r = await api('door', { chatKey: state.chatKey, present, recentUser });
-        if (state.chatKey) state.door = r;
+        if (state.chatKey) { state.door = r; if (solo && state.chatKey === chatKey) noticeSoloDoor(r.items ?? []); }
     } catch { state.door = { items: [], lit: null }; }
     render();
+}
+// 单聊门上某人第一次到时候了：弹一次提示；同一件只弹一次，记在聊天元数据里（换页面不重复弹）
+function noticeSoloDoor(items) {
+    const c = ctx(), meta = c.chatMetadata;
+    if (!meta || currentGroup(c)) return;
+    const seen = Array.isArray(meta.rpeDoorNoticed) ? meta.rpeDoorNoticed : [];
+    const fresh = freshDoorNotices(items, seen);
+    if (!fresh.length) return;
+    meta.rpeDoorNoticed = [...seen, ...fresh.map(x => x.key)].slice(-DOOR_NOTICE_KEEP);
+    c.saveMetadata?.()?.catch?.(() => {});
+    for (const { item } of fresh) globalThis.toastr?.info(soloDoorToast(item), 'RP：幕后', { timeOut: SOLO_DOOR_TOAST_MS });
 }
 
 const TYPE_ORDER = ['改变', '想法', '了结', '钱', '关系', '说', '心里', '做', '时间'];
@@ -1815,6 +1839,7 @@ async function onChatChanged() {
     Object.assign(state, { chatKey: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
     Object.assign(auto, { on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map() });
     state.memberBase = memberSnapshot();   // 换了窗口：群成员名单的基线重记（不触发），不拿上一个窗口的名单比
+    arrivals.cancel();   // 拉进群攒着的那批（T070 二）作废
     dayLabels = []; boardLabels = []; state.boardCast = [];
     drawDays();
     render();
@@ -2228,7 +2253,7 @@ function mountPanel() {
         hint.innerHTML=installationHint({backendDown:state.backendDown,backendStatus:state.backendStatus,localRelease:state.localRelease,backendRelease:state.release});hint.hidden=!hint.innerHTML;
         const door = document.querySelector('#rpe_door');
         if (door) {
-            door.innerHTML = state.chatKey && s.enabled ? autoDoorHtml({...auto,items:state.door?.items??[],lit:state.door?.lit},escapeHtml) : '';
+            door.innerHTML = state.chatKey && s.enabled ? autoDoorHtml({...auto,items:state.door?.items??[],lit:state.door?.lit,solo:!currentGroup(ctx())},escapeHtml) : '';
             door.hidden = !door.innerHTML;
         }
         $('[data-opt="enabled"]').checked = s.enabled;
@@ -3168,8 +3193,12 @@ async function autoSpeak(q) {
     if (group.disabled_members?.includes(ch.avatar)) {
         // 静音着＝这会儿不在场；刚走的人被点名叫回来（back）才取消静音、从这条起又在场；别的不叫
         if (!q.back) return false;
-        await run(`/member-enable ${at}`);
-        if (hasCommand('isolate')) await run(`/isolate ${ch.name}`);
+        // 扩展自己取消的静音：别被 watchMembers 当成玩家手动取消静音（T070 三）、区间开两次
+        state.entering.add(ch.avatar);
+        try {
+            await run(`/member-enable ${at}`);
+            if (hasCommand('isolate')) await run(`/isolate ${ch.name}`);
+        } finally { state.entering.delete(ch.avatar); followBase(); }
     }
     auto.noRepeat = q.noRepeat ? ch.avatar : null;
     await c.executeSlashCommandsWithOptions(`/trigger await=true ${at}`);
@@ -3274,7 +3303,8 @@ async function applyAutoClose(l,why,chatKey) {
             guard();
             if(!rec || rec.undone) return;
             const g=currentGroup(ctx()),i=g?.members.indexOf(ch.avatar)??-1;
-            if((rec.muted||rec.muting) && !rec.wasDisabled && !laterClose() && i>=0 && g.disabled_members?.includes(ch.avatar)) await c.executeSlashCommandsWithOptions(`/member-enable ${i}`);
+            // 撤销离场取消的静音是扩展自己做的：别被 watchMembers 当成玩家手动取消静音（T070 三）
+            if((rec.muted||rec.muting) && !rec.wasDisabled && !laterClose() && i>=0 && g.disabled_members?.includes(ch.avatar)) {state.entering.add(ch.avatar);try{await c.executeSlashCommandsWithOptions(`/member-enable ${i}`);}finally{state.entering.delete(ch.avatar);followBase();}}
             if((rec.muted||rec.muting) && !rec.wasDisabled && !laterClose() && i>=0 && currentGroup(ctx())?.disabled_members?.includes(ch.avatar)) throw new Error('角色未取消静音');
             rec.undone=true;await save();
         },
@@ -3479,10 +3509,10 @@ async function arriveNow(ch, opts = {}) {
     return got;
 }
 // 玩家在群面板里直接把卡移出群（不是静音）：区间没关，后台会一直当他在场。和上一次看到的名单比，少了的有卡的人当作离场。
-// 页面刚打开、切换聊天时只记名单，不触发；静音不算（名单没变）。
+// 页面刚打开、切换聊天时只记名单，不触发；静音不算（名单没变）。disabled：静音名单（T070 三，比出玩家手动取消静音的人）
 function memberSnapshot() {
     const group = currentGroup(ctx());
-    return group ? { key: `${group.id}|${group.chat_id ?? ''}`, members: [...(group.members ?? [])] } : null;
+    return group ? { key: `${group.id}|${group.chat_id ?? ''}`, members: [...(group.members ?? [])], disabled: [...(group.disabled_members ?? [])] } : null;
 }
 function watchMembers() {
     const c = ctx(), base = state.memberBase, snap = memberSnapshot();
@@ -3508,22 +3538,158 @@ function watchMembers() {
         if (currentGroup(c)?.disabled_members?.includes(avatar)) continue;
         // 门上他那一项先拿着：进场以后他就不在门上了
         const doorItem = (state.door?.items ?? []).find(i => i.avatar === avatar || i.who === ch.name) ?? null;
-        state.entering.add(avatar);
-        (async () => {
-            try {
-                if (hasCommand('isolate')) await run(`/isolate ${ch.name}`);
-                await syncNow(true).catch(() => {});
-                let item = doorItem;
-                if (!item) { await refreshDoor().catch(() => {}); item = (state.door?.items ?? []).find(i => i.avatar === avatar || i.who === ch.name) ?? null; }
-                const opts = arriveOpts(item);
-                globalThis.toastr?.info(`${ch.name}被拉进了群，已按进场处理：从这条起${ch.name}在场，之前的事${ch.name}没听见${opts.mode === 'remote' ? `（${ch.name}是${opts.way === '电话' ? '打电话' : '发消息'}来的）` : ''}。要${ch.name}说话就点${ch.name}。`, 'RP：幕后', { timeOut: 8000 });
-                await arriveNow(ch, opts);
-            } finally {
-                state.entering.delete(avatar);
-                refreshDoor().catch(() => {});
-            }
-        })().catch(() => {});
+        // 自动进离场开着（T070 二）：不逐个立刻进场，攒一小会儿和同一批拉进来的一起按场面判；和玩家同名的卡照现状
+        if (auto.on === true && ch.name !== c.name1) { arrivals.add(`${state.epoch}|${snap.key}`, { avatar, name: ch.name, count: c.chat?.length ?? 0, doorItem }); continue; }
+        enterAsBefore(ch, doorItem);
     }
+    // 玩家在群面板里手动取消静音（T070 三）：只在自动进离场开着时算进场；关着照旧什么都不做
+    if (auto.on !== true) return;
+    const unmuted = unmutedMembers(base, snap, { camera: cameraOf(c)?.avatar ?? null, skip: [...state.entering] })
+        .map(avatar => (c.characters ?? []).find(x => x.avatar === avatar)).filter(ch => ch && !isCamera(ch) && ch.name !== c.name1);
+    if (unmuted.length) admitUnmuted(unmuted);
+}
+// 现状的拉人进场（自动进离场关着、或者按场面判不成时）：从这条起在场、后台替他理怎么来的，一人一条提示
+function enterAsBefore(ch, doorItem) {
+    const avatar = ch.avatar;
+    state.entering.add(avatar);
+    (async () => {
+        try {
+            if (hasCommand('isolate')) await run(`/isolate ${ch.name}`);
+            await syncNow(true).catch(() => {});
+            let item = doorItem;
+            if (!item) { await refreshDoor().catch(() => {}); item = (state.door?.items ?? []).find(i => i.avatar === avatar || i.who === ch.name) ?? null; }
+            const opts = arriveOpts(item);
+            globalThis.toastr?.info(`${ch.name}被拉进了群，已按进场处理：从这条起${ch.name}在场，之前的事${ch.name}没听见${opts.mode === 'remote' ? `（${ch.name}是${opts.way === '电话' ? '打电话' : '发消息'}来的）` : ''}。要${ch.name}说话就点${ch.name}。`, 'RP：幕后', { timeOut: 8000 });
+            await arriveNow(ch, opts);
+        } finally {
+            state.entering.delete(avatar);
+            refreshDoor().catch(() => {});
+        }
+    })().catch(() => {});
+}
+// 进场那一步（拉进群判在场、手动取消静音共用）：开区间（since 有就从那条起；早于他上一段在场的末尾就不追，从此刻开），
+// 读回他这一段从第几条起、之前有没有真在场过（零长度的封段不算）。没装上下文隔离扩展：什么都不开，from 为空
+async function openPresence(ch, since = null) {
+    if (!hasCommand('isolate')) return { from: null, since: null, earlier: false };
+    const segsNow = () => ctx().chatMetadata?.contextIsolation?.anchors?.[ch.avatar]?.segments ?? [];
+    const real = s => s && s.to != null && s.to > s.from;
+    const floor = Math.max(0, ...segsNow().filter(real).map(s => s.to));
+    const at = Number.isInteger(since) && since >= floor ? since : null;
+    await run(at != null ? `/isolate ${ch.name} ${at}` : `/isolate ${ch.name}`);
+    const segs = segsNow(), open = segs.find(s => s && s.to == null);
+    const from = Number.isInteger(open?.from) ? open.from : null;
+    return { from, since: at, earlier: from != null && segs.some(s => real(s) && s.from < from) };
+}
+const arrivalHow = opts => opts.mode === 'remote' ? (opts.way === '电话' ? '打电话' : '发消息') : null;
+const showArrivalToast = lines => { if (lines.length) globalThis.toastr?.info(lines.map(l => escapeHtml(l)).join('<br>'), 'RP：幕后', { timeOut: ARRIVAL_TOAST_MS, escapeHtml: false }); };
+const arrivals = createArrivalBatcher({ wait: ARRIVAL_BATCH_MS, run: (key, list) => { settleArrivals(key, list).catch(e => console.warn('[RP：幕后] 拉进群按场面判没走完', e)); } });
+// 一批拉进群的（T070 二）：隔离扩展当场给他们开了一段区间——先就地封成零长度（写盘、读回核实），问一次场面（在场名单去掉这批人），
+// 明确在这儿（present）／在联系（remote）的进场（场面本来就记他在场的从那条起），其余静音、不开区间、不叫后台理进场。
+// 封不上的、同步或场面问不到的：封上的还原，照现状逐个进场（不静音），console 记一笔
+async function settleArrivals(key, list) {
+    const c = ctx(), group = currentGroup(c), snap = memberSnapshot();
+    if (!group || !snap || key !== `${state.epoch}|${snap.key}` || !state.chatKey || !settings().enabled) return;
+    const chatKey = state.chatKey, epoch = state.epoch;
+    const here = () => state.epoch === epoch && state.chatKey === chatKey && memberSnapshot()?.key === snap.key;
+    // 等的这一会儿里又被移出、被静音的不算
+    const people = list.filter(p => group.members.includes(p.avatar) && !group.disabled_members?.includes(p.avatar));
+    if (!people.length) return;
+    // 等的这一会儿里自动进离场关了：照现状逐个进场
+    if (auto.on !== true) { for (const p of people) { const ch = cardNamed(c, p.name, p.avatar); if (ch) enterAsBefore(ch, p.doorItem); } return; }
+    const legacy = [];
+    for (const p of people) state.entering.add(p.avatar);
+    try {
+        const batch = people.map(p => p.avatar), sealed = [];
+        for (const p of people) {
+            const r = sealArrival(c, { avatar: p.avatar, count: p.count, batch });   // r.before：封之前那两项的原样
+            if (r.ok) sealed.push({ ...p, sealed: r.sealed, before: r.before });
+            else { console.log('[RP：幕后] 拉进群：没封区间，照现状进场', p.name, r.why); legacy.push(p); }
+        }
+        let ok = [];
+        if (sealed.length) {
+            let saved = true;
+            try { await c.saveMetadata(); } catch (e) { saved = false; console.warn('[RP：幕后] 拉进群：封区间没写上，照现状进场', e); }
+            const live = ctx();
+            ok = saved ? sealed.filter(s => sealedHolds(live, s)) : [];
+            const bad = sealed.filter(s => !ok.includes(s));
+            if (bad.length) {
+                for (const s of bad) { unsealArrival(c, s); legacy.push(s); console.warn('[RP：幕后] 拉进群：封区间读回没对上，照现状进场', s.name); }
+                try { await c.saveMetadata(); } catch {}
+            }
+        }
+        if (ok.length) {
+            let board = null, why = null;
+            try {
+                if (await syncNow(true) === false) why = '同步没成';
+                else if (here()) board = await api('board', { chatKey, present: presentNames(ctx()).filter(n => !people.some(p => p.name === n)), recentUser: [...(ctx().chat ?? [])].reverse().find(m => m.is_user)?.mes ?? '' });
+            } catch (e) { why = String(e?.message ?? e); }
+            if (!here()) { console.warn('[RP：幕后] 拉进群：处理当中换了窗口，这批不再处理', people.map(p => p.name)); legacy.length = 0; return; }
+            const sorted = why ? null : sortArrivals(ok, board);
+            if (!sorted) {
+                console.warn('[RP：幕后] 拉进群：场面没问到，封上的区间还原，照现状进场', why ?? '场面没答上来');
+                for (const s of ok) unsealArrival(ctx(), s);
+                try { await ctx().saveMetadata(); } catch {}
+                legacy.push(...ok);
+            } else await placeArrivals(sorted, here);
+        }
+    } finally {
+        for (const p of people) state.entering.delete(p.avatar);
+        followBase();
+    }
+    if (!here()) return;
+    for (const p of legacy) { const ch = cardNamed(ctx(), p.name, p.avatar); if (ch) enterAsBefore(ch, p.doorItem); }
+}
+// 分拣好了：不在场的静音，在场的开区间；一条合并提示；然后逐个让后台理怎么来的（门上那项照旧取方式）
+async function placeArrivals({ enter, mute }, here) {
+    for (const m of mute) {
+        const at = currentGroup(ctx())?.members.indexOf(m.avatar) ?? -1;
+        if (at >= 0) await run(`/member-disable ${at}`);
+        if (!currentGroup(ctx())?.disabled_members?.includes(m.avatar)) console.warn('[RP：幕后] 拉进群：判不在场但没静音上', m.name);
+    }
+    await admit(enter, here, { all: [...enter, ...mute].map(p => p.name), muted: mute.map(p => p.name) });
+}
+// 进场（拉进群判在场、手动取消静音共用，T070 二、三）：开区间 → 同步 → 门上那项取方式 → 一条提示（一人一行） → 后台逐个理怎么来的
+async function admit(people, here, { all = [], muted = [] } = {}) {
+    const entered = [];
+    for (const e of people) {
+        const ch = cardNamed(ctx(), e.name, e.avatar);
+        if (!ch || !here()) continue;
+        entered.push({ ch, item: e.doorItem ?? null, ...await openPresence(ch, e.since ?? null) });
+    }
+    await syncNow(true).catch(() => {});
+    if (!here()) return;
+    if (entered.some(x => !x.item)) await refreshDoor().catch(() => {});
+    for (const x of entered) x.opts = arriveOpts(x.item ?? (state.door?.items ?? []).find(i => i.avatar === x.ch.avatar || i.who === x.ch.name) ?? null);
+    showArrivalToast(arrivalToastLines({
+        all,
+        entered: entered.map(x => ({ who: x.ch.name, from: x.from, since: x.since, earlier: x.earlier, how: arrivalHow(x.opts) })),
+        muted,
+    }));
+    for (const x of entered) { if (here()) await arriveNow(x.ch, x.opts); }
+    refreshDoor().catch(() => {});
+}
+// 玩家在群面板里手动取消静音（T070 三，自动进离场开着）：＝进场，和拉进群判在场走同一个 admit。
+// 扩展自己取消的（叩门、点门、叫回来、撤销离场）在 state.entering 里、名单基线也跟上了，不算。
+// 他本来就有开着的区间（静音时没关区间，隔离扩展还当他在场）：照旧不管，console 记一笔——不重开、不重理进场
+function admitUnmuted(list) {
+    const c = ctx(), snap = memberSnapshot();
+    if (!snap) return;
+    const chatKey = state.chatKey, epoch = state.epoch;
+    const here = () => state.epoch === epoch && state.chatKey === chatKey && memberSnapshot()?.key === snap.key;
+    const people = [];
+    for (const ch of list) {
+        if (hasCommand('isolate') && (c.chatMetadata?.contextIsolation?.anchors?.[ch.avatar]?.segments ?? []).some(s => s && s.to == null)) { console.log('[RP：幕后] 取消静音：区间本来就开着，不当新进场', ch.name); continue; }
+        const doorItem = (state.door?.items ?? []).find(i => i.avatar === ch.avatar || i.who === ch.name) ?? null;
+        people.push({ avatar: ch.avatar, name: ch.name, doorItem });
+    }
+    if (!people.length) return;
+    for (const p of people) state.entering.add(p.avatar);
+    admit(people, here).catch(e => console.warn('[RP：幕后] 取消静音进场没走完', e)).finally(() => { for (const p of people) state.entering.delete(p.avatar); followBase(); });
+}
+// 扩展自己改了群名单／静音以后：名单基线跟上，别把自己做的当成玩家做的
+function followBase() {
+    const snap = memberSnapshot();
+    if (snap && state.memberBase?.key === snap.key) state.memberBase = snap;
 }
 async function leaveChar(who) {
     const c = ctx(), group = currentGroup(c);

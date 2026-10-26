@@ -4,7 +4,7 @@ import { personWord, renderPronouns } from './pronoun.mjs';
 // 一来一回：镜头那一格里递一句"这一段让他来"（只写到他出现为止，他的话和动作由他自己的卡来）→ 扩展问玩家让不让他进场 →
 // 进场时便宜模型替他理一次"怎么来的、为什么来、到场那一刻看得见什么"→ 他头一回开口的那一格里带上（之前说的话他没听见）。
 // 题材无关：人名、地方都来自聊天和名册。
-import { arrivalLive } from './landing.mjs';
+import { arrivalLive, emptySegment } from './landing.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
 
 // 名册里有卡的人（头像是图片文件；"face:"开头的是没卡的新面孔；镜头那张卡不算）
@@ -102,9 +102,10 @@ export function playerThereLines({ who, userName = '对方', place = '', now = [
 // now：他接通以后那几条里写到的他那头的位置（此刻的样子读出来的），有就带上——他在他那头走动，不在镜头这间屋里（用户 10/8）
 export const remoteLine = ({ who, how = '', where = '', now = '', userName = '对方' }) => `（${who}人不在这儿${where || now ? `，此刻在${[now ? String(where).replace(/^在/, '').split(/[，,；;]/)[0] : String(where).replace(/^在/, ''), now].filter(Boolean).join('，')}（以这个为准，${personWord(who)}那头和${userName}这儿不是一处）` : '，还在别处'}。${personWord(who)}是${/消息|短讯|短信/.test(how) ? '发消息' : '打电话'}来的：${/消息|短讯|短信/.test(how) ? renderPronouns("这一条只写〔当事人〕发过来的消息——屏幕上的几行字", { person: who }) : renderPronouns("这一条只写电话里〔当事人〕说的话、〔当事人〕那头听得见的动静", { person: who })}；别写${personWord(who)}回到这儿、走进门。${personWord(who)}说过回来时要怎样的，等${personWord(who)}真回来再说；要过来，得等${personWord(who)}真到了门口。${thereLine(how, userName, who)}）`;
 
-// 他上一回离场在哪条：上下文隔离记的在场区间里，封上了的、在这一次进场之前的最后一段的末尾（第一次进场没有）
+// 他上一回离场在哪条：上下文隔离记的在场区间里，封上了的、在这一次进场之前的最后一段的末尾（第一次进场没有）。
+// 零长度的封段（拉进来判不在场、当场封上，T070；拉进来又移出、一句没说）不算离场（用户 10/15）
 export function lastLeave(anchors, avatar, at) {
-    const segs = (anchors?.[avatar]?.segments ?? []).filter(s => Number.isFinite(s?.to) && s.to <= at);
+    const segs = (anchors?.[avatar]?.segments ?? []).filter(s => Number.isFinite(s?.to) && s.to <= at && !emptySegment(s));
     const last = segs.reduce((x, s) => (!x || s.to > x.to ? s : x), null);
     return last ? last.to : null;
 }

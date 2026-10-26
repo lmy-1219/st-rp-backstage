@@ -262,14 +262,17 @@ export function knockHtml(waiting, escape = s => String(s ?? '')) {
     return `<div class="rpe-door-title">${escape(waiting.who)}${way}，候着</div><div class="rpe-door-list"><div class="rpe-door-item rpe-door-lit"><span class="rpe-door-who">你回不回都行；打字回${escape(waiting.who)}也算</span>${b('接', yes)}${b('不理', '不理')}</div></div>`;
 }
 
-export function doorHtml(items = [], lit = null, escape = s => String(s ?? '')) {
+// solo：单聊（T070）——单聊进不了场，不画进场按钮，每项后面写一句怎么让他进场
+export function doorHtml(items = [], lit = null, escape = s => String(s ?? ''), { solo = false } = {}) {
     if (!items.length) return '';
     const reason = { narrator: '旁白觉得该来了', named: `旁白写到了${lit?.who ?? ''}`, program: '到时候了' };
     const ordered = [...items].sort((a, b) => Number(lit?.who === b.who) - Number(lit?.who === a.who));
     const blocks = ordered.map(item => {
         const isLit = lit?.who === item.who;
         const labels = { '去找他': `你去找${item.who}`, '他过来': `让${item.who}过来`, 消息: `${item.who}发消息`, 电话: `${item.who}打电话` };
-        const ways = (item.ways ?? []).map(way => `<button type="button" class="menu_button rpe-door-way" data-who="${escape(item.who)}" data-avatar="${escape(item.avatar ?? '')}" data-way="${escape(way)}">${escape(labels[way] ?? way)}</button>`).join('');
+        const ways = solo
+            ? `<span class="rpe-door-reason">要让${escape(item.who)}进场：把这个聊天转成群聊、把${escape(item.who)}拉进群</span>`
+            : (item.ways ?? []).map(way => `<button type="button" class="menu_button rpe-door-way" data-who="${escape(item.who)}" data-avatar="${escape(item.avatar ?? '')}" data-way="${escape(way)}">${escape(labels[way] ?? way)}</button>`).join('');
         return `<div class="rpe-door-item${isLit ? ' rpe-door-lit' : ''}"><span class="rpe-door-who" title="${escape(item.label ?? '')}">${escape(item.who)} · ${escape(item.label ?? '')}</span>${ways}<button type="button" class="menu_button rpe-door-cancel" data-who="${escape(item.who)}">×</button></div>`;
     }).join('');
     const note = lit ? `<span class="rpe-door-reason">${escape(reason[lit.by] ?? '')}</span>` : '';
@@ -315,6 +318,13 @@ export function arriveOpts(item) {
     const ways = Array.isArray(item?.ways) ? item.ways : [];
     return ways.length && ways.every(w => w === '消息' || w === '电话') ? { mode: 'remote', way: ways[0] } : { mode: 'come' };
 }
+// 玩家手动取消静音（T070 三）：上一次和这一次都在群里、上一次静音着、这一次没静音的。旁白卡、扩展自己正在取消的（skip）不算；
+// 换了群／窗口（key 不同）、上一次没记静音名单的不触发
+export function unmutedMembers(prev, now, { camera = null, skip = [] } = {}) {
+    if (!prev || !now || prev.key !== now.key || !Array.isArray(prev.disabled) || !Array.isArray(now.disabled) || !Array.isArray(prev.members) || !Array.isArray(now.members)) return [];
+    const off = new Set(now.disabled), was = new Set(prev.members), mine = new Set(skip ?? []);
+    return [...new Set(prev.disabled)].filter(a => a && a !== camera && was.has(a) && now.members.includes(a) && !off.has(a) && !mine.has(a));
+}
 
 // 玩家的人设（用户 10/12，N-368；数据约定第 1 条）：规划得知道玩家的角色是什么脾气、喜欢什么，才写得出身边的人怎么冲着她使心思。
 // c：ST 的 getContext()——name1 是眼下的人设名，powerUserSettings.persona_description 是眼下这个人设的描述（ST 切人设时就换掉它）。
@@ -343,11 +353,111 @@ export function createPersonaWatch({ current, onChange, setTimer = setTimeout, c
     return { check, pause() { clearTimer(timer); timer = null; }, reset() { clearTimer(timer); timer = null; key = null; name = null; } };
 }
 
-// 后台未明确回答关闭时，不显示旧门。
-export function autoDoorHtml({on=null,unavailable=false,buttons=true,waiting=null,items=[],lit=null},escape) {
+// 后台未明确回答关闭时，不显示旧门。solo（单聊，T070）：自动进离场开没开都画门（不带进场按钮），单聊里不叩门
+export function autoDoorHtml({on=null,unavailable=false,buttons=true,waiting=null,items=[],lit=null,solo=false},escape) {
+    if(solo) return doorHtml(items,lit,escape,{solo:true});
     if(unavailable) return '<div style="color:gray">后台连不上，进离场先停着</div>';
     if(on===null) return '';
     return on ? (buttons ? knockHtml(waiting,escape) : '') : doorHtml(items,lit,escape);
+}
+// 单聊门上的提示（T070）：同一窗口同一人同一件事只弹一次。件＝source.type:source.id，没有就用 label
+export function doorNoticeKey(item) {
+    const s = item?.source;
+    return `${item?.avatar || item?.who || ''}|${s?.type != null && s?.id != null ? `${s.type}:${s.id}` : `label:${item?.label ?? ''}`}`;
+}
+// 门上到时候了（ready）、还没弹过的：返回要弹的那几项（同一件只出一次），seen 是已经弹过的键
+export function freshDoorNotices(items = [], seen = []) {
+    const done = new Set(Array.isArray(seen) ? seen : []), out = [];
+    for (const item of Array.isArray(items) ? items : []) {
+        if (!item?.ready || !item.who) continue;
+        const key = doorNoticeKey(item);
+        if (done.has(key)) continue;
+        done.add(key); out.push({ item, key });
+    }
+    return out;
+}
+export function soloDoorToast(item) {
+    const who = item.who;
+    return `${who}该来了（${item.label ?? ''}）。单聊里拉不进来：要${who}进场，把这个聊天转成群聊、把${who}拉进群；不管${who}也行，${who}就一直在门上等着。`;
+}
+// ---------- 拉人进群按场面判（T070 二） ----------
+// 攒一批：玩家在群面板连着点好几个人，ST 每点一次发一次 GROUP_UPDATED；最后一次加进来 wait 毫秒内没再加才一起处理。
+// key 变了（换了窗口、换了群）就把攒着的那批作废、从新的重攒；同一个人只记第一次（count 是他进来那一刻的条数）
+export function createArrivalBatcher({ wait, run, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    let key = null, items = [], timer = null;
+    const drop = () => { clearTimer(timer); timer = null; key = null; items = []; };
+    return {
+        add(k, item) {
+            if (key !== k) drop();
+            key = k;
+            if (!items.some(x => x.avatar === item.avatar)) items.push(item);
+            clearTimer(timer);
+            timer = setTimer(() => { const at = key, list = items; drop(); if (list.length) run(at, list); }, wait);
+        },
+        cancel: drop,
+        size: () => items.length,
+    };
+}
+// 隔离扩展自己监听 GROUP_UPDATED，拉进来那一刻就给新人开了一段区间（from＝当时条数）。先把这一段就地封成零长度（to＝from），
+// 后台问场面时才不会因为这段开着判他在场。条件从严，任何一条不满足就不封（返回 why，调用方照现状进场）：
+// 属于这批新人、是最后一段、to 为空、from 等于入队时条数、前面没有别的开着的段。写法照 closeIsolationAt；只改内存，写盘和核实由调用方做
+export function sealArrival(c, { avatar, count, batch = [] }) {
+    if (!batch.includes(avatar)) return { ok: false, why: '不在这批新人里' };
+    const segs = c?.chatMetadata?.contextIsolation?.anchors?.[avatar]?.segments;
+    if (!Array.isArray(segs) || !segs.length) return { ok: false, why: '没有区间记录' };
+    const last = segs.at(-1);
+    if (!last || typeof last !== 'object' || last.to != null) return { ok: false, why: '最后一段不是开着的' };
+    if (segs.slice(0, -1).some(s => s?.to == null)) return { ok: false, why: '有不止一段开着' };
+    if (!Number.isInteger(last.from) || last.from !== count) return { ok: false, why: `区间起点 ${last.from} 不是拉进来那一刻的 ${count}` };
+    const before = { to: last.to, toDate: last.toDate };
+    last.to = last.from;
+    last.toDate = last.from > 0 ? String(c.chat?.[last.from - 1]?.send_date ?? '') : '';
+    return { ok: true, before, sealed: { from: last.from, to: last.to, toDate: last.toDate } };
+}
+// 读回核实：最后一段就是封上的那段
+export function sealedHolds(c, { avatar, sealed }) {
+    const last = c?.chatMetadata?.contextIsolation?.anchors?.[avatar]?.segments?.at?.(-1);
+    return !!last && last.from === sealed.from && last.to === sealed.to && last.toDate === sealed.toDate;
+}
+// 之后 sync／board 失败：最后一段还是封上的那段才还原（to/toDate 回到封之前的空值），别的不碰
+export function unsealArrival(c, { avatar, sealed, before }) {
+    if (!sealedHolds(c, { avatar, sealed })) return false;
+    const last = c.chatMetadata.contextIsolation.anchors[avatar].segments.at(-1);
+    last.to = before?.to ?? null; last.toDate = before?.toDate ?? '';
+    return true;
+}
+// 分拣：场面明确说他在这儿（present）或在联系（remote）的进场，其余（away／absent／never、场面里没这个人）静音。
+// board 没答上来返回 null（调用方照现状全进场）。认人照扩展里问 board 的现有写法：头像先认，没对上再认名字。
+// since 早于他被拉进来那一刻（场面本来就记他在场）才带上：隔离区间从那条开起
+export function sortArrivals(people = [], board) {
+    const rows = Array.isArray(board?.people) ? board.people : null;
+    if (!rows) return null;
+    const enter = [], mute = [];
+    for (const p of people) {
+        const row = rows.find(x => x?.avatar && x.avatar === p.avatar) ?? rows.find(x => x?.name && x.name === p.name) ?? null;
+        if (row && (row.status === 'present' || row.status === 'remote')) {
+            const since = Number.isInteger(row.since) && row.since >= 0 && row.since < p.count ? row.since : null;
+            enter.push({ ...p, status: row.status, since, way: row.way ?? null });
+        } else mute.push({ ...p, status: row?.status ?? null });
+    }
+    return { enter, mute };
+}
+// 进场那一行（拉进群判在场、手动取消静音共用）。from：他这一段从第几条起（隔离扩展记的，零起算＝之前有几条）；
+// since：从场面记的那条开起；earlier：之前进过场（看得见以前在场那几段）；from 拿不到（没装隔离扩展）就只说从这条起
+export function arrivalLine({ who, from = null, since = null, earlier = false, how = null }) {
+    const by = how ? `（${who}是${how}来的）` : '';
+    if (!Number.isInteger(from)) return `${who}已进场${by}：从这条起${who}在场。`;
+    if (earlier) return `${who}已进场${by}：从第${from}条起${who}在场，${who}不在场那阵子的事${who}没听见。`;
+    if (since != null) return `${who}已进场${by}：第${from}条之前的${from}条消息${who}看不见。`;
+    return `${who}已进场${by}：此前${from}条消息${who}看不见。`;
+}
+// 合并成一条提示的几行：先谁被拉进来、谁不在场被静音，再在场的一人一行。全在场不写"其中…"，全不在场不写进场那几行
+export function arrivalToastLines({ all = [], entered = [], muted = [] }) {
+    const lines = [];
+    if (all.length) lines.push(`当前已拉入：${all.join('、')}。${muted.length ? `其中${muted.join('、')}判定为不在场，看不到当前对话消息，已静音。如果现在需要不在场的角色进场，直接关闭那个角色的静音即可。` : ''}`);
+    for (const e of entered) lines.push(arrivalLine(e));
+    if (entered.length) lines.push('要谁说话就点谁。');
+    return lines;
 }
 export function autoTurnEnabled(reply) { return reply?.enabled===true && reply.turnEnabled!==false; }
 // close / mute 必须验证实际状态；确认失败时也允许再次执行这两个幂等步骤。

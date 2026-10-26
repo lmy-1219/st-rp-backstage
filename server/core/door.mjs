@@ -11,7 +11,7 @@ import { sharedMatter } from './matters.mjs';
 import { narrationOf, PARTS } from './timeline.mjs';
 // slot.mjs 也 import 这里（旁白那一格读名单）：两边都只在调用时用对方，循环引用没事
 import { timelineFor, playModeOf } from './slot.mjs';
-import { enteredSince } from './landing.mjs';
+import { enteredSince, emptySegment } from './landing.mjs';
 
 // 旁白留的记号"（该来：名字／方式）"：方式可缺；不一定在最末（模型常在后面又补一句），几处都有就认最后一个、全剥掉
 const MARK = /[（(]\s*该来\s*[:：]\s*([^()（）\r\n/／]+?)\s*(?:[/／]\s*(去找他|他过来|消息|电话)\s*)?[）)]/g;
@@ -105,8 +105,9 @@ export function doorAt(input = {}) {
     const members = list(input.members);
     const inGroup = i => members.some(m => m && !m.disabled && ((i.avatar && m.avatar === i.avatar) || m.name === i.who)) ? 1 : 0;
     const anchors = input.anchors ?? {};
+    // 最近进过场的那张：零长度的封段（拉进来判不在场当场封上，T070）不算进过场（用户 10/15）
     const lastIn = i => Math.max(-1, ...list(input.arrivals).filter(e => e && ((i.avatar && e.avatar === i.avatar) || e.who === i.who)).map(e => Number(e.at)).filter(Number.isFinite),
-        ...(i.avatar ? anchors[i.avatar]?.segments ?? [] : []).map(s => Number(s?.from)).filter(Number.isFinite));
+        ...(i.avatar ? anchors[i.avatar]?.segments ?? [] : []).filter(s => !emptySegment(s)).map(s => Number(s?.from)).filter(Number.isFinite));
     const better = (a, b) => Number(b.ready) - Number(a.ready) || inGroup(b) - inGroup(a) || lastIn(b) - lastIn(a) || rank(a) - rank(b);
     const one = [];
     for (const i of items) {

@@ -52,7 +52,7 @@ import { boardFor } from './board.mjs';
 import { pendingFor } from './pending.mjs';
 import { doorFor, doorLines } from './door.mjs';
 import { stepWaits, dropTry } from './waiting.mjs';
-import { enteredSince } from './landing.mjs';
+import { enteredSince, emptySegment } from './landing.mjs';
 import { settleMatters, mattersFor, sharedMatter, matterLines, matterBrief, PURSUE, closeLed, closeIntents, handOf, stageLines, LEAD, INTENT, closeDue, lapseMatters, gapSteps } from './matters.mjs';
 import { optionsFor } from './options.mjs';
 import { findSkip, liveSkips, settleSkip, skipDays, skipPromptLines, firstAfterSkip, skipLines, SKIP_MISSED, skipEvents } from './skip.mjs';
@@ -1358,7 +1358,8 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             if (boardPerson(who)?.status === 'away') return true;
             let anchors = null;
             try { anchors = JSON.parse(store.requireChat(chatKey).anchors ?? 'null'); } catch {}
-            return (anchors?.[card.avatar]?.segments ?? []).some(s => Number.isFinite(s?.to) && s.to <= lastPos && dayOf(s.to) >= day);
+            // 零长度的封段（拉进来判不在场当场封上，T070）不算走开过（用户 10/15）
+            return (anchors?.[card.avatar]?.segments ?? []).some(s => Number.isFinite(s?.to) && s.to <= lastPos && !emptySegment(s) && dayOf(s.to) >= day);
         },
         // 不在场的有卡的人牵头的那件：镜头不替他演，也不在这儿递——它在门的名单里（door.mjs），他来了自己拿出来
         arrive: camera ? () => {} : null,
@@ -1524,7 +1525,8 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             const now = segs(card.avatar), old = seen?.[card.avatar] ?? [];
             next[card.avatar] = now;
             if (!seen || !plans) continue;
-            const ended = now.filter(s => s.to != null && s.to >= lastPos - 3 && !old.some(o => o.from === s.from && o.to === s.to)).sort((a, b) => a.to - b.to).at(-1);
+            // 零长度的封段（拉进来判不在场当场封上，T070；拉进来又移出、一句没说）不算刚走（用户 10/15），不替他补去向
+            const ended = now.filter(s => s.to != null && s.to >= lastPos - 3 && !emptySegment(s) && !old.some(o => o.from === s.from && o.to === s.to)).sort((a, b) => a.to - b.to).at(-1);
             if (!ended) continue;
             // 他牵头、当面办过了的那几件收起来
             if (!present.some(n => sameName(n, card.name, rosterNames))) try { closeLed({ records, chatKey, storyId, who: card.name, fp: last.fp, same: (a, b) => sameName(a, b, rosterNames) }); } catch {}
@@ -1655,7 +1657,8 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
         for (const card of roster.filter(e => hasCard(e) && e.name !== CAMERA_NAME)) {
             try { closeLed({ records, chatKey, storyId, who: card.name, fp: last.fp, same, wide: false }); } catch {}
             if (here.some(n => same(n, card.name))) continue;
-            const segs = card.avatar ? anchors[card.avatar]?.segments ?? [] : [];
+            // 零长度的封段（拉进来判不在场当场封上，T070）不算进过场、不算离场（用户 10/15）
+            const segs = (card.avatar ? anchors[card.avatar]?.segments ?? [] : []).filter(s => !emptySegment(s));
             if (!segs.length || segs.some(s => s.to == null)) continue;
             const ended = Math.max(...segs.map(s => Number(s.to)).filter(Number.isFinite));
             if (Number.isFinite(ended)) try { closeIntents({ records, chatKey, storyId, who: card.name, fp: last.fp, same, before: ended }); } catch {}
