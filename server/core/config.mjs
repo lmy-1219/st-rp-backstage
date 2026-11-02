@@ -67,6 +67,8 @@ export const CAST_PROMOTION_DEFAULTS = Object.freeze({ promoteRecords: 30, promo
 
 import { CONTENT_TIERS, allowedTiers, DEFAULT_TIER } from './prompt-slots.mjs';
 import { chainOf } from './director.mjs';
+import { retryKnob } from './planner.mjs';
+import { guideConfig } from './guide.mjs';
 export function loadConfig(home) {
     let raw = {};
     try { raw = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')); } catch {}
@@ -144,6 +146,8 @@ export function loadConfig(home) {
             budgetUsd: Number(pl.budgetUsd ?? 5),   // 规划模型每天最多花多少（D-100：成本可控；一个节点约一两美元）
             // 规划简报至多多少字（章程 H4）：超了按远近压——先名册关系表、再这一局到现在、再之前的节点、再备料；没超一个字不动
             briefChars: Number(pl.briefChars ?? 60000),
+            // 规划连不上自己再试（T074）：隔几分钟、同一份至多几次（默认、范围见 planner.RETRY_AUTO；没填、乱填按默认）
+            retryGapMin: retryKnob(pl.retryGapMin, 'gapMin'), retryMax: retryKnob(pl.retryMax, 'max'),
             // 节点检查：每个剧情日用便宜模型看一眼这个节点算成／落空没有（钥匙、地址同叙事组装那一格）；不填型号就用组装那个
             judge: pl.judge !== false,
             // 转向检查先程序初筛（10/16）：玩家随口的"说"、没闹大字眼的"做"不叫模型；关了每批新记录都问
@@ -196,6 +200,8 @@ export function loadConfig(home) {
         auto: { enabled: raw.auto?.enabled !== false, knock: raw.auto?.knock !== false, turn: raw.auto?.turn !== false, leave: raw.auto?.leave !== false, buttons: raw.auto?.buttons !== false,
             maxTurns: Math.max(1, Number(raw.auto?.maxTurns ?? 2) || 2), cap: Number.isFinite(Number(raw.auto?.cap)) && Number(raw.auto?.cap) > 0 ? Number(raw.auto.cap) : null,
             remoteQuiet: Math.max(1, Number(raw.auto?.remoteQuiet ?? 3) || 3), chain: chainOf(raw.auto?.chain) },
+        // 停住时的「接下来」路标卡（core/guide.mjs，T074）：quiet＝玩家连着几条没新事算停住，scene＝换地方后发了几条算停住，max＝卡上至多几条路标（默认、范围见 guide.GUIDE）
+        guide: guideConfig(raw.guide),
         // 局势（core/situation.mjs，Q-8②）：一个剧情日推一次各方的动向、消息怎么传开；默认关。model 不填用叙事组装那档（同一条线路）
         situation: { enabled: raw.situation?.enabled === true, model: typeof raw.situation?.model === 'string' && raw.situation.model ? raw.situation.model : null },
         fresh: { enabled: raw.fresh?.enabled !== false, ways: raw.fresh?.enabled !== false, dropEchoes: raw.fresh?.dropEchoes !== false, voice: raw.fresh?.voice !== false, model: typeof raw.fresh?.model === 'string' && raw.fresh.model ? raw.fresh.model : null,

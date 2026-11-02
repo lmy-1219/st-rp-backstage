@@ -31,7 +31,7 @@ import { loadFacts } from './facts.mjs';
 import { openSituation, SITUATION_SYSTEM, parseSituation, recordOutcomes, repRecord } from './situation.mjs';
 import { loadAnchors, indexAnchors, planYearFlags, yearFlagText } from './years.mjs';
 import { storyYear } from './world.mjs';
-import { turnWorth } from './planner.mjs';   // 转向检查先程序初筛（10/16）
+import { turnWorth, planRetryDue } from './planner.mjs';   // 转向检查先程序初筛（10/16）；规划连不上自己再试（T074）
 import { NOW_MOTIF, PLAN_SYSTEM, withIntimate, API_PLAN_NOTE, placePrep, parsePlan, NODE_CHECK_SYSTEM, nodeCheckPrompt, parseNodeCheck, TURN_CHECK_SYSTEM, turnCheckPrompt, parseTurnCheck, premiseWaiting, premiseVoids } from './planner.mjs';
 import { planRoster, normalizeRelations, personOf, leaderOf } from './relations.mjs';
 import { ARRIVAL_SYSTEM, arrivalPrompt, parseArrival, lastLeave, awaySpan, validAwayPlan, LEAVE_SYSTEM, leavePrompt, parseLeave, isRemote, metInPerson, justLeft, openNow } from './arrival.mjs';
@@ -1847,6 +1847,19 @@ function autoRetryRound(store, handoffs, planRetryOrigins) {
 }
 setInterval(() => autoRetryRound(store, handoffs, planRetryOrigins), 5 * 60 * 1000).unref();
 
+// T074：规划连不上（connection/timeout/overloaded/unavailable）自己再试，不看窗口开关；判定在 planner.planRetryDue（隔多久、至多几次可调）。
+// 走同一条 handoffs.retry（entry 'auto'、source 'auto-retry'），不另写调用循环；没有对应外援包的（比如已经交给窗口以外的）不动。
+function planAutoRetryRound(store, handoffs, planRetryOrigins, cfg = getConfig()) {
+    for (const h of handoffs.list()) if (h.kind === 'plan' && h.retry && !h.busy && h.chatKey) {
+        const planId = store.handoffById(h.id)?.payload?.meta?.planId, plan = planId == null ? null : store.planById(planId);
+        if (!plan || plan.chat_key !== h.chatKey) continue;
+        if (!planRetryDue({ plan, attempts: store.planAttempts(plan.chat_key, 20), running: !!store.activePlanAttempt(plan.chat_key, plan.id), gapMin: cfg.planner.retryGapMin, max: cfg.planner.retryMax })) continue;
+        planRetryOrigins.set(plan.id, 'auto');
+        handoffs.retry(h.id).catch(() => {}).finally(() => planRetryOrigins.delete(plan.id));
+    }
+}
+setInterval(() => planAutoRetryRound(store, handoffs, planRetryOrigins), 60 * 1000).unref();
+
 // 价表、种子表按路径和改动时间缓存，改了文件自动重读。
 // 素材包按局选（D-104，T-22：换个题材不能带出别的题材的价码、时事、年表、专名）。meta pack:<局> 记这一局用 素材包/ 下哪个目录；
 // 没选就什么都不给（以前 config 里 economy.priceTable、world.*、advisor.library／nameTable 是全局的，每一局都拿同一个包——不再用）。
@@ -2058,7 +2071,7 @@ async function autoAnswer({ chatKey, who, answer }) {
 const settings = () => {
     const config = loadConfig(home);
     const split = { ...config.extractor, ...config.stages.setup };
-    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
+    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, guide: config.guide, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
 };
 const server = createServer(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
 server.on('error', error => {

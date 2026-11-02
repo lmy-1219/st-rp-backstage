@@ -7,6 +7,8 @@ import { loadConfig } from './config.mjs';
 import { KINDS as TASTE_KINDS, TASTE_CHOICES, CHOICE_LABELS } from './taste.mjs';
 import { CONTENT_TIERS, allowedTiers } from './prompt-slots.mjs';
 import { CHAIN } from './director.mjs';
+import { RETRY_AUTO } from './planner.mjs';
+import { GUIDE } from './guide.mjs';
 
 // 模型口味（core/taste.mjs）：每类环节按哪一家补口味
 const TASTE_OPTIONS = TASTE_CHOICES.map(c => [c, CHOICE_LABELS[c]]);
@@ -59,6 +61,8 @@ export const KNOBS = [
     { path: 'absence.maxDays', group: '离开与规划', type: 'int', min: 1, max: 365, label: "离开最多按几天算", help: "限制离开推进，建议先用默认。" },
     { path: 'planner.provider', group: '离开与规划', type: 'enum', options: [['api', '调模型'], ['queue', '交给窗口'], ['off', '关']], label: "规划", help: "选择规划方式，建议先用调模型。" },
     { path: 'planner.briefChars', group: '离开与规划', type: 'int', min: 10000, max: 400000, label: "规划简报最多多少字", help: "限制规划材料长度，建议先用默认。" },
+    { path: 'planner.retryGapMin', group: '离开与规划', type: 'int', min: RETRY_AUTO.gapMin.min, max: RETRY_AUTO.gapMin.max, label: "规划连不上后隔几分钟再试", help: "连接断了、超时这类才自动重试；格式坏了不会。" },
+    { path: 'planner.retryMax', group: '离开与规划', type: 'int', min: RETRY_AUTO.max.min, max: RETRY_AUTO.max.max, label: "同一份规划连不上最多自动再试几次", help: "超过就停下，等你在面板上手动再试。" },
     // 花费
     { path: 'extractor.batch', group: '花费', type: 'int', min: 1, max: 8, label: '每几条总结一次', help: '攒几条一起总结，省一点钱；后台记住的事会晚几条。', note: '攒不够的话，最早那条等满 30 分钟也会总结；已设等待时间的照原值。' },
     { path: 'extractor.dailyBudgetUsd', group: '花费', type: 'num', min: 0, max: 500, label: "后台每天最多花（美元）", help: "控制后台花费，建议先设预算。" },
@@ -74,6 +78,11 @@ export const KNOBS = [
     { path: 'auto.maxTurns', group: '自动进离场', type: 'num', min: 1, max: 6, label: "几句没回算没接", help: "设不回应的等待量，建议用默认。" },
     { path: 'auto.remoteQuiet', group: '自动进离场', type: 'num', min: 1, max: 8, label: "远程的人几句没理算结束", help: "设远程联系结束量，建议用默认。" },
     { path: 'auto.chain', group: '自动进离场', type: 'int', min: CHAIN.min, max: CHAIN.max, label: "角色之间连着接话至多几手", help: "角色互相点名时连着接几手，建议用默认。" },
+    // 停住时的路标卡（core/guide.mjs，T074）
+    { path: 'guide.enabled', group: '路标卡', type: 'bool', label: "剧情停住时弹「接下来」路标卡", help: "关了以后不会自动弹；输入框旁的手动按钮照样能点。" },
+    { path: 'guide.quiet', group: '路标卡', type: 'int', min: GUIDE.quiet.min, max: GUIDE.quiet.max, label: "连着几条没新事就弹", help: "新事＝拿出口袋的事、有人叩门或进场、换了地方、新规划。" },
+    { path: 'guide.scene', group: '路标卡', type: 'int', min: GUIDE.scene.min, max: GUIDE.scene.max, label: "一个场景发了几条就弹", help: "自上次换地方以来你发的条数。" },
+    { path: 'guide.max', group: '路标卡', type: 'int', min: GUIDE.max.min, max: GUIDE.max.max, label: "卡上至多几条路标", help: "另有「跳到下一件事」和「自己写」两条固定项。" },
     // 模型口味：总开关默认开；规划/检查默认自动认，前台/旁白需另行启用。
     { path: 'taste.enabled', group: '模型口味', type: 'bool', label: "按模型补口味", help: "按模型调整演法，建议保持默认。" },
     ...TASTE_KINDS.map(k => ({ path: `taste.${k}`, group: '模型口味', type: 'enum', options: TASTE_OPTIONS, label: TASTE_LABELS[k], help: TASTE_HELP[k] })),

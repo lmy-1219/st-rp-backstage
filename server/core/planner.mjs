@@ -130,7 +130,7 @@ export const PLAN_SYSTEM = [
     '  生人在露面、应答、知情里只用称呼，不写名字——城里没人知道每个陌生人叫什么，名字留在后台，主角那边问了、查了、看见名牌才用；街坊熟人可以直接叫名字；',
     '只为这一局编，别借原作或别的故事里的人；真不是哪个人牵头的——传闻、某个势力的动静、这个地方本身的变化——才写"世界"）；露面——一句可以被看见的事（它冒出来的样子，不写它怎么收场）；应答——玩家那边伸手、问起时它的内容（前台不会吊着给，但牵头的人怎么给、留不留一手由他）；',
     '沉底——一直没人理会会怎样，一句，不带责备；第几天后（从今天起算，0＝现在就行）；在哪件之后（写那件的题，上一份里还排着的旧件的题也行；没有就空着）；用在什么场面（玩家看得到的那一刻：在场的人在哪、在干什么时它冒出来；别写"或者某人回来说起"）、分量多大（一句/半轮/一整轮）；',
-    '进场——这件事怎么来到眼前，三选一：找上门（来电、敲门、楼下撞见、捎来的话，到了日子就能冒出来）；到现场（得有人去了那个地方才碰得上：看房碰上的中介、零件摊、包厢里等着的人）——再写"在哪"（几个字）、"谁去"（谁会去那儿）、"由头"（他为什么会去，一句，给他当自己惦记的事；不写会碰上什么）；镜头外（玩家不在的时候发生在牵头的人身上，他一个人去办事撞上的——那就是他自己的经历，剧情时间真过去了才算发生，提不提、怎么提由他）。能当着玩家发生的，别写成镜头外。',
+    '进场——这件事怎么来到眼前，三选一：找上门（来电、敲门、楼下撞见、捎来的话，到了日子就能冒出来）；到现场（得有人去了那个地方才碰得上：看房碰上的中介、零件摊、包厢里等着的人）——再写"在哪"（几个字）、"谁去"（谁会去那儿）、"由头"（他为什么会去，一句，给他当自己惦记的事；不写会碰上什么）、"路标"（一句，玩家看得到：从玩家已经听说的由头出发，写去哪儿、为什么值得去，必须写到"在哪"；不写去了会碰上什么）；镜头外（玩家不在的时候发生在牵头的人身上，他一个人去办事撞上的——那就是他自己的经历，剧情时间真过去了才算发生，提不提、怎么提由他）。能当着玩家发生的，别写成镜头外。',
     LEAD_NOTE,
     '每件事再说清它是干什么用的、什么时候冒出来、什么时候作废、靠什么还成立、接了不接各落下什么、最多走到哪就算完（用意、触发、时效、前提、接了会怎样、没接会怎样、收尾，写法看最后的样例）——用意只写主线／关系／意外／氛围四个词之一，别写句子；其余几格各一两句，写实在的，别复述露面和触发。',
 '收尾——这件事最多走到哪就算完、完了落下什么，一句（"看完就完了，落下一句下回还来"）；过程性的（看病、吃药、复查、办手续、赶路、修东西）收尾写"办完就完"，不排后续。变数——这一场的一个意外（让谁受伤或误判、引出后面的事、逼出一个选择、露出谁的性子、制造笑点），一句，写明它为了什么；要紧的戏默认要写，照直来更好看的才空着。',
@@ -167,7 +167,7 @@ export const PLAN_SYSTEM = [
     ' "新面孔": [{"名": "...", "是谁": "一句", "熟不熟": "街坊熟人|生人", "称呼": "没名字时怎么叫"}],',
     ' "旧件": [{"题": "上一份那件的题", "处理": "留|撤|换", "换成": "换的时候写接替它的那件的题"}],',
     ' "口子": [{"题": "那件的题", "处理": "收|续", "落地": "收的时候：它是怎么落地的，一句", "续成": "续的时候：这一份里接着它的那件事的题"}],',
-    ' "事件": [{"线": "...", "谁": "...", "题": "几个字", "露面": "...", "应答": "...", "沉底": "...", "知情": "...", "来由": "...", "第几天后": 0, "在哪件之后": "", "跟着约定": "", "用在": "...", "进场": "找上门|到现场|镜头外", "在哪": "", "谁去": "", "由头": "", "引子": "", "分量": "...", "母题": "...",',
+    ' "事件": [{"线": "...", "谁": "...", "题": "几个字", "露面": "...", "应答": "...", "沉底": "...", "知情": "...", "来由": "...", "第几天后": 0, "在哪件之后": "", "跟着约定": "", "用在": "...", "进场": "找上门|到现场|镜头外", "在哪": "", "谁去": "", "由头": "", "路标": "", "引子": "", "分量": "...", "母题": "...",',
     '   "类别": "撑的是开局单类别里的哪一样", "用意": "主线|关系|意外|氛围", "触发": {"场景": "镜头在哪、谁在场", "目标": "哪件事办成／没办成（也写进在哪件之后）", "时间": "第几天、什么时段（也写进第几天后）"}（用得上的写，可叠加）,',
     '   "时效": {"只在那场戏": "跟着人：谁｜跟着地方：哪儿｜跟着时间：什么时候"} 或 "当天|三天内|一直", "前提": "这件事成立靠的什么还没变", "接了会怎样": "往后落下什么", "没接会怎样": "牵头的人心里记下什么、外头有什么动静",',
     '   "收尾": "这件事最多走到哪就算完、完了落下什么，一句", "变数": "这一场的一个意外和它为了什么；照直来更好看才空着"}]}',
@@ -321,6 +321,8 @@ export function buildBrief(s) {
     if (s.open.length) out.push('', `【还开着的想法和答应过的事】${s.open.length > 40 ? `（${s.open.length} 条，每条截短了）` : ''}`, ...s.open.map(r => (s.open.length > 40 ? lineOf({ ...r, text: String(r.text).slice(0, 60) }) : lineOf(r))));
     if (s.matters?.length) out.push('', ...s.matters);
     if (s.loose?.length) out.push('', '【没着落的改变】（在场的人自己弄出来、还没人收拾的：弄坏的、弄乱的、借了的。几天没人碰，就该长成后果——有人找上门、东西出毛病、被人钻了空子；不是要角色去修的清单）', ...s.loose.slice(0, 8).map(l => `· ${l.who}留下的：${l.text}（${l.when}）`));
+    // 玩家在路标卡上选过的（T074）：只是兴趣方向，不是必须办的清单
+    if (s.signPicks?.length) out.push('', '【玩家在路标上选过的】（最近的在后；选了哪条、当时没选的是哪几条。这是玩家的兴趣方向，顺着排，不是必须办的清单；一直没被选的线可以收）', ...s.signPicks.map(pickLine));
     if (s.promises?.length) out.push('', '【说好的事】（角色和玩家自己定下的；编号、谁和谁、什么、约在哪天、眼下到哪一步；最近有了结果的也在这里）', ...s.promises);
     if (s.money.length) out.push('', '【钱上没了结的】', ...s.money);
     if (s.recent?.length) out.push('', '【最近的要紧变化】', ...s.recent.map(lineOf));
@@ -824,7 +826,7 @@ export function parsePlan(text, { names = [], foreign = [], leaderOf = () => nul
             line: str(m['线'], 30), after: str(m['在哪件之后'], 30), motif: str(m['母题'], 12),
             promiseRef: Number(String(m['跟着约定'] ?? '').replace(/^\D+/, '')) || null,
             offscreen: m['镜头外'] === true || m['进场'] === '镜头外' || OFFSCREEN_FIT.test(str(m['用在'], 120)),
-            ...(ENTRIES.includes(m['进场']) ? { entry: m['进场'] } : {}), place: str(m['在哪'], 40), goer: str(m['谁去'], 40), errand: str(m['由头'], 200),
+            ...(ENTRIES.includes(m['进场']) ? { entry: m['进场'] } : {}), place: str(m['在哪'], 40), goer: str(m['谁去'], 40), errand: str(m['由头'], 200), signpost: str(m['路标'], 80),
             category: str(m['类别'], 20), purpose: purposeOf(m['用意']), trigger: triggerOf(m['触发']), ttl: ttlFrom(m['时效'], [...names, ...faces.map(f => f.name), ...player]), premise: clean(m['前提']).slice(0, 200),
             ifTaken: clean(m['接了会怎样']).slice(0, 200), ifSunk: clean(m['没接会怎样']).slice(0, 200),
             // 收尾（最多走到哪就算完、完了落下什么）、变数（打的戏会出的意外）：章程 K1
@@ -1098,6 +1100,11 @@ export const BACKSTAGE = new RegExp([
     '(?:约定|事件|条目)编号|编号说明',
 ].join('|'), 'i');
 
+// 路标选择的一行：选了什么（自己写／跳到下一件的另说）、当时给了哪几条
+export const SIGN_PICKS_MAX = 10;   // 简报里至多带最近几次选择（T074）
+export const pickLine = p => p.kind === 'write' ? `· 没选，自己写（当时给的：${(p.offered ?? []).join('、') || '无'}）`
+    : `· 选了「${p.picked}」${p.kind === 'skip' ? '（跳到下一件事）' : ''}；没选的：${(p.offered ?? []).filter(x => x !== p.picked).join('、') || '无'}`;
+
 // 该不该叫规划者（N-88：一个主线节点规划一次）：还没有规划；玩家用 /聊 说了新的方向；上一个节点算成或明显落空了
 // （每个剧情日由便宜模型看一眼，见 NODE_CHECK_SYSTEM）；节点里的事都放完了（接了或沉了）。⛔ 不按剧情日、不按菜单剩几条叫。
 export function needsPlan({ lastPlan, activeItems, newNotes, nodeOver = null }) {
@@ -1111,6 +1118,21 @@ export function needsPlan({ lastPlan, activeItems, newNotes, nodeOver = null }) 
     if (nodeOver === '变了') return 'shift';
     if (activeItems === 0) return 'node_empty';
     return null;
+}
+
+// 规划没连上自己再试（T074）：只认"连得上就能好"的失败；格式坏了、写一半断了、被拦了、没正文的再试多半还是坏的，不自动花钱。
+// attempts：这一份规划的尝试，新的在前（store.planAttempts 的样子）。拿不准（时间读不出、没有失败记录）一律当不到时候。
+export const RETRY_FAILURES = Object.freeze(['connection', 'timeout', 'overloaded', 'unavailable']);
+export const RETRY_AUTO = Object.freeze({ gapMin: { default: 10, min: 1, max: 1440 }, max: { default: 3, min: 1, max: 10 } });
+export const retryKnob = (v, k) => { const r = RETRY_AUTO[k], n = Number(v); return v != null && v !== '' && Number.isInteger(n) && n >= r.min && n <= r.max ? n : r.default; };
+export function planRetryDue({ plan, attempts = [], running = false, nowMs = Date.now(), gapMin, max } = {}) {
+    if (!plan || plan.status !== 'requested' || running) return false;
+    const mine = attempts.filter(a => a.planId === plan.id);
+    const latest = mine[0];
+    if (!latest || latest.status !== 'failed' || !RETRY_FAILURES.includes(latest.failure)) return false;
+    if (mine.filter(a => a.source === 'auto-retry').length >= retryKnob(max, 'max')) return false;
+    const done = Date.parse(latest.finishedAt);
+    return Number.isFinite(done) && nowMs - done >= retryKnob(gapMin, 'gapMin') * 60000;
 }
 
 // 一件事的后果两格（方案 口袋细调 第二节；F1 给规划加格之前，没接会怎样先拿"沉底"那句顶）

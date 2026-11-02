@@ -3,11 +3,12 @@ import { secretCandidates } from './held.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
+import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, menuDays, scaleFor, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
 import { labelsOf, sinceWord, dateIn, dayNumber } from './timeline.mjs';
 import { validMark, planFailure } from './store.mjs';
 import { digests } from './digest.mjs';
-import { parsePlan } from './planner.mjs';
+import { parsePlan, nearPlace } from './planner.mjs';
+import { guideFor, markShown, recordPick, REFILL_KEY } from './guide.mjs';
 import { snapshot, applyPreset } from './presets.mjs';
 import { readOpeningPack, installPack, backupStFiles, findOpeningPacks, openingSources, httpsPackUrl, findMaterialPacks, materialPackSource, checkPack } from './pack-import.mjs';   // 一键导入开局包（_dev/开局包格式-20261017.md）
 import { profileHash } from './profile.mjs';
@@ -359,6 +360,31 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             if (!lit) { const first = items.find(i => i.ready && i.known); if (first) lit = { who: first.who, way: first.ways[0] ?? '他过来', by: 'program' }; }
             // 由头（reason，后台排的那件的原话）、他递过的那条的应答（sent）留在后台给进场那份用，扩展只要 label、ways
             return { items: items.map(({ reason, sent, ...item }) => item), lit };
+        },
+        // 停住时的「接下来」路标卡（T074，core/guide.mjs）。manual＝手动按钮（随时能看，不看停住、不看场面）；否则是自动弹那次问（看停住、看场面，弹了就记一笔）。
+        // 卡不是聊天消息：这里只算要给玩家看的几行，不写进 chat、不进任何提示词。
+        'POST /v1/guide': b => {
+            const chatKey = str(b.chatKey, 'chatKey');
+            store.requireChat(chatKey);
+            const present = strings(b.present, 60, 200), manual = b.manual === true;
+            const g = guideFor(store, records, chatKey, { present, config: settings().guide ?? null, nearPlace, slot: { timelineFor, menuDays, scaleFor } });
+            if (!manual && g.show) markShown(store, chatKey, g.lastMessage);
+            // 该弹却除了"自己写"什么都给不出：按 node_empty 叫一次规划，同一份规划只叫一次
+            let refilled = false;
+            const planner = settings().planner;
+            if (!manual && g.refill && g.last && planner && !store.getMeta(REFILL_KEY(g.last.id))) {
+                store.setMeta(REFILL_KEY(g.last.id), '1');
+                try { requestPlanNow(store, records, chatKey, planner, { reason: 'node_empty', present }); refilled = true; } catch {}
+            }
+            const items = [...g.items.map(({ id, kind, text, fill }) => ({ id, kind, text, fill })), ...(g.skip ? [g.skip] : [])];
+            return { show: manual ? true : g.show, items, refilled, stuck: g.stuck, scene: g.scene };
+        },
+        'POST /v1/guide-pick': b => {
+            const chatKey = str(b.chatKey, 'chatKey');
+            store.requireChat(chatKey);
+            const kind = ['sign', 'skip', 'write'].includes(b.kind) ? b.kind : 'sign';
+            recordPick(store, chatKey, { picked: str(b.picked ?? '', 'picked', { max: 200 }), offered: strings(b.offered, 8, 200), kind }, store.currentMessages(chatKey).at(-1));
+            return { ok: true };
         },
         'POST /v1/door-lit': b => {
             const chatKey = str(b.chatKey, 'chatKey'), who = str(b.who, 'who', { max: 80 }), way = str(b.way ?? '', 'way', { max: 20 }), by = str(b.by ?? 'named', 'by', { max: 20 });

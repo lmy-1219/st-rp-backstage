@@ -235,7 +235,7 @@ export function openStore(file) {
     try { db.exec('alter table menu add column offscreen integer'); } catch {}
     // 怎么进场（找上门／到现场／镜头外，质量窗 10/5 方案）；到现场的：在哪、谁去、去的由头
     try { db.exec('alter table menu add column origin text'); } catch {}   // 来由（用户 10/7）：这件事背后是怎么回事——规划者写，有人追查时才交给镜头一截
-    for (const col of ['entry', 'place', 'goer', 'errand']) { try { db.exec(`alter table menu add column ${col} text`); } catch {} }   // 镜头外：玩家不在时发生在牵头的人身上（规划者写的）
+    for (const col of ['entry', 'place', 'goer', 'errand', 'signpost']) { try { db.exec(`alter table menu add column ${col} text`); } catch {} }   // 镜头外：玩家不在时发生在牵头的人身上（规划者写的）
     try { db.exec('alter table slots add column ver text'); } catch {}
     try { db.exec('alter table menu_log add column by_name text'); } catch {}
     try { db.exec('alter table menu_log add column pending integer not null default 0'); } catch {}
@@ -980,8 +980,8 @@ export function openStore(file) {
         const overtakenBy = old => items.find(n => nameOf(n.who) && nameOf(n.who) === nameOf(old.who)
             && ((nameOf(n.line) && nameOf(n.line) === nameOf(old.line)) || near(nameOf(n.title), nameOf(old.title))));
         (rerollOf ? (fn => fn()) : tx)(() => {
-            const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, updated_at, entry, place, goer, errand, origin, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
-            for (const m of items) ins.run(id, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, plan.story_day + m.afterDays, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, ...cellValues(m));
+            const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, updated_at, entry, place, goer, errand, origin, signpost, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
+            for (const m of items) ins.run(id, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, plan.story_day + m.afterDays, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, ...cellValues(m));
             q("update plans set status = 'ready', goal = ?, node = ?, bring_next = ?, raw = ?, ready_at = ? where id = ?").run(goal ?? null, node ? JSON.stringify(node) : null, JSON.stringify(bringNext ?? []), raw ?? null, now(), id);
             q('update notes set used_in_plan = ? where chat_key = ? and kind = ? and used_in_plan is null').run(id, plan.chat_key, '聊');
             if (items.length) putIntimateProgress(plan.chat_key, intimateProgress, { planId: id, storyDay: plan.story_day });
@@ -1018,8 +1018,8 @@ export function openStore(file) {
         const plan = planById(planId);
         if (!plan || plan.status !== 'ready') throw Object.assign(new Error('plan_not_ready'), { status: 409 });
         tx(() => {
-            const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, anchor_pos, anchor_fp, updated_at, entry, place, goer, errand, origin, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
-            for (const m of items) ins.run(planId, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, storyDay + m.afterDays, at.pos, at.fp, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, ...cellValues(m));
+            const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, anchor_pos, anchor_fp, updated_at, entry, place, goer, errand, origin, signpost, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
+            for (const m of items) ins.run(planId, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, storyDay + m.afterDays, at.pos, at.fp, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, ...cellValues(m));
             if (items.length) putIntimateProgress(plan.chat_key, intimateProgress, { planId, storyDay, at });
         });
         return menuOf(plan.chat_key);

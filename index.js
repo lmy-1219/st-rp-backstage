@@ -2,7 +2,7 @@
 // ① 接入的窗口里，消息一有变化就把"当前序列"增量同步给后台（只传指纹，后台缺哪条正文才补传哪条）；
 // ② 每次某个角色要发言前，向后台要"只给他的那一格"，临时塞进这次请求，用完即清；
 // ③ 设置面板里的开关与状态。后台连不上时什么都不做，ST 照常。
-import { visibleTo, filterVisible, knockHtml, autoDoorHtml, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, isolateLeaveSupportsIndex, closeIsolationAt, runLeaveAttempt, resetLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
+import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStaleOn, guideClosed, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, isolateLeaveSupportsIndex, closeIsolationAt, runLeaveAttempt, resetLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 
 const MODULE = 'rp_emergence';
@@ -150,7 +150,7 @@ async function api(route, body, timeout = 30000) {
     finally { tick(`后台:${route}`, performance.now() - t0, ok ? '' : '失败'); }
 }
 
-const state = { epoch: 0, chatKey: null, syncing: false, dirty: false, timer: null, status: null, plan: null, planTimer: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null, entering: new Set() };
+const state = { epoch: 0, chatKey: null, syncing: false, dirty: false, timer: null, status: null, plan: null, planTimer: null, collapsed: null, note: '', door: { items: [], lit: null }, guide: { open: false, items: [] }, remote: null, entering: new Set() };
 
 // ---------- T070 新加的数值（用户 10/25：决定过的数值要报；回执"新加的数值"一节逐条列） ----------
 // 单聊门上"某人该来了"那条提示停留多久（毫秒）。话比较长（带怎么转群聊），比现有 8000 稍长
@@ -258,6 +258,33 @@ function noticeSoloDoor(items) {
     meta.rpeDoorNoticed = [...seen, ...fresh.map(x => x.key)].slice(-DOOR_NOTICE_KEEP);
     c.saveMetadata?.()?.catch?.(() => {});
     for (const { item } of fresh) globalThis.toastr?.info(soloDoorToast(item), 'RP：幕后', { timeOut: SOLO_DOOR_TOAST_MS });
+}
+
+// ---------- 「接下来」路标卡（T074）：停住时自动弹一次，输入框旁常驻按钮随时点开。卡不是聊天消息，不写进 chat、不进提示词 ----------
+// 点一条只把那句填进输入框（括号包着，玩家能改），不自动发送；顺手记一笔玩家选了什么
+async function askGuide(manual) {
+    if (!state.chatKey || !settings().enabled) { state.guide = { open: false, items: [] }; render(); return; }
+    const chatKey = state.chatKey, epoch = state.epoch;
+    const present = members(ctx()).filter(m => !m.disabled).map(m => m.name).filter(Boolean);
+    try {
+        const r = await api('guide', { chatKey, present, manual: !!manual });
+        if (epoch !== state.epoch || state.chatKey !== chatKey) return;
+        if (manual) state.guide = { open: true, items: r.items ?? [] };
+        else if (r.show) state.guide = { open: true, items: r.items ?? [] };
+    } catch { if (manual) globalThis.toastr?.info('后台暂时连不上，路标卡拿不到。', 'RP：幕后'); }
+    render();
+}
+function guidePick(button) {
+    const box = document.querySelector('#send_textarea');
+    if (box) { box.value = button.dataset.fill ?? ''; box.dispatchEvent(new Event('input', { bubbles: true })); box.focus(); }
+    const offered = (state.guide.items ?? []).map(i => i.text);
+    if (state.chatKey) api('guide-pick', { chatKey: state.chatKey, picked: button.dataset.text ?? '', offered, kind: button.dataset.kind === 'skip' ? 'skip' : 'sign' }).catch(() => {});
+    state.guide = { open: false, items: [] }; render();
+}
+function guideWrite() {
+    if (state.chatKey) api('guide-pick', { chatKey: state.chatKey, picked: '', offered: (state.guide.items ?? []).map(i => i.text), kind: 'write' }).catch(() => {});
+    state.guide = { open: false, items: [] }; render();
+    document.querySelector('#send_textarea')?.focus();
 }
 
 const TYPE_ORDER = ['改变', '想法', '了结', '钱', '关系', '说', '心里', '做', '时间'];
@@ -2251,6 +2278,8 @@ function mountPanel() {
         $('[data-role="relations-draft"]').innerHTML = relationsDraftHtml(state.relationsDraft, escapeHtml);
         const hint=$('[data-role="installation-hint"]');
         hint.innerHTML=installationHint({backendDown:state.backendDown,backendStatus:state.backendStatus,localRelease:state.localRelease,backendRelease:state.release});hint.hidden=!hint.innerHTML;
+        const guide = document.querySelector('#rpe_guide');
+        if (guide) { guide.innerHTML = state.chatKey && s.enabled ? guideHtml(state.guide, escapeHtml) : ''; guide.hidden = !guide.innerHTML; }
         const door = document.querySelector('#rpe_door');
         if (door) {
             door.innerHTML = state.chatKey && s.enabled ? autoDoorHtml({...auto,items:state.door?.items??[],lit:state.door?.lit,solo:!currentGroup(ctx())},escapeHtml) : '';
@@ -2686,6 +2715,16 @@ function mountPanel() {
         style.textContent = '#rpe_door{font-size:.9em}#rpe_door .rpe-door-title{opacity:.8;margin-bottom:.15em}#rpe_door .rpe-door-reason{margin-left:.5em;color:var(--SmartThemeQuoteColor,#f90);font-weight:bold}#rpe_door .rpe-door-list{display:flex;flex-direction:column;gap:.2em}#rpe_door .rpe-door-item{display:flex;flex-wrap:wrap;align-items:center;gap:.25em;padding:.15em .35em;opacity:.7;border:1px solid var(--SmartThemeBorderColor,#888);border-radius:.3em}#rpe_door .rpe-door-item.rpe-door-lit{opacity:1;border-color:var(--SmartThemeQuoteColor,#f90)}#rpe_door .rpe-door-who{flex:1 1 12em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#rpe_door .rpe-door-item.rpe-door-lit .rpe-door-who{white-space:normal}#rpe_door .menu_button.rpe-door-way,#rpe_door .menu_button.rpe-door-cancel{display:inline-flex;width:auto;flex:0 0 auto;margin:0;padding:.1em .5em;font-size:.9em;white-space:nowrap}';
         document.head.append(style);
         form.insertBefore(door, document.querySelector('#send_form') ?? form.firstChild);
+    }
+    // 路标卡（T074）：和门同一处插入（#send_form 前）、同一套样式类；只多一个小按钮的条
+    if (form && !document.querySelector('#rpe_guide')) {
+        const guide = document.createElement('div');
+        guide.id = 'rpe_guide';
+        guide.style.cssText = 'margin:.25em 0;overflow-wrap:anywhere;font-size:.9em;';
+        const style = document.createElement('style');
+        style.textContent = '#rpe_guide .rpe-guide-bar{display:flex;justify-content:flex-end}#rpe_guide .menu_button{display:inline-flex;width:auto;flex:0 0 auto;margin:0;padding:.1em .6em;font-size:.9em;white-space:nowrap}#rpe_guide .rpe-door-title{opacity:.8;margin-bottom:.15em}#rpe_guide .rpe-door-list{display:flex;flex-direction:column;gap:.2em}#rpe_guide .rpe-door-item{display:flex;flex-wrap:wrap;align-items:center;gap:.25em;padding:.15em .35em;border:1px solid var(--SmartThemeBorderColor,#888);border-radius:.3em;opacity:.8}#rpe_guide .rpe-door-item.rpe-door-lit{opacity:1;border-color:var(--SmartThemeQuoteColor,#f90)}#rpe_guide .rpe-door-who{flex:1 1 12em;min-width:0}';
+        document.head.append(style);
+        form.insertBefore(guide, document.querySelector('#rpe_door') ?? document.querySelector('#send_form') ?? form.firstChild);
     }
     render();
 }
@@ -3357,6 +3396,10 @@ document.addEventListener('click', event => {
         c.saveMetadata().then(()=>{if(state.chatKey===chatKey)return autoPeek();}).catch(error=>console.warn('[RP：幕后] 再试离场失败',error));
         render();return;
     }
+    const guideOpen = event.target?.closest?.('.rpe-guide-open'), guidePicked = event.target?.closest?.('.rpe-guide-pick'), guideWritten = event.target?.closest?.('.rpe-guide-write');
+    if (guideOpen) { if (state.guide.open) { state.guide = { open: false, items: [] }; render(); } else askGuide(true); return; }
+    if (guidePicked) { guidePick(guidePicked); return; }
+    if (guideWritten) { guideWrite(); return; }
     const way = event.target?.closest?.('.rpe-door-way');
     const cancel = event.target?.closest?.('.rpe-door-cancel');
     const knockAnswer = event.target?.closest?.('.rpe-knock-answer');
@@ -3369,10 +3412,10 @@ document.addEventListener('click', event => {
         api('arrival-request', { chatKey: state.chatKey, who: cancel.dataset.who, cancel: true }).then(refreshDoor).catch(() => {});
     }
 }, true);
-on('CHAT_CHANGED', () => { onChatChanged(); });
+on('CHAT_CHANGED', () => { if (state.guide.open) { state.guide = guideClosed(); render(); } onChatChanged(); });
 for (const event of ['PERSONA_CHANGED', 'SETTINGS_UPDATED']) on(event, () => { personaWatch.check(); void sendPersona().catch(() => {}); });
 for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'MESSAGE_UPDATED', 'GROUP_UPDATED']) {
-    on(name, (id) => { if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED') stripDoorMark(id).catch(() => {}); if (name === 'GROUP_UPDATED') watchMembers(); scheduleSync(); if (name !== 'MESSAGE_SENT') refreshDoor(); });
+    on(name, (id) => { if (guideStaleOn(name) && state.guide.open) { state.guide = guideClosed(); render(); } if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED') stripDoorMark(id).catch(() => {}); if (name === 'GROUP_UPDATED') watchMembers(); scheduleSync(); if (name !== 'MESSAGE_SENT') refreshDoor(); if (name === 'MESSAGE_RECEIVED') askGuide(false).catch(() => {}); });
 }
 on('OAI_PRESET_CHANGED_AFTER', restoreCameraPrompts);
 for (const name of ['GENERATION_ENDED', 'GENERATION_STOPPED']) on(name, clearPrompts);

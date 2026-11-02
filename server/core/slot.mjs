@@ -36,7 +36,8 @@ import { openGaps, CLOSE_UNITS, intimatePair } from './planner.mjs';
 import { toText as relationsText } from './relations.mjs';
 import { normalizeRelations, slotLines as relationLines, leaderOf, followersOf, personOf, givesWork, giverLine, mentionLines, currentRelations } from './relations.mjs';
 import { pickSeed, seedLines, storyYear } from './world.mjs';
-import { NOW_MOTIF, placesIn, buildBrief, needsPlan, stepPocket, stackedHere, reachedFor, pocketLines, respondLines, shownLines, sinkLines, storyDigest, WORLD, OFFSCREEN_FIT, entryOf, nearPlace, timePassed, offscreenLines, errandLines, ifTakenOf, ifSunkOf, takenOf, expiredPocket, premiseGone, storyLayers, layerNote, briefBlocks, BRIEF_CHARS, BRIEF_SHARES, UNSQUEEZED, categoryCounts, draggingLines, overdueAhead, LOOKBACK_PLANS } from './planner.mjs';
+import { picksOf } from './guide.mjs';
+import { SIGN_PICKS_MAX, NOW_MOTIF, placesIn, buildBrief, needsPlan, stepPocket, stackedHere, reachedFor, pocketLines, respondLines, shownLines, sinkLines, storyDigest, WORLD, OFFSCREEN_FIT, entryOf, nearPlace, timePassed, offscreenLines, errandLines, ifTakenOf, ifSunkOf, takenOf, expiredPocket, premiseGone, storyLayers, layerNote, briefBlocks, BRIEF_CHARS, BRIEF_SHARES, UNSQUEEZED, categoryCounts, draggingLines, overdueAhead, LOOKBACK_PLANS } from './planner.mjs';
 import { foldState, stateLines, herOwnOnly } from './state.mjs';
 import { timeline, clockNow, dateIn, dayNumber, weekdayIndex, PARTS, withNoteMarks, timeTag } from './timeline.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
@@ -2704,6 +2705,7 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
             text: [...s.messages.slice(-40).map(m => m.text), ...s.visible.filter(r => r.type === '想法' && s.openIdeaIds.has(r.id)).map(r => r.text)].join(' ') }),
         relations: rel,
         promises: (() => { try { return promiseBrief(store, records, chatKey, s); } catch { return []; } })(),
+        signPicks: (() => { try { return picksOf(store, chatKey, s.messages, SIGN_PICKS_MAX); } catch { return []; } })(),
         // 势力账（Q-8）：各方之间、人的明面／实际归属、约定，全给并写明谁知道实情；外加素材包势力网里沾边的原作底子。
         factions: [...factionBrief(factionLedger(s.visible, { resolve: nameResolver(factionNet), dayOf: s.dayOf }), { net: factionNet, today: s.today, relDay: d => relativeDay(d, s.ts) }),
             ...(sit ? situationBrief(situationNow(sit, { storyId: s.chat.story_id, messages: s.messages, visibleIds: new Set(s.visible.map(r => r.id)), dayOf: s.dayOf, live: moveLiveCtx(store, chatKey, { records: s.visible, principal: s.userName }) }), { today: s.today, relDay: d => relativeDay(d, s.ts), timeScale: s.ts }) : []),

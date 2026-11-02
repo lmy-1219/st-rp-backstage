@@ -262,6 +262,21 @@ export function knockHtml(waiting, escape = s => String(s ?? '')) {
     return `<div class="rpe-door-title">${escape(waiting.who)}${way}，候着</div><div class="rpe-door-list"><div class="rpe-door-item rpe-door-lit"><span class="rpe-door-who">你回不回都行；打字回${escape(waiting.who)}也算</span>${b('接', yes)}${b('不理', '不理')}</div></div>`;
 }
 
+// 「接下来」路标卡（T074）：浮在输入框上方，不是聊天消息。只画界面，不替玩家发字——点一条只把那句填进输入框（括号包着，玩家能改）。
+// 样式沿用门那一套类（rpe-door-*）。items：[{ kind: 'sign'|'skip', text, fill }]；open＝卡是不是展开着。常驻一个小按钮随时能点开。
+export function guideHtml({ open = false, items = [] } = {}, escape = s => String(s ?? '')) {
+    const bar = `<button type="button" class="menu_button rpe-guide-open" title="看看接下来可以去哪、做什么">接下来</button>`;
+    if (!open) return `<div class="rpe-guide-bar">${bar}</div>`;
+    const row = (item, label) => `<div class="rpe-door-item rpe-door-lit"><span class="rpe-door-who">${escape(item.text)}</span><button type="button" class="menu_button rpe-guide-pick" data-kind="${item.kind === 'skip' ? 'skip' : 'sign'}" data-fill="${escape(item.fill)}" data-text="${escape(item.text)}">${label}</button></div>`;
+    const rows = items.map(i => row(i, i.kind === 'skip' ? '跳过去' : '去')).join('');
+    return `<div class="rpe-guide-card"><div class="rpe-door-title">接下来</div><div class="rpe-door-list">${rows}<div class="rpe-door-item"><span class="rpe-door-who">都不想选，自己写</span><button type="button" class="menu_button rpe-guide-write">自己写</button></div></div></div>`;
+}
+
+// 这些事件一来，旧的路标卡就过期了（选项每轮清空，防过期）：先收起再说；只有手动点开才总是现取
+export const GUIDE_STALE_EVENTS = Object.freeze(['MESSAGE_RECEIVED', 'MESSAGE_SENT', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'MESSAGE_EDITED', 'CHAT_CHANGED']);
+export function guideStaleOn(eventName) { return GUIDE_STALE_EVENTS.includes(eventName); }
+export function guideClosed() { return { open: false, items: [] }; }
+
 // solo：单聊（T070）——单聊进不了场，不画进场按钮，每项后面写一句怎么让他进场
 export function doorHtml(items = [], lit = null, escape = s => String(s ?? ''), { solo = false } = {}) {
     if (!items.length) return '';
