@@ -14,7 +14,7 @@ import { briefSection as relationsSection } from './relations.mjs';
 import { repairQuotes } from './extract.mjs';
 import { diceLines } from './dice.mjs';
 import { profileParts } from './profile.mjs';
-import { RETIRES_POCKET } from './store.mjs';
+import { RETIRES_POCKET, hisReply } from './store.mjs';
 import { scaleOf, scaleNote, DAY } from './timescale.mjs';
 import { paceOf, paceNote, spreadLine } from './tempo.mjs';
 import { dateIn, dayNumber } from './timeline.mjs';
@@ -1338,7 +1338,6 @@ export function reachedFor(item, userText) {
 // 待核实闸（T081）：口袋件递给某人后、那人已回但那条回复还没完成记账（isDone），这件先不算可再递、门上也不算 ready；
 // 超过 AWAIT_SPAN 条或没有 isDone／记账关了就放行，免得记账挂了把件卡死。
 export const AWAIT_SPAN = 10;
-const hisReply = (row, who, same) => !!row && !row.is_user && (row.name === who || same(row.name, who) || (who === '旁白' && row.speaker === 'narrator'));
 export function awaitingExtract(m, { messages = [], isDone = null, record = true, same = (a, b) => a === b, span = AWAIT_SPAN } = {}) {
     if (record === false || typeof isDone !== 'function' || m?.status !== 'pocket' || !m.held_by || !Number.isFinite(m.held_pos)) return false;
     const reply = (messages ?? []).find(row => Number.isFinite(row?.pos) && row.pos > m.held_pos && hisReply(row, m.held_by, same));

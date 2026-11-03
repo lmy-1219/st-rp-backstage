@@ -24,9 +24,10 @@ export function earlyLeads(store, menu = [], timeline = null) {
 }
 
 // 递出去后回复还没记账的口袋件（T081）：门上这一轮先不算 ready，等记账确认是 shown 还是仍 pocket 再按原规则走
+// 每件只算一次：算过的（m.awaiting 已是布尔）不再算，doorFor 先标、直接调 doorAt 的由它自己标
 export function awaitingPockets(menu = [], { messages = [], isDone = null, record = true, same = (a, b) => a === b } = {}) {
-    if (record === false || typeof isDone !== 'function' || !menu.some(m => m.status === 'pocket' && m.held_by && Number.isFinite(m.held_pos))) return menu;
-    return menu.map(m => awaitingExtract(m, { messages, isDone, record, same }) ? { ...m, awaiting: true } : m);
+    if (record === false || typeof isDone !== 'function' || !menu.some(m => m.status === 'pocket' && m.held_by && Number.isFinite(m.held_pos) && typeof m.awaiting !== 'boolean')) return menu;
+    return menu.map(m => typeof m.awaiting === 'boolean' || m.status !== 'pocket' ? m : awaitingExtract(m, { messages, isDone, record, same }) ? { ...m, awaiting: true } : { ...m, awaiting: false });
 }
 
 // 旁白留的记号"（该来：名字／方式）"：方式可缺；不一定在最末（模型常在后面又补一句），几处都有就认最后一个、全剥掉
@@ -50,11 +51,12 @@ const rank = c => (c.sent ? 0.5 : priority[c.source.type]);
 
 // input：board、pending、roster、menu、relations、userName、recentUser、holds、timeline、messages、reach、request、anchors（隔离区间）、arrivals（进场记录）、members（群里的卡）。
 export function doorAt(input = {}) {
-    const { board = {}, pending = {}, roster = [], menu = [], userName = '玩家', recentUser = '', timeline = {}, messages = [], reach = null, request = null } = input;
+    const { board = {}, pending = {}, roster = [], userName = '玩家', recentUser = '', timeline = {}, messages = [], reach = null, request = null } = input;
     const memory = input.playMode === 'memory';
     const names = roster.map(e => e.name);
     const rel = input.relations ? normalizeRelations(input.relations) : null;
     const same = (a, b) => !!a && !!b && (sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names)));
+    const menu = awaitingPockets(input.menu ?? [], { messages, isDone: input.isDone, record: input.record !== false, same });
     const last = messages.at(-1)?.pos ?? board.pos ?? 0;
     const rowAt = pos => timeline.rows?.filter(r => r.pos <= pos).at(-1) ?? { day: timeline.today ?? board.time?.day ?? 0, part: timeline.part ?? board.time?.part };
     const items = [];
@@ -111,8 +113,7 @@ export function doorAt(input = {}) {
             }
             const label = way === '打来电话' ? '来电' : way === '发来消息' ? '发来短讯' : /上门|来找|敲门/.test(`${m.title ?? ''}${m.surface ?? ''}`) ? '上门' : '可能会来';
             // 活动快到了、替它挂上门的引子，引子自己没到点（doorFor 标 early）；或递出后那条回复还没记账（标 awaiting，T081）：门上列着，但不算到时候了（T073/T081）
-            const awaiting = !!m.awaiting || awaitingExtract(m, { messages, isDone: input.isDone, record: input.record !== false, same });
-            add('pocket', m.id, !m.early && !awaiting, false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m));
+            add('pocket', m.id, !m.early && !m.awaiting, false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m));
         }
         if (reached) add('reach', reach.id ?? who, true, false, reach.matter ? `可能来联系：${reach.matter}` : '可能来联系', [...new Set([reach.matterText, reach.hook, ...(reach.threads ?? []).map(r => r.text)].filter(Boolean))].join('；'));
         candidates.sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b));

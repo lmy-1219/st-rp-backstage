@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 import { validAwayPlan } from './arrival.mjs';
 import { promiseOf, stageOf, settledTwins, settledByDoing, relatedTo, sameOccasion, LAPSED } from './promises.mjs';
-import { expiredTodo, timedOut, askedOther } from './recall.mjs';
+import { expiredTodo, timedOut, askedOther, answeredTodo } from './recall.mjs';
 import { buildLedger, samePerson, sameParty, namedParties } from './money.mjs';
 import { entryOf, ifTakenOf, ifSunkOf } from './planner.mjs';
 import { settledMatter } from './matters.mjs';
@@ -84,8 +84,9 @@ function todoItems(records, messages, board, timeline, userName, same, boardAt =
         if (!answer) {
             const after = messages.filter(m => (m.pos ?? 0) > r.pos);
             // 谁开的口看 name（speaker 是头像文件名）；提问的人在外头时，只认正文里叫到他的那条（发给他的消息、打给他的电话）
+            // "已回应"和各人那一格共用 recall.answeredTodo（从严：closed_by、紧接着的回应、有 2 字以上实词重合；无关的话不算）
             const speaker = m => m.name ?? (m.is_user && userName ? userName : m.speaker);
-            const heard = after.find(m => !same(speaker(m), asker) && targets.some(n => same(n, speaker(m))) && (!remote || textOf(m.text).includes(asker)));
+            const heard = answeredTodo(r, { messages: after, targets, asker, same, speakerOf: speaker, isPlayer: m => !!m.is_user || (!!userName && same(speaker(m), userName)), remote: !!remote });
             if (heard) { status = '有回音'; statusAt = heard.pos; }
             else if (expiredTodo(r, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos), scaleOf(timeline?.scale))) { status = '失效'; statusAt = num(timeline?.today) ?? null; }
         }

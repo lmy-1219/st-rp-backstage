@@ -233,16 +233,32 @@ const involves = (r, names) => names.some(n => n && ((r.about ?? '').includes(n)
 const baseName = n => String(n ?? '').replace(/[（(][^）)]*[）)]s*$/, '').trim();
 const similarNames = (a, b) => a && b && a !== b && baseName(a) === baseName(b);
 const sameNameLoose = (a, b) => !!a && !!b && (a === b || baseName(a) === baseName(b));
-export const isRemoteRecord = r => r?.type === '消息'
-    || /(?:（(?:电话|消息)）(?:问|回)|打来电话|发来消息|打电话给|发消息给|发短讯给|发短信给|在电话里|电话那头)/.test(String(r?.text ?? ''));
-const isOffstageDerived = r => isRemoteRecord(r)
-    || r?.type === '听说' || r?.type === '消息'
+// 隔空判定看结构，不猜记账模型的措辞（T079 返工）。顺序：
+// ① 我们自己生成的格式 `${问的人}（电话|消息）问|回`（offstage.exchangeRecords）；② 结构类型 type === '消息'（situation 派生，隔空送到的）；
+// ③ 那一刻场面表里持有人或本人是 remote／away（boardAt(pos)，惰性装载；不给就只看前两条）。
+// 区间有没有不用来判隔空：静音旁听也没有区间，分不开。
+const OWN_REMOTE_FORMAT = /^[^（）\n]{1,30}（(?:电话|消息)）(?:问|回)/;
+const REMOTE_STATUS = new Set(['remote', 'away']);
+function remoteOnBoard(r, boardAt, name) {
+    if (typeof boardAt !== 'function' || !Number.isFinite(Number(r?.pos))) return false;
+    const who = [r.holder_name, name].filter(Boolean);
+    if (!who.length) return false;
+    try {
+        const people = boardAt(r.pos)?.people;
+        return Array.isArray(people) && people.some(p => REMOTE_STATUS.has(p?.status) && who.some(n => sameNameLoose(n, p.name)));
+    } catch { return false; }
+}
+export const isRemoteRecord = (r, { boardAt = null, name = null } = {}) => !!r
+    && (OWN_REMOTE_FORMAT.test(String(r.text ?? '')) || r.type === '消息' || remoteOnBoard(r, boardAt, name));
+const isOffstageDerived = (r, ctx) => isRemoteRecord(r, ctx)
+    || r?.type === '听说'
     || r?.matter?.entry === '镜头外'
     || (Array.isArray(r?.links) && r.links.some(l => l?.kind === '交代'));
-function checkEntry(mine, segs, current, lastPos) {
+function checkEntry(mine, segs, current, lastPos, ctx = {}) {
     if (!current || !(lastPos - current.from <= 3)) return { show: false, lastSeen: null };
     const closedSegs = (segs ?? []).filter(s => s !== current && s.to != null && s.to <= current.from && s.to > (s.from ?? 0));
-    const inPersonBefore = [...mine].reverse().find(r => r.pos < current.from && !isOffstageDerived(r)) ?? null;
+    // 此前当面在场的记录才算"上次在场"；静音旁听过（没有区间、也不是隔空）的算当面，只隔空联系过的不算。分不清的当没对上（多报一句刚到场，不冒串知的险）
+    const inPersonBefore = [...mine].reverse().find(r => r.pos < current.from && !isOffstageDerived(r, ctx)) ?? null;
     if (closedSegs.length > 0) return { show: true, lastSeen: inPersonBefore };
     if (inPersonBefore) return { show: false, lastSeen: null };
     return { show: true, lastSeen: null };
@@ -252,7 +268,41 @@ const parsePromiseField = p => {
     if (typeof p === 'object') return p;
     try { return JSON.parse(p); } catch { return null; }
 };
-function openForPerson(r, name, mine) {
+// "已回应"共用一个从严的判定（事账 pending.todoItems 和各人那一格的 open 都用它）。拿不准就当没回应。
+// targets＝这件事冲着谁；成立任一条：(a) 有 closed_by；(b) 紧接着的回应：r.pos 之后 targets 里的人开口的第一条，
+// 中间只隔着提问人或玩家的消息、不超过 2 条（"行""好"也算）；(c) 后来 targets 里的人说的话和托付文字有至少 2 字的实词重合
+// （不看单字、不看虚字、人名先去掉）。其余（乙随口说了句无关的话）不算。
+export const ANSWER_GAP = 2;
+const hasFunctionChar = g => [...g].some(c => FUNCTION_CHARS.has(c));
+// FUNCTION_CHARS 定义在前面（const，模块顶层），此处只在函数调用时用
+export function contentGrams(text, ignore = []) {
+    let s = String(text ?? '');
+    for (const n of [...ignore].filter(x => x && String(x).length >= 1).sort((a, b) => String(b).length - String(a).length)) s = s.split(String(n)).join(' ');
+    return new Set([...grams(s)].filter(g => g.length >= 2 && !hasFunctionChar(g)));
+}
+export function answeredTodo(r, { messages = [], targets = [], asker = null, same = (a, b) => a === b, speakerOf = m => m.name ?? m.speaker, isPlayer = m => !!m.is_user, ignore = [], remote = false } = {}) {
+    if (r?.closed_by) return { pos: r.closed_by.pos ?? null, how: 'closed' };
+    const tg = (targets ?? []).filter(Boolean);
+    if (!tg.length) return null;
+    const after = (messages ?? []).filter(m => (m.pos ?? 0) > r.pos).sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
+    const fromTarget = m => tg.some(n => same(n, speakerOf(m))) && !(asker && same(speakerOf(m), asker));
+    const viaAsker = m => !!asker && !!m.text && String(m.text).includes(asker);
+    const ok = m => !remote || viaAsker(m);
+    let gap = 0;
+    for (const m of after) {
+        if (fromTarget(m)) { if (ok(m)) return { pos: m.pos, how: 'next' }; break; }
+        if ((asker && same(speakerOf(m), asker)) || isPlayer(m)) { if (++gap > ANSWER_GAP) break; continue; }
+        break;
+    }
+    const mineWords = contentGrams(r.text, [asker, ...tg, ...ignore]);
+    if (!mineWords.size) return null;
+    for (const m of after) {
+        if (!fromTarget(m) || !ok(m)) continue;
+        for (const g of contentGrams(m.text, [asker, ...tg, ...ignore])) if (mineWords.has(g)) return { pos: m.pos, how: 'overlap' };
+    }
+    return null;
+}
+function openForPerson(r, name, mine, messages = []) {
     if (r.holder_name === name) return true;
     if (r.type === '想法' && !r.promise) return false;
     const text = String(r.text ?? '');
@@ -268,18 +318,18 @@ function openForPerson(r, name, mine) {
         const others = (r.audience ?? []).filter(a => a && !sameNameLoose(a, r.holder_name));
         const targeted = text.includes(name) || sameNameLoose(r.about, name) || (others.length > 0 && others.every(a => sameNameLoose(a, name)));
         if (!targeted) return false;
-        const answered = mine.some(x => x.pos > r.pos && sameNameLoose(x.holder_name, name) && !['时间', '心里'].includes(x.type) && (x.type === '了结' || x.pos - r.pos <= 6));
+        const answered = answeredTodo(r, { messages, targets: [name], asker: r.holder_name, same: sameNameLoose, ignore: (r.audience ?? []) });
         return !answered;
     }
     return false;
 }
-function carryRemoteRecords({ old, hits, plainHits, state, open, lastPos, today, toDay, recalled }) {
+function carryRemoteRecords({ old, hits, plainHits, state, open, lastPos, today, toDay, recalled, ctx = {} }) {
     const cands = old.filter(r => r.type !== '时间' && r.type !== '余波' && r.type !== '想法' && r.type !== '了结'
         && !(r.matter && !r.closed_by)
         && lastPos - r.pos <= REMOTE_CARRY_WINDOW
         && today - toDay(r.pos) <= REMOTE_CARRY_DAYS
         && !recalled.has(r.id)
-        && isRemoteRecord(r)).sort((a, b) => a.pos - b.pos || a.id - b.id);
+        && isRemoteRecord(r, ctx)).sort((a, b) => a.pos - b.pos || a.id - b.id);
     if (!cands.length) return [];
     const maxPos = cands.at(-1).pos;
     const carried = cands.filter(r => r.pos >= maxPos - 1).slice(-REMOTE_CARRY_MAX);
@@ -348,7 +398,7 @@ function clusters(positions) {
 const clashes = r => (Array.isArray(r?.known) ? r.known : []).filter(k => k?.clash);
 export const withClash = r => (clashes(r).length ? { ...r, text: `${String(r.text).replace(/[。．.]+$/, '')}（这是当时的说法，和「${clashes(r).map(k => k.title).join('」「')}」对不上，以那条为准）` } : r);
 
-export function selectMaterial({ name, present = [], messages, records: given, openIdeaIds, recent = [], recentUser = '', queryKeys = [], queryWide = [], sense = null, recalled = new Map(), timeMarks = [], timeRecs = null, anchors = null, avatar = null, pool: wantPool = false, skipOpen = null, more = false, scale = 1, timeScale = DAY, tag = null }) {
+export function selectMaterial({ name, present = [], messages, records: given, openIdeaIds, recent = [], recentUser = '', queryKeys = [], queryWide = [], sense = null, recalled = new Map(), timeMarks = [], timeRecs = null, anchors = null, avatar = null, pool: wantPool = false, skipOpen = null, more = false, scale = 1, timeScale = DAY, tag = null, boardAt = null }) {
     // scale：跟着 ST 的上下文大小（slot.roomFit，N-288）：旧事给几条照它放宽、收窄，至少一条
     const n = k => Math.max(1, Math.round(k * (Number(scale) > 0 ? scale : 1)));
     const empty = { name, entry: null, hits: [], state: [], open: [], pool: [], stale: new Set(), when: () => '', who: () => '', more };
@@ -378,7 +428,7 @@ export function selectMaterial({ name, present = [], messages, records: given, o
     let entry = null;
     const segs = avatar && anchors?.[avatar]?.segments;
     const current = segs?.find(s => s.to == null);
-    const entryInfo = checkEntry(mine, segs, current, lastPos);
+    const entryInfo = checkEntry(mine, segs, current, lastPos, { boardAt, name });
     if (entryInfo.show) {
         const lastSeen = entryInfo.lastSeen;
         entry = lastSeen
@@ -480,9 +530,9 @@ export function selectMaterial({ name, present = [], messages, records: given, o
     // 打算里写明只管那一时的（"等天一亮再说""今晚先……"），过了那个时候不再惦记（约定另有到期那一套）
     const openAll = mine.filter(r => ((r.type === '想法' && openIdeaIds.has(r.id) && (r.promise || !timedOut(r, today - toDay(r.pos), timeScale))) || (r.promise && openIdeaIds.has(r.id)) || (r.todo && !r.closed_by && r.type !== '想法' && !r.promise && lastPos - r.pos <= TODO_WINDOW && !expiredTodo(r, today - toDay(r.pos), timeScale)))
         && !(r.promise?.kind === '畅想' && !(relevance.get(r.id) > 0)) && !skipOpen?.has(r.id)
-        && !used.has(r.id) && openForPerson(r, name, mine) && !isStale(r.id));
+        && !used.has(r.id) && openForPerson(r, name, mine, messages) && !isStale(r.id));
     const open = [...openAll.filter(r => r.pos < recentFrom), ...openAll.filter(r => r.pos >= recentFrom)].slice(-MAX_OPEN).sort((a, b) => a.pos - b.pos);
-    const remoteCarry = carryRemoteRecords({ old, hits, plainHits, state, open, lastPos, today, toDay, recalled });
+    const remoteCarry = carryRemoteRecords({ old, hits, plainHits, state, open, lastPos, today, toDay, recalled, ctx: { boardAt, name } });
 
     // 给叙事组装的候选：相关的（再用最相关几条的检索词扩一轮，接住换了说法的）、它们前后挨着的、
     // 以及他知道的人和东西的状态变化。模型从里面挑、串成线；这里宽一点，挑由它来。

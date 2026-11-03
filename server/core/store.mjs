@@ -74,6 +74,8 @@ export const sameBeat = (old, n) => !!String(old?.line ?? '').trim() && String(o
 
 const EDIT_RUN = 6;
 const CAMERA_LABEL = '旁白';   // 镜头那张卡在组格时用的名字（slot.CAMERA_NAME）：它的消息记成 narrator
+// 这条消息是不是他（who）的回复：非玩家，名字对得上（same 可换成按名册认同一个人），或镜头那张卡对旁白消息。menuOf 的"递出后他回了没"和 planner.awaitingExtract 共用
+export const hisReply = (row, who, same = (a, b) => a === b) => !!row && !row.is_user && (row.name === who || same(row.name, who) || (who === CAMERA_LABEL && row.speaker === 'narrator'));
 // 用户在消息上点的剧情日期（N-265）：day＝从这条起算新的一天｜same＝这里没有跨天｜d:N＝这条是第 N 天；后面可以带 @时段（10/3：时段也能手动改）
 export const DAY_MARK = /^(?:day|same|d:\d{1,4})?(?:@(?:早上|上午|中午|下午|傍晚|晚上|深夜|凌晨))?$/;
 export const validMark = k => typeof k === 'string' && k !== '' && DAY_MARK.test(k);   // 中间连着改至多几条还认作就地改稿（inPlaceEdits）
@@ -1037,7 +1039,7 @@ export function openStore(file) {
         const h = historyOf(chatKey);
         const info = q(`select s.pos, m.is_user, m.speaker, m.name from chat_seq s join chats c on c.key = s.chat_key
                          join messages m on m.story_id = c.story_id and m.fp = s.fp where s.chat_key = ? order by s.pos`).all(chatKey);
-        const his = (row, who) => !!row && !row.is_user && (row.name === who || (who === CAMERA_LABEL && row.speaker === 'narrator'));
+        const his = hisReply;
         const replied = s => {
             if (!s.pending) return true;
             const next = info[s.pos + 1];

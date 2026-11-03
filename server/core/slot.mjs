@@ -49,7 +49,7 @@ import { driftItems, longGive, activeLong } from './drift.mjs';
 import { episodeLines, asksPast, EPISODE_CHARS } from './episodes.mjs';
 import { lifeSheet, lifeLines, homeLines, ownHomeLines, seedOf } from './life.mjs';
 import { hasCard, arrivedLines, isRemote, remoteLine, playerThereLines, validAwayPlan, remoteAt } from './arrival.mjs';
-import { boardFor } from './board.mjs';
+import { boardFor, boardLoader } from './board.mjs';
 import { pendingFor } from './pending.mjs';
 import { doorFor, doorLines } from './door.mjs';
 import { stepWaits, dropTry } from './waiting.mjs';
@@ -246,7 +246,15 @@ export function bodyGuardFor(store, records, chatKey, { anchor = null, recentUse
         towardHer: key => String(key).split(/[\u0001\u0002]/).some(n => same(n, user)), derived, speaker: camera ? null : knower });
 }
 
-function materialFor(store, records, { chatKey, speaker, name, anchor = null, recent, recentUser, present, queryKeys = [], pool, sense = null, skipOpen = null, scale = 1, guard = null }) {
+// 按位置取那会儿的场面表，惰性：第一次真要判才装料（一次组格至多装 1 次；没有候选记录要判就是 0 次）。装不了就返回 null，判定退回前两条结构。
+export function lazyBoardAt(store, records, chatKey) {
+    let loader;
+    return pos => {
+        try { loader ??= boardLoader(store, records, chatKey, { present: [], recentUser: '', timeline: null }); return loader.atPos(pos); } catch { return null; }
+    };
+}
+
+function materialFor(store, records, { chatKey, speaker, name, anchor = null, recent, recentUser, present, queryKeys = [], pool, sense = null, skipOpen = null, scale = 1, guard = null, boardAt = null }) {
     const chat = store.requireChat(chatKey);
     const messages = store.currentMessages(chatKey);
     // 她的伤病那几条按守门过（预跑别人那一格时也一样：组装好的会被留着直接用）
@@ -256,7 +264,7 @@ function materialFor(store, records, { chatKey, speaker, name, anchor = null, re
         openIdeaIds: new Set(records.openIdeas(chatKey).map(r => r.id)), recent, recentUser, queryKeys, queryWide: queryKeys.wide ?? [], sense,
         recalled: store.recentSlotIds?.({ chatKey, speaker, anchor }) ?? new Map(),
         timeMarks: timeMarksFor(store, records, chatKey), timeRecs: records.visible(chatKey).filter(r => r.type === '时间'),
-        anchors: chat.anchors ? JSON.parse(chat.anchors) : null, pool, skipOpen, more: asksPast(recentUser, scaleFor(store, chatKey)), scale, timeScale: scaleFor(store, chatKey),
+        anchors: chat.anchors ? JSON.parse(chat.anchors) : null, pool, skipOpen, more: asksPast(recentUser, scaleFor(store, chatKey)), scale, timeScale: scaleFor(store, chatKey), boardAt,
         tag: (n, today) => timeTag(n, { start: store.setupOf?.(chat.story_id)?.data?.时间 ?? null, today, timeScale: scaleFor(store, chatKey) }),
     });
     const byPos = new Map(messages.map(m => [m.pos, m.text]));
@@ -762,7 +770,8 @@ async function memorySlot(store, records, { chatKey, speaker, speakerName, ancho
     const CLOSED = new Set(['办了', '改了', '黄了', '过去了', '失效', '有回音']);
     const pendingSkip = pendingLedger && speaker !== CAMERA ? new Set(pendingLedger.items.filter(x => (x.kind === '要求' && CLOSED.has(x.status)) || (x.kind === '约定' && CLOSED.has(x.status)) || ['钱', '规矩'].includes(x.kind)).map(x => x.source?.id).filter(x => x != null)) : new Set();
     const allSkip = new Set([...(skipOpen ?? []), ...pendingSkip]);
-    const pick = (queryKeys, pool, sense = null) => materialFor(store, records, { chatKey, speaker, name, anchor, recent, recentUser, present, queryKeys, pool, sense, skipOpen: allSkip, scale, guard });
+    const boardAt = lazyBoardAt(store, records, chatKey);
+    const pick = (queryKeys, pool, sense = null) => materialFor(store, records, { chatKey, speaker, name, anchor, recent, recentUser, present, queryKeys, pool, sense, skipOpen: allSkip, scale, guard, boardAt });
     // 按意思找旧事（向量，D-109 第 4 步）：能用就不再先让模型配检索词（那一步两三秒）；这一局的记录还没转完、或者调不通，就照旧配词。
     const senseFor = async () => {
         if (!vectors?.ready?.() || !recentUser?.trim()) return null;
@@ -2989,10 +2998,11 @@ async function prefetchOthers(store, records, { assembler, keyMaker }, { chatKey
         && (!picked || picked.has(m.avatar) || picked.has(m.name)));
     if (!others.length) return;
     const queryKeys = await queryKeysFor(store, keyMaker, { chatKey, recent, recentUser, present });
+    const boardAt = lazyBoardAt(store, records, chatKey);
     for (const m of others) {
         if (ahead.has(aheadKey(chatKey, m.avatar, recentUser))) continue;
         const name = m.name || m.avatar;
-        const { material, messageText } = materialFor(store, records, { chatKey, speaker: m.avatar, name, recent, recentUser, present, queryKeys, pool: true });
+        const { material, messageText } = materialFor(store, records, { chatKey, speaker: m.avatar, name, recent, recentUser, present, queryKeys, pool: true, boardAt });
         if (!material.hits.length || !material.pool.length) continue;
         once(aheadKey(chatKey, m.avatar, recentUser),
             () => assembler({ chatKey, speaker: m.avatar, anchor: 'ahead', name, present, recent, recentUser, material, messageText })).catch(() => {});

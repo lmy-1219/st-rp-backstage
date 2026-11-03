@@ -295,18 +295,24 @@ function choreWordsOf(text, allNames) {
         if (b.length >= 2) s = s.replaceAll(b, ' ');
         for (const p of b.split(/[·\s]+/)) if (p.length >= 2) s = s.replaceAll(p, ' ');
     }
-    const out = new Set();
-    for (const seg of s.match(/[一-鿿]+/g) ?? []) {
+    // 词片 → 它在（抹掉人名后的）台词段里出现的起点们；折叠"互相重叠的词片"要用位置
+    const out = new Map();
+    for (const hit of s.matchAll(/[一-鿿]+/g)) {
+        const seg = hit[0];
         for (let len = 2; len <= 4; len++) {
             for (let i = 0; i + len <= seg.length; i++) {
                 const w = seg.slice(i, i + len);
                 if ([...w].some(c => CHORE_FUNC.has(c)) || CHORE_GENERIC.test(w)) continue;
-                out.add(w);
+                if (!out.has(w)) out.set(w, []);
+                out.get(w).push(hit.index + i);
             }
         }
     }
     return out;
 }
+
+// 两个词片在同一段文字里位置重叠（半开区间 [起, 起+长)）。紧挨着但不重叠的不折：真数据里"甲地乙地"这样连着说的是两件事（回放实测折相邻会丢掉生产局的真命中）
+const touching = (aAt, aLen, bAt, bLen) => aAt < bAt + bLen && bAt < aAt + aLen;
 
 export function choreLoop({ messages = [], speaker, names = [], userName = null, aliases = [], last = CHORE_WINDOW, min = CHORE_MIN, minWords = CHORE_WORDS, usual = CHORE_USUAL } = {}) {
     if (!speaker || speaker === 'narrator') return [];
@@ -319,39 +325,74 @@ export function choreLoop({ messages = [], speaker, names = [], userName = null,
     const firstIdx = messages.indexOf(win[0]);
     const userSaid = messages.filter((m, idx) => m?.is_user && (firstPos != null && m.pos != null ? m.pos >= firstPos - 1 : idx >= Math.max(0, firstIdx - 1))).map(m => plain(m.text)).join(' ');
     const counts = new Map();
+    const perMsg = [];
     for (const m of win) {
-        for (const w of choreWordsOf(m.text, allNames)) {
+        const words = choreWordsOf(m.text, allNames);
+        perMsg.push(words);
+        for (const w of words.keys()) {
             if (userSaid.includes(w)) continue;
             if (usual >= 0 && older.filter(o => o.includes(w)).length > usual) continue;
             counts.set(w, (counts.get(w) ?? 0) + 1);
         }
     }
     const shared = [...counts.entries()].filter(([, c]) => c >= min).map(([w]) => w).sort((a, b) => b.length - a.length);
-    const dedup = [];
-    for (const w of shared) if (!dedup.some(x => x.includes(w))) dedup.push(w);
-    return dedup.length >= minWords ? dedup.slice(0, 4) : [];
+    // 同一段文字里位置重叠的词片是同一个词的不同切法（"管理员办公室"切出的"管理员办""理员办公"…），折成一个、只留最长的；
+    // 要至少 minWords 个在原文里互不重叠的词片才算。
+    const group = shared.map((_, i) => i);
+    const root = i => { while (group[i] !== i) i = group[i] = group[group[i]]; return i; };
+    for (const words of perMsg) {
+        for (let a = 0; a < shared.length; a++) {
+            const aAt = words.get(shared[a]);
+            if (!aAt) continue;
+            for (let b = a + 1; b < shared.length; b++) {
+                const bAt = words.get(shared[b]);
+                if (!bAt || !aAt.some(x => bAt.some(y => touching(x, shared[a].length, y, shared[b].length)))) continue;
+                const ra = root(a), rb = root(b);
+                if (ra !== rb) group[Math.max(ra, rb)] = Math.min(ra, rb);   // 小号（更长）的当组头
+            }
+        }
+    }
+    const heads = shared.filter((_, i) => root(i) === i);   // shared 已按长度降序，组里最先出现的就是最长的
+    return heads.length >= minWords ? heads.slice(0, 4) : [];
 }
 
 // 连着劝玩家休息／回屋／躺下／别动（T078）
 export const REST_WINDOW = 3;
 export const REST_MIN = 2;
-export const REST_RE = /(?:你|先|快|回去|赶紧|乖乖|好好|老实)?(?:回屋|回房|上床|躺下|躺着|歇着|歇会儿|歇一歇|去歇|去睡|去躺|去休息|休息|睡一觉|睡会儿|睡吧|先睡|快睡|别动|别乱动|别乱跑|别下床|别起来|养着)/;
+export const REST_RE = /(?:你|先|快|回去|赶紧|乖乖|好好|老实)?(?:回屋|回房|上床|躺下|躺着|歇着|歇会儿|歇会|歇一歇|去歇|去睡|去躺|去休息|休息|睡一觉|睡会儿|睡一会|睡吧|先睡|快睡|该睡|静养|养着|别熬夜|别累着|别动|别乱动|别乱跑|别下床|别起来)/;
+// 单看不一定是劝人的词（"他歇着没事干""养着一条狗"）：只有这一句冲着玩家（你／玩家名）说才算；其余沿用 T078 原样不要求点名
+const REST_WEAK = /歇着|养着|静养|该睡|睡一会|歇会(?!儿)|歇一歇|别累着|别熬夜/g;
 const REST_NEG = /(?:不用|不必|别|不|没|未|省得|免得|哪能|怎么能)[^，。！？!?；;…\n]{0,4}(?:回屋|回房|上床|躺|歇|休息|睡|养)|别动不动|休息室|休息区/g;
-const USER_TIRED = /困|累|想睡|想歇|想躺|去睡|睡觉|上床|休息|歇会|躺会|晚安/;
+// 玩家自己提了困累想睡：否定的（不用休息、不累、不困、没困）不算
+const USER_TIRED_RE = /困|累|想睡|想歇|想躺|去睡|睡觉|上床|休息|歇会|躺会|晚安/g;
+const USER_NOT = /(?:不用|不必|不要|不想|不需要|用不着|不|没|别|无需)[^，。！？!?；;…\n]{0,2}$/;
+const userTired = text => {
+    const t = plain(text);
+    for (const m of t.matchAll(USER_TIRED_RE)) if (!USER_NOT.test(t.slice(Math.max(0, m.index - 4), m.index))) return true;
+    return false;
+};
 
+// 说话人最近 last 条非玩家回复里，每条有没有一句冲玩家劝休息的；要最近的那条命中，并且和上一次命中的是他相邻的两条（中间隔着没命中的不算）
 export function restHarping({ messages = [], speaker, userName = null, last = REST_WINDOW, min = REST_MIN } = {}) {
     if (!speaker || speaker === 'narrator') return false;
     const lastUser = [...messages].reverse().find(m => m?.is_user);
-    if (lastUser && USER_TIRED.test(plain(lastUser.text))) return false;
+    if (lastUser && userTired(lastUser.text)) return false;
     const mine = messages.filter(m => !m?.is_user && m?.speaker === speaker).slice(-last);
     if (mine.length < min) return false;
     const isRest = s => {
         const c = String(s ?? '').replace(REST_NEG, ' ').trim();
+        const aimed = /你/.test(c) || !!(userName && c.includes(userName));
         if (!REST_RE.test(c)) return false;
-        if (/^(?:我|他|她|它)/.test(c) && !/你/.test(c) && !(userName && c.includes(userName))) return false;
+        // 只靠含糊词命中的，得冲着玩家说
+        if (!aimed && !REST_RE.test(c.replace(REST_WEAK, ' '))) return false;
+        if (/^(?:我|他|她|它)/.test(c) && !aimed) return false;
         return true;
     };
-    return mine.filter(m => spokenOf(m.text).split(/[。！？!?\n…]+|(?<=[）)」”"])/).some(isRest)).length >= min;
+    const hit = mine.map(m => spokenOf(m.text).split(/[。！？!?\n…]+|(?<=[）)」”"])/).some(isRest));
+    // 末尾连着的命中条数 >= min
+    let run = 0;
+    for (let i = hit.length - 1; i >= 0 && hit[i]; i--) run++;
+    return run >= min;
 }
 
 export function choreLine({ name, userName = '对方', chores = [], rest = false } = {}) {
