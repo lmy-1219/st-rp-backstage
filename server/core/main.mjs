@@ -49,7 +49,7 @@ import { unansweredLine, promisesFor, pullOf, placeNow } from './waiting.mjs';
 import { doorFor } from './door.mjs';
 import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFor, autoLeave, markLeft, waitingKnock, pendingKnock, recentLapsed, leaveDoubts, answerLeaves, takePendingLeft, acknowledgeLeaves, KNOCK_JUDGE_SYSTEM, knockJudgePrompt, parseKnockJudge } from './auto.mjs';   // 自动进离场与调度（D-201）
 import { pendingFor } from './pending.mjs';
-import { planBrief, nodeCheckLines, nodeCheckTaken, awayMaterial, storyContext, sceneMaterial, prepMaterial, situationMaterial, prefetchFor, intimateSetup, intimatePlanOptions } from './slot.mjs';
+import { planBrief, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimateSetup, intimatePlanOptions } from './slot.mjs';
 import { AWAY_SYSTEM, AWAY_REVISE_SYSTEM, parseAway, awayPrompt, revisePrompt, pinNames, actualDaysOf } from './away.mjs';
 import { FRESH_SYSTEM, freshPrompt, staleSpans, applyFresh, freshAnswerValid, voiceOf, PREVIOUS } from './fresh.mjs';
 import { STAY_SYSTEM, stayPrompt, parseStay, applyStay } from './stay.mjs';
@@ -189,7 +189,7 @@ const freshBrief = planId => {
         const v = JSON.parse(store.getMeta(`plan_verdict:${planId}`) ?? 'null');   // 转向那一次的依据、参谋备忘，重攒时带上
         const memo = store.getMeta(`plan_memo:${planId}`), prep = store.getMeta(`plan_prep:${planId}`);
         // 备料、参谋备忘放在设定之后、局面之前（三家对比：接在末尾离输出最近，被原样搬进规划）
-        const brief = planBrief(store, records, plan.chat_key, { reason: plan.reason, rerollOf: Number(store.getMeta(`replan_of:${planId}`)) || null, verdict: v?.verdict ?? null, thread: v?.thread ?? null, factionNet: packOf(plan.chat_key)?.factions ?? null, sit: situation, prices: packOf(plan.chat_key)?.table ?? null, facts: packOf(plan.chat_key)?.facts ?? null, prep: [prep, memo], budget: getConfig().planner.briefChars });
+        const brief = planBrief(store, records, plan.chat_key, { reason: plan.reason, rerollOf: Number(store.getMeta(`replan_of:${planId}`)) || null, verdict: v?.verdict ?? null, thread: v?.thread ?? null, factionNet: packOf(plan.chat_key)?.factions ?? null, seeds: packOf(plan.chat_key)?.seeds ?? [], sit: getConfig().situation.enabled ? situation : null, prices: packOf(plan.chat_key)?.table ?? null, facts: packOf(plan.chat_key)?.facts ?? null, prep: [prep, memo], budget: getConfig().planner.briefChars });
         store.setPlanBrief(plan.id, brief);
         return brief;
     } catch (error) { log(`plan ${planId} rebrief failed: ${error.message}`); return plan.brief; }
@@ -524,33 +524,36 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
     const started = Date.now();
     // 还等着的事连前提（章程 F1）：本来就要跑这一问，顺带看前提还在不在；不另加调用
     const waiting = premiseWaiting(store.menuOf(chatKey));
+    const checkedAt = store.currentMessages(chatKey).at(-1);
+    const completed = nodeCheckLines(store, records, chatKey, planId);
     try {
         const r = await createModelClient({ ...a, maxOutputTokens: 400 })
-            .complete({ system: withTaste(TURN_CHECK_SYSTEM, { kind: 'judge', model: a.model ?? p.judgeModel, config: cfg }), user: turnCheckPrompt({ node, reserve: setup?.储备线 ?? [], main: setup?.主线 ?? [], ideas, others, changes, acts, outside, waiting }) });
+            .complete({ system: withTaste(TURN_CHECK_SYSTEM, { kind: 'judge', model: a.model ?? p.judgeModel, config: cfg }), user: turnCheckPrompt({ node, reserve: setup?.储备线 ?? [], main: setup?.主线 ?? [], ideas, others, changes, acts, outside, waiting, completed }) });
         const costUsd = ((r.usage?.input ?? 0) * p.judgePriceInPerM + (r.usage?.output ?? 0) * p.judgePriceOutPerM) / 1e6;
         records.logAssemble({ chatKey, speaker: '(转向检查)', model: p.judgeModel, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
         const v = parseTurnCheck(r.text);
-        log(`plan ${planId} turn check on ${[...ideas, ...others, ...changes, ...acts].map(i => i.id).join(',')}: ${v.turn ? '转向' : v.broke ? '弄断' : v.shift ? '局面变了' : '没有'}${v.thread ? `（${v.thread}）` : ''}${v.why ? `（${v.why}）` : ''}${v.idea ? `；念头：${v.idea.who}——${v.idea.what}` : ''}${v.loud ? `；发酵：${v.loud.ids.join(',')}（${v.loud.why}）` : ''}`);
+        const done = v.done && !!node?.算成 && completed.length > 0;
+        log(`plan ${planId} turn check on ${[...ideas, ...others, ...changes, ...acts].map(i => i.id).join(',')}: ${v.turn ? '转向' : v.broke ? '弄断' : done ? '算成' : v.shift ? '局面变了' : '没有'}${v.thread ? `（${v.thread}）` : ''}${v.why ? `（${v.why}）` : ''}${v.idea ? `；念头：${v.idea.who}——${v.idea.what}` : ''}${v.loud ? `；发酵：${v.loud.ids.join(',')}（${v.loud.why}）` : ''}`);
         // 闹出了大动静（D-170，用户 10/6）：不等换天，当场让局势跑一次——各方动起来、消息传开、给玩家这边排一两件后续。一个剧情时段至多一次
         // 编号对不上（试玩 10/6：模型写了列表里的第 2、3 条，不是记录编号，那次局势什么都没拿到）：就当这一轮各人做的、说的都算
         const seen = [...acts, ...ideas, ...others, ...changes];
         const loudIds = v.loud ? v.loud.ids.filter(id => seen.some(r => r.id === id)) : [];
         if (v.loud && !outside.length && cfg.situation.enabled) loudSituation({ chatKey, ids: loudIds.length ? loudIds : acts.map(r => r.id), why: v.loud.why }).catch(error => log(`situation (loud) failed: ${error.message}`));
-        // 判定挂在依据的那条想法所在的消息上：那条删了、改了、换到没有它的分支，这个判定就不算（verdictOf）。
-        // 局面变了的挂在那条变化上；都有时挂在最后那条上（删到它之前就不算）
-        const tip = store.currentMessages(chatKey).at(-1);
+        // 结论挂在调用前固定的证据快照上；回包时由共用入口校验，不能改挂到后来消息上。
+        const tip = checkedAt;
         // 前提没了的那几件撤掉，记一句为什么；挂在最后一条上（删回去就回来）
         for (const m of premiseVoids(waiting, v.gone)) {
             if (tip) store.updateMenu(chatKey, m.id, { status: 'void', by: '转向检查', why: m.why, at: { pos: tip.pos, fp: tip.fp } });
             log(`plan ${planId} menu ${m.id}「${m.title}」void: ${m.why}`);
         }
-        const at = (v.shift && !v.turn && !v.broke ? changes : [...ideas, ...others, ...changes, ...acts]).reduce((x, r) => (!x || r.pos > x.pos ? r : x), null) ?? (outside.length && tip ? { pos: tip.pos, fp: tip.fp } : null);
+
         // 角色起的新念头（玩家没转向、没弄断时）：给眼下这个节点补几件，不整个重排（D-107）
-        if (v.idea && !v.turn && !v.broke && !v.shift) {
+        if (v.idea && !v.turn && !v.broke && !v.shift && !done) {
             const src = others.filter(r => r.holder_name === v.idea.who).at(-1) ?? others.at(-1);
             if (src) supplement({ chatKey, planId, idea: v.idea, at: { pos: src.pos, fp: src.fp } }).catch(error => log(`plan ${planId} supplement failed: ${error.message}`));
         }
-        if ((v.turn || v.broke || v.shift) && at) store.setMeta(`node_verdict:${planId}`, JSON.stringify({ result: v.turn ? '转向' : v.broke ? '弄断' : '变了', why: v.why, thread: v.thread, at: { pos: at.pos, fp: at.fp } }));
+        const result = v.turn ? '转向' : v.broke ? '弄断' : done ? '算成' : v.shift ? '变了' : '还没';
+        writeNodeVerdict(store, chatKey, planId, { result, why: result === '算成' ? v.doneWhy : v.why, thread: v.thread }, checkedAt);
     } catch (error) {
         records.logAssemble({ chatKey, speaker: '(转向检查)', model: p.judgeModel, status: 'failed', ms: Date.now() - started, error: error.message });
     }
@@ -584,7 +587,7 @@ async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, t
     try {
     store.setMeta(key, String(done + 1));
     const chat = store.requireChat(chatKey);
-    const brief = planBrief(store, records, chatKey, { reason, verdict, thread, prices: packOf(chatKey)?.table ?? null, facts: packOf(chatKey)?.facts ?? null, budget: p.briefChars });
+    const brief = planBrief(store, records, chatKey, { reason, verdict, thread, seeds: packOf(chatKey)?.seeds ?? [], sit: cfg.situation?.enabled ? situation : null, prices: packOf(chatKey)?.table ?? null, facts: packOf(chatKey)?.facts ?? null, budget: p.briefChars });
     store.updatePlanAttempt(attempt, { briefChars: brief.length });
     const started = Date.now();
     // 调不通（中转掐断、没回话）：记一笔失败、这一回不算数，抛给叫它的那边（储备线到了地方那一路会过几条再试）——
@@ -1379,7 +1382,7 @@ function prepareScene({ chatKey }) {
     if (!moved && recent.length && last.pos - (recent.at(-1).at?.pos ?? -Infinity) < sc.gap) return null;
     if (moved) store.setMeta(`scene_moved:${chatKey}`, JSON.stringify({ pos: last.pos, fp: last.fp }));
     if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) return null;
-    const m = sceneMaterial(store, records, chatKey);
+    const m = sceneMaterial(store, records, chatKey, { seeds: packOf(chatKey)?.seeds ?? [], prices: packOf(chatKey)?.table ?? null, sit: cfg.situation.enabled ? situation : null });
     if (cfg.pace?.lateral === false) m.loose = [];   // 横向生长关着：不给手边的事、不记玩家眼下的样子
     const arcs = moved ? (m.setup?.储备线 ?? []).filter(x => !x.终局).slice(0, 10) : [];
     const user = scenePrompt({ ...m, recent: m.recent.slice(-6), arrived: moved, arcs });
@@ -1392,9 +1395,9 @@ function prepareScene({ chatKey }) {
         let imp = admitImpulse(v, { ...m, pos: last.pos, at, gaps: sc });
         if (!imp) return null;
         if (v.kind === '提前') {
-            const item = m.menu.find(x => x.id === v.id && x.status === 'waiting');
+            if (!m.menu.some(x => x.id === v.id)) return null;
+            const item = advanceImpulse(store, records, chatKey, v.id, at);
             if (!item) return null;
-            store.updateMenu(chatKey, item.id, { status: 'pocket', pocket_day: m.today, at });
             imp = { ...imp, who: item.who, what: item.title, used: true };
         } else store.setMeta(`impulse:${chatKey}`, JSON.stringify(imp));
         store.setMeta(`impulses:${chatKey}`, JSON.stringify([...recent, imp].slice(-12)));
@@ -1672,6 +1675,7 @@ async function checkNode({ chatKey, planId }) {
     const plan = store.planById(planId);
     const node = plan?.node ? JSON.parse(plan.node) : null;
     if (!node?.目标) return;
+    const checkedAt = store.currentMessages(chatKey).at(-1);
     const lines = nodeCheckLines(store, records, chatKey, planId);
     if (!lines.length) return;
     const started = Date.now();
@@ -1685,9 +1689,9 @@ async function checkNode({ chatKey, planId }) {
         const v = parseNodeCheck(r.text);
         log(`plan ${planId} node check: ${v.result}${v.why ? `（${v.why}）` : ''}`);
         // 判定挂在检查时的最后一条消息上（删到它之前、换分支就不算，verdictOf）。
-        const last = store.currentMessages(chatKey).at(-1);
+        const last = checkedAt;
         recordSecretLeaks(store, { chatKey, candidates: secrets, leaks: v.leaks, evidence: records.visible(chatKey), at: last ? { pos: last.pos, fp: last.fp } : null });
-        if (v.result !== '还没') store.setMeta(`node_verdict:${planId}`, JSON.stringify({ ...v, at: last ? { pos: last.pos, fp: last.fp } : null }));
+        writeNodeVerdict(store, chatKey, planId, v, checkedAt);
     } catch (error) {
         records.logAssemble({ chatKey, speaker: '(节点检查)', model: p.judgeModel, status: 'failed', ms: Date.now() - started, error: error.message });
     }
@@ -2076,7 +2080,7 @@ async function autoAnswer({ chatKey, who, answer }) {
 const settings = () => {
     const config = loadConfig(home);
     const split = { ...config.extractor, ...config.stages.setup };
-    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, guide: config.guide, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, onStall: stallSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
+    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, guide: config.guide, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, onStall: stallSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, seeds: chatKey => packOf(chatKey)?.seeds ?? [], prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation: config.situation.enabled ? situation : null }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
 };
 const server = createServer(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
 server.on('error', error => {

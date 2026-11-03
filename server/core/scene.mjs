@@ -1,4 +1,5 @@
 import { personWord } from './pronoun.mjs';
+import { driveLines } from './drive.mjs';
 // 兴头（D-109 第 2 步，N-225、N-226；D-112、D-113 加"就地"一类）：生活感按场面来。角色回完一条，后台让便宜、读得多的模型（默认 Gemini）看一眼眼下的场面：
 // 出门的——活干完了的空当、接了活还在等、气氛正好、有人高兴兴奋——有人冒个念头（去喝一杯、找个场子），排着的轻松事正好对上，熟人来邀，街上冒件事；
 // 就地的——不换场景、不推剧情时人也在动：没头没尾想起一件往事、一句听来的闲话，问玩家一件好奇的事，两个角色拌嘴，手上干着自己的活，
@@ -9,10 +10,11 @@ export const SCENE_SYSTEM = [
     '你在给一部长篇角色扮演看场面。下面是最近几条对话，在场的人各自的底子（兴趣和习惯、往事、嘴上什么样、怎么对人亲近）和他们跟玩家眼下的关系，不在场的熟人，幕后排着的几件事。',
     '看这一刻有没有人会自己起点什么。人不是只在剧情推着的时候才动：闲着会没话找话，会突然想起当年的一件事、最近听来的一句闲话，手上干着自己的活会想换个做法；两个人会拌嘴；会问玩家一件好奇了很久的事；',
     '会在吵着、难过、兴奋、生气的时候凑过去亲近——拿亲近压下一场架、岔开一件事、讨个好，都是人之常情，不用先把事说开。',
+    '【世界里的劲】是已有的来由：压力、兴头、喜事、牵挂都可能让某个人此刻自己动起来。先看这一场该不该被尊重；能顺着焦点线上那件事露面最好，对不上就照常挑，或者说没有。底色不当因果，候选不当已经发生；写明仅供谁的一侧的材料只给那个人起心思，别人不凭它说破。',
     '挑最像这个人、最贴这一刻的一件（只挑一件）。分两类：',
     '出门的（要一个空当：事刚办完、在等着什么、气氛正好、有人高兴兴奋；正紧张、正吵着、有人受伤难过时不算）：',
     '- 念头：在场的某个人按自己的兴趣冒个念头（约人去哪、想弄点什么、想试试什么）；',
-    '- 提前：幕后排着的哪件轻松的事正好对上这个空当（写它的编号）；',
+    '- 提前：幕后排着的哪件事正好借着眼下的劲露面（写它的编号）；固定时间、前置未真正完成、要玩家先去的事仍等条件成立；',
     '- 邀约：不在场的某个熟人按他的兴趣和门路来邀（有新东西、办了什么、有个局）；',
     '- 街头：人在外面时，周围冒出件新鲜事或者有人求助。',
     '就地的（不用空当，吵着、难过也行；只有正说到要紧处——谈判、动手、救人——不插）：',
@@ -63,7 +65,7 @@ const joined = (lines, n) => clip((lines ?? []).join('；'), n);
 // present：[{ name, level, parts: { 兴趣和习惯, 往事, 聊天, 亲近 }, withUser }]；told：[{ who, n }] 这一局讲过的往事
 // loose：手边的事（looseEnds）——在场的人留下的、还没着落的改变
 // arrived：玩家这边刚换了地方（叙述里那一小段）；arcs：开局单里的储备线（只在刚换了地方时给，D-167）
-export function scenePrompt({ userName = '玩家', setup = null, lastScene = [], present = [], offstage = [], menu = [], recent = [], told = [], passive = false, loose = [], arrived = null, arcs = [] }) {
+export function scenePrompt({ userName = '玩家', setup = null, lastScene = [], present = [], offstage = [], menu = [], recent = [], told = [], passive = false, loose = [], arrived = null, arcs = [], drive = [], focus = null, goal = '' }) {
     const person = p => {
         const parts = p.parts ?? {};
         const tales = (parts['往事'] ?? []).map((t, i) => `    往事${i + 1}${told.some(x => x.who === p.name && x.n === i + 1) ? '（讲过了）' : ''}：${clip(t, 80)}`);
@@ -74,6 +76,7 @@ export function scenePrompt({ userName = '玩家', setup = null, lastScene = [],
             ...(parts['亲近']?.length ? [`    亲近：${joined(parts['亲近'], 120)}`] : []),
             ...(parts['节奏']?.length ? [`    节奏：${joined(parts['节奏'], 120)}`] : []),
             ...tales,
+            ...driveLines(drive, { who: p.name }),
         ];
     };
     const looseLines = loose.length ? ['【手边的事】（在场的人留下的、还没着落的）', ...loose.map(l => `· 手边${l.id} ${l.who}留下的：${clip(l.text, 100)}`)] : [];
@@ -83,6 +86,8 @@ export function scenePrompt({ userName = '玩家', setup = null, lastScene = [],
         '【在场的人】', ...(present.length ? present.flatMap(person) : ['（只有玩家）']),
         '【不在场的熟人】', ...(offstage.length ? offstage.map(p => `· ${p.name}（${p.role}，${p.level ?? '不明'}${p.lastSeen ? `，上次露面${p.lastSeen}` : ''}）：${joined(p.parts?.['兴趣和习惯'], 200) || clip(p.hook, 200) || '（兴趣不明）'}`) : ['（没有）']),
         ...looseLines,
+        ...driveLines(drive, { focus, goal }),
+        ...offstage.flatMap(p => driveLines(drive, { who: p.name })),
         '【幕后排着的事】', ...(menu.length ? menu.map(m => `· 袋${m.id} ${m.who}「${m.title}」：${clip(m.surface, 100)}`) : ['（没有）']),
         ...(arrived ? [`【刚到】${userName}这边刚换了地方：${clip(arrived, 160)}`] : []),
         ...(arrived && arcs.length ? ['【这一局的几条线】（开局单里的；此刻对得上哪条，冒的那件事就照它的写法喂它；对不上别硬凑）', ...arcs.map(a => `· ${a.名}：${clip(a.内容, 120)}${a.条件 ? `（条件：${clip(a.条件, 60)}）` : ''}`)] : []),

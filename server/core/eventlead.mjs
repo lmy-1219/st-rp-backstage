@@ -27,8 +27,12 @@ export const LEADS_KEY = chatKey => `event_lead:${chatKey}`;
 export const MOVES_KEY = chatKey => `event_moves:${chatKey}`;
 export const ECHO_KEY = chatKey => `event_echo:${chatKey}`;
 
-// 线是节点焦点：节点的"焦点"那句里写着这条线的名字
-export const focusLine = (m, node = null) => { const line = tidy(m?.line), focus = tidy(node?.焦点); return line.length >= 2 && !!focus && focus.includes(line); };
+// 新规划只认解析器核过的线名；老规划仍从焦点句里认。
+export const focusLine = (m, node = null) => {
+    if (node?.焦点线 != null) return !!node.焦点线 && m?.line === node.焦点线;
+    const line = tidy(m?.line), focus = tidy(node?.焦点);
+    return line.length >= 2 && !!focus && focus.includes(line);
+};
 export const mainEvent = (m, node = null) => m?.purpose === '主线' || focusLine(m, node);
 // 定了是哪一格：触发写了时间，或者"第几天后"排到了规划那一格之后（said_day＝规划那条消息那一格，slot.menuDays 给）
 export const hasDay = m => !!tidy(m?.trigger?.time) || (Number.isFinite(m?.said_day) && Number.isFinite(m?.ready_day) && m.ready_day > m.said_day);

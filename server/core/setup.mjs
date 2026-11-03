@@ -565,7 +565,7 @@ export function crewOf(setupData, lastPlanNode, userName) {
 
 // 规划简报里的一段（幕后，全给）。
 // open(储备线) → 这条这回给不给全文（规划简报按此刻的账定，见 slot.planBrief；不给就全给，老样子）。
-export function briefSection(data, { open = null } = {}) {
+export function briefSection(data, { open = null, skipShut = false } = {}) {
     if (!data) return [];
     const out = ['【本局设定】（用户的开局单；照这个来，别改）'];
     if (data.基调) out.push(`基调：${data.基调}`);
@@ -585,9 +585,11 @@ export function briefSection(data, { open = null } = {}) {
     // 9/27 审计：储备线每次整份给，规划者看见什么就倾向于用什么，设定满的局会变成推任务。平时只给名字和条件；
     // 开了的（玩家碰到了、转向对得上、手上的线已经在用）才给全文。条件看着已经对上了，可以先起这条线（"线"里写它的名字），下一次给全文。
     const full = x => [`${x.名}：${x.内容}`, x.可选 ? '可选' : '必用', x.条件 && `条件：${x.条件}`, x.露法 && `露法：${x.露法}`, x.门槛 && `门槛：${x.门槛}`, x.终局 && '终局专用', x.拉扯 && `拉扯：${x.拉扯}`].filter(Boolean).join('；');
-    const shut = x => [`${x.名}`, x.可选 ? '可选' : '必用', x.条件 ? `条件：${x.条件}` : '条件：没写', x.终局 && '终局专用'].filter(Boolean).join('；');
-    const shown = data.储备线.map(x => (!open || open(x) ? full(x) : shut(x)));
-    each(open && data.储备线.some(x => !open(x)) ? '储备线（条件对上才用；用不用由你。只写了名字和条件的，条件看着对上了，可以先起这条线——"线"里写它的名字，下一次给你全文）：' : '储备线（条件对上才用；用不用由你）：', shown);
+    const shut = x => [`${x.名}`, x.可选 ? '可选' : '必用', x.条件 ? `条件：${x.条件}` : '条件：没写', x.门槛 && `门槛：${x.门槛}`, x.终局 && '终局专用'].filter(Boolean).join('；');
+    // skipShut（规划简报用，T076）：没开的储备线在【各条线现状】里已经一行带齐条件、门槛、露法，这里不再重复一份简写；开了的全文照给
+    const hidden = open && skipShut ? data.储备线.filter(x => !open(x)) : [];
+    const shown = data.储备线.filter(x => !hidden.includes(x)).map(x => (!open || open(x) ? full(x) : shut(x)));
+    each(open && !skipShut && data.储备线.some(x => !open(x)) ? '储备线（条件对上才用；用不用由你。只写了名字和条件的，条件看着对上了，可以先起这条线——"线"里写它的名字，下一次给你全文）：' : hidden.length ? '储备线（条件对上才用；用不用由你。另外几条只在【各条线现状】里一行）：' : '储备线（条件对上才用；用不用由你）：', shown);
     each('亲密线：', activeIntimate(data).map(x => `${x.谁.join('和')}；张力：${x.张力}；现在：${x.现在}；阶梯：${x.阶梯.join(' → ')}；${Object.entries(x.主动).map(([n, v]) => `${n}主动：${v}`).join('；')}；底线：${x.底线.join('、') || '未填写'}；可加入：${x.可加入.join('、') || '无'}；${x.可加入.length ? '写到的人都已成年' : '双方已成年'}`));
     each('长期意向（只当方向）：', data.意向.map(x => x.条));
     if (data.其他) out.push(`其他：${data.其他}`);

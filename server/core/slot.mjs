@@ -60,6 +60,11 @@ import { findSkip, liveSkips, settleSkip, skipDays, skipPromptLines, firstAfterS
 import { applyMoves, movesOf, eventStep, leadNotice, moveEvent, echoEvent, markEchoed } from './eventlead.mjs';
 import { bareText } from './records.mjs';
 import { pairImpressions } from './impressions.mjs';
+import { readDrive } from './drive.mjs';
+import { focusLine } from './eventlead.mjs';
+import { foldPending } from './pending.mjs';
+import { pocketGate, ttlOf } from './planner.mjs';
+import { datedEvent } from './eventlead.mjs';
 
 // 钉住的那一格只在同一版后台代码里算数（试玩 10/1：删回去重新生成，拿到的是几小时前旧代码钉住的那一格——没有约定、口袋还在最后）。
 // 代码指纹＝core 下各 .mjs 的内容；更新以后左滑重来会重新组一格（开了叙事组装就多一次组装的钱）。
@@ -2621,7 +2626,7 @@ export function requestPlanNow(store, records, chatKey, planner, { reason = 'use
     if (last?.status === 'requested' && (!reroll || store.activePlanAttempt?.(chatKey, last.id))) return last.id;
     if (previous && store.activePlanAttempt?.(chatKey, previous.id)) return previous.id;
     const s = storyContext(store, records, chatKey, { present });
-    const opts = { present, reason, verdict, thread, factionNet, sit, prices, facts, rerollOf: previous?.id ?? null, ...(planner.briefChars ? { budget: planner.briefChars } : {}) };
+    const opts = { seeds: planner.seeds?.(chatKey) ?? [], present, reason, verdict, thread, factionNet, sit, prices, facts, rerollOf: previous?.id ?? null, ...(planner.briefChars ? { budget: planner.briefChars } : {}) };
     const brief = planBrief(store, records, chatKey, opts);
     const retry = last?.status === 'requested';
     const id = retry ? last.id : store.requestPlan({ chatKey, storyDay: s.today, reason, provider: planner.provider, brief, basis, rerollOf: previous?.id ?? null });
@@ -2639,14 +2644,15 @@ function rhythmFor(store, chatKey, planId) {
         let detail;
         try { detail = JSON.parse(row.detail); } catch { return []; }
         if (detail?.plan !== planId || !Array.isArray(detail.warnings)) return [];
-        return detail.warnings.filter(w => typeof w === 'string' && (w.startsWith('这一份没有意外')
-            || /^第 [1-9]\d* 天挤了 /.test(w) || /^(?:今天|第 [1-9]\d* 天)有 (?:[2-9]|[1-9]\d+) 件一整轮的重戏/.test(w)));
+        return detail.warnings.filter(w => typeof w === 'string' && (
+            // T076：老存档里记过"这一份没有意外"，不再往简报里回填（只认下面两类，那一条字面不在其中）
+            /^第 [1-9]\d* 天挤了 /.test(w) || /^(?:今天|第 [1-9]\d* 天)有 (?:[2-9]|[1-9]\d+) 件一整轮的重戏/.test(w)));
     });
 }
 // 这一局此刻的规划简报（要规划时攒一次；"再试一次"、重启补包时按此刻的账重攒，别拿要规划那会儿的旧简报）。
 // prep：规划前备料、参谋备忘（各一段文字），放在设定之后、局面之前
 // budget：简报至多多少字（章程 H4，planner.briefChars）；超了按远近压（squeezeBrief），没超一个字不动
-export function planBrief(store, records, chatKey, { present = null, reason = null, rerollOf = null, verdict = null, thread = null, factionNet = null, sit = null, prices = null, facts = null, prep = [], budget = BRIEF_CHARS } = {}) {
+export function planBrief(store, records, chatKey, { present = null, reason = null, rerollOf = null, verdict = null, thread = null, factionNet = null, sit = null, prices = null, facts = null, prep = [], budget = BRIEF_CHARS, seeds = [] } = {}) {
     const s = storyContext(store, records, chatKey, { present });
     const replaced = new Set(), ready = store.readyPlans?.(chatKey) ?? [];
     let previous = rerollOf ?? (reason === 'reroll' ? store.lastReadyPlan?.(chatKey)?.id : null);
@@ -2677,8 +2683,8 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
     // 最近几份交回的规划（新的在前）的节点和事件，交给 planner 里的纯函数数——类别排了几件、拖着的线、该来的还没来
     // （每份排过的事要全的：menuOf 只留眼下还算数的，旧规划里没放出来、被新规划接手的不在里面）
     const recentRows = ready.filter(p => !replaced.has(p.id)).slice(-LOOKBACK_PLANS).reverse();
-    const planned = store.planItems?.(chatKey, recentRows.slice(0, 2).map(p => p.id)) ?? menu;
-    const recentPlans = recentRows.map(p => ({ node: (() => { try { return p.node ? JSON.parse(p.node) : null; } catch { return null; } })(), items: planned.filter(m => m.plan_id === p.id) }));
+    const planned = store.planItems?.(chatKey, recentRows.map(p => p.id)) ?? menu;
+    const recentPlans = recentRows.map((p, i) => ({ node: (() => { try { return p.node ? JSON.parse(p.node) : null; } catch { return null; } })(), items: planned.filter(m => m.plan_id === p.id) }));
     const castNames = s.roster.map(e => e.name).filter(Boolean);
     // 关系的最新变化（规划写的、记账记下的）：简报的关系表那一段和【主角团】里团里两两的关系都用
     const current = relationsNow(store, chatKey, rel, s.visible, castNames);
@@ -2710,10 +2716,11 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
         minds: [...(lastNode?.主角团 ?? []), ...(lastNode?.要紧的人 ?? [])].filter(p => p?.心思 && !isPlayer(p.谁) && !(who(p.谁) && players.some(u => who(u) === who(p.谁)))).map(p => ({ 谁: p.谁, 心思: p.心思 })),
         gaps: openGaps(menu, s.visible, { dayOf: s.dayOf, today: s.today, close, cont: id => Number(store.getMeta?.(`matter_cont:${chatKey}:${id}`) ?? 0) || 0 }),
         mix: categoryCounts(recentPlans, setup?.类别),
+        lineHist: recentPlans,
         dragging: draggingLines(recentPlans, { names: castNames }),
         overdue: overdueAhead(recentPlans, { names: castNames }),
         reason: reason ?? store.lastPlan(chatKey)?.reason ?? null, verdict, thread,
-        lastNode,
+        lastNode, drive: driveMaterial(store, records, chatKey, { seeds, prices, sit, context: s, node: lastNode }),
         pastNodes: replaced.size ? ready.filter(p => !replaced.has(p.id)).slice(0, -1).filter(p => p.node).map(p => ({ id: p.id, 目标: JSON.parse(p.node).目标, verdict: verdictOf(store, chatKey, p.id) })).filter(n => n.目标) : pastNodesOf(store, chatKey),
         story: digest.days, storyCut: digest.cut,
         dice: rollDice(`${chatKey}:${s.lastPos}:${(store.readyPlans?.(chatKey) ?? []).length}`, 3),   // 同一处再要一份（比如弄断后接着要）也换一组骰子
@@ -2881,7 +2888,128 @@ export function prepMaterial(store, records, chatKey, { library = [] } = {}) {
 // 不在场的熟人、排着的事、最近冒过的兴头、这一局讲过的往事、玩家这阵是不是只跟着。
 export const IMPULSE_LIFE = 6;
 const goalOf = m => { try { return (typeof m?.trig === 'string' ? JSON.parse(m.trig) : m?.trig)?.goal || ''; } catch { return ''; } };
-export function sceneMaterial(store, records, chatKey) {
+export function earlyEligible(m, menu, { node = null, players = [], names = [] } = {}) {
+    if (!m || m.status !== 'waiting') return false;
+    const ttl = ttlOf(m);
+    let trigger = m.trigger ?? m.trig;
+    try { if (typeof trigger === 'string') trigger = JSON.parse(trigger); } catch { return false; }
+    if (!ttl || ttl.follow === '时间' || ttl.kind === '当天' || trigger?.time || trigger?.goal || m.promise_ref != null || m.promiseRef != null || datedEvent(m, { node })) return false;
+    if (m.after_title) {
+        const prior = menu.filter(p => p.id !== m.id && p.plan_id === m.plan_id && p.title === m.after_title);
+        if (!prior.length || !prior.every(p => ['shown', 'used'].includes(p.status))) return false;
+    }
+    if (entryOf(m) === '到现场') {
+        const goers = String(m.goer ?? '').split(/[、,，和与及]/).map(n => n.trim()).filter(Boolean);
+        if (!goers.length || goers.some(n => /^(?:玩家|主角)/.test(n) || players.some(p => sameName(n, p, names)))) return false;
+    }
+    return true;
+}
+
+// 两路检查在请求前固定同一快照；迟回包只按当时的锚点写，不能挂到后来消息上。
+export function writeNodeVerdict(store, chatKey, planId, verdict, at) {
+    const priority = { 转向: 4, 弄断: 4, 算成: 3, 落空: 3, 变了: 2 };
+    if (!priority[verdict?.result] || !String(verdict.why ?? '').trim()) return false;
+    if (store.lastReadyPlan(chatKey)?.id !== planId || store.lastPlan(chatKey)?.id !== planId) return false;
+    const messages = store.currentMessages(chatKey);
+    const live = a => a?.fp && Number.isInteger(a.pos) && messages.some(m => m.pos === a.pos && m.fp === a.fp);
+    if (!live(at)) return false;
+    const old = verdictOf(store, chatKey, planId);
+    if (old && live(old.at) && (old.at.pos > at.pos || (old.at.pos === at.pos && (priority[old.result] ?? 0) >= priority[verdict.result]))) return false;
+    store.setMeta(`node_verdict:${planId}`, JSON.stringify({ result: verdict.result, why: verdict.why, ...(verdict.thread ? { thread: verdict.thread } : {}), at: { pos: at.pos, fp: at.fp } }));
+    return true;
+}
+
+// 写入前重新取菜单、约定、叠场和过期状态，拒绝已经变化的回包。
+export function advanceImpulse(store, records, chatKey, id, at) {
+    const s = storyContext(store, records, chatKey);
+    if (!at?.fp || !s.messages.some(m => m.pos === at.pos && m.fp === at.fp)) return null;
+    const menu = menuDays(store, store.menuOf(chatKey), s.dayOf), item = menu.find(m => m.id === id);
+    const { node } = latestNode(store, chatKey), names = s.roster.map(p => p.name);
+    const players = [s.userName, ...(store.playerNames?.(s.chat.story_id) ?? [])].filter(Boolean);
+    if (!earlyEligible(item, menu, { node, players, names })) return null;
+    const rel = store.relationsOf?.(s.chat.story_id);
+    const promised = promisesNow(store, records, chatKey, { ...s, present: s.present, rosterNames: names, rel: rel ? normalizeRelations(rel) : null, setup: store.setupOf?.(s.chat.story_id)?.data });
+    const board = boardFor(store, records, chatKey, { present: s.present, recentUser: '', timeline: timelineFor(store, records, chatKey, s.messages) });
+    const gone = pocketGone(store, records, chatKey, { ...s, rosterNames: names, board, here: s.present });
+    const stacked = pocketStack(store, records, chatKey, { ...s, menu, rosterNames: names });
+    const contentTier = activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null;
+    const gate = pocketGate(menu, { today: s.today, at: s.lastPos, hold: promised.hold, gone, stacked, pace: paceFor(store, chatKey), timeScale: s.ts, contentTier });
+    if (!gate.canEnter(id, { ignoreReadyDay: true })) return null;
+    store.updateMenu(chatKey, id, { status: 'pocket', pocket_day: s.today, at });
+    return item;
+}
+// 来源由现有调用方带入；这里只读已有结果，不补跑任何推演。
+export function driveMaterial(store, records, chatKey, { seeds = [], prices = null, sit = null, context = null, node = undefined } = {}) {
+    const s = context ?? storyContext(store, records, chatKey), plan = store.lastReadyPlan?.(chatKey);
+    node ??= plan?.node ? JSON.parse(plan.node) : null;
+    const meta = (key, fallback) => { try { return JSON.parse(store.getMeta?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
+    const menu = menuDays(store, store.menuOf(chatKey), s.dayOf);
+    const names = s.roster.map(p => p.name), rows = [];
+    const add = (from, ref, who, text, extra = {}) => { if (text) rows.push({ from, ref, who: [...new Set(who.filter(Boolean))], text, kind: '事实', ...extra }); };
+    const linksOf = r => [r?.matter?.menu != null ? `menu:${r.matter.menu}` : null].filter(Boolean);
+    const owner = r => [r.holder_name ?? s.roster.find(p => p.avatar === r.holder)?.name].filter(Boolean);
+    const live = s.visible.filter(r => !r.superseded_by && !r.closed_by);
+    const selected = meta(`world_used:${s.chat.story_id}`, []).filter(r => typeof r === 'object' && s.messages.some(m => m.pos === r.pos && m.fp === r.fp) && s.dayOf(r.pos) === s.today).at(-1);
+    const seed = selected && seeds?.find(e => e.i === selected.i);
+    if (seed) add('环境', `seed:${seed.i}`, [], seed.text, { kind: '底色', pos: selected.pos });
+    for (const e of activeLong(meta(`long_events:${s.chat.story_id}`, []), s.today, { lastPos: s.lastPos }))
+        add('环境', `long:${e.起}:${e.名}`, e.谁会知道, `${e.名}：${e.一句话}；眼下${e.阶段[e.第几阶段]}`, { pos: e.起_pos });
+    if (prices?.items?.length) driftItems(prices.items, { seed: s.chat.story_id, day: s.today, timeScale: s.ts }).forEach((e, i) => {
+        if (e !== prices.items[i]) add('环境', `price:${e.name}`, [], `${e.name}：${e.note}`, { kind: '底色', pos: s.lastPos });
+    });
+    const weather = (store.stateNotesOf?.(chatKey) ?? []).filter(n => n.aspect === '天气' && s.dayOf(n.pos) === s.today && n.pos <= s.lastPos).at(-1);
+    if (weather) add('环境', `weather:${weather.pos}`, [], weather.text, { kind: '底色', pos: weather.pos });
+    const ledger = factionLedger(live, { dayOf: s.dayOf });
+    for (const r of [...ledger.deals, ...ledger.allegiances, ...ledger.stances])
+        add('环境', `record:${r.id}`, [...r.knownBy], r.text, { pos: r.pos });
+    if (sit) {
+        const now = situationNow(sit, { storyId: s.chat.story_id, messages: s.messages, visibleIds: new Set(s.visible.map(r => r.id)), dayOf: s.dayOf });
+        for (const o of now.outcomes) {
+            const r = live.find(r => r.id === o.record_id);
+            if (r) add('环境', `record:${r.id}`, owner(r), r.text, { pos: r.pos, links: linksOf(r) });
+        }
+    }
+    for (const [i, h] of (node?.心事 ?? []).entries()) if (!saidSince(h, s.visible, { name: h.谁, since: plan?.anchor_pos ?? -1 }))
+        add('人', `held:${plan?.id}:${i}`, [h.谁], [h.处置, h.开口条件, h.事, h.不说时外显, h.说的场合].filter(Boolean).join('；'), { kind: '候选', pos: plan?.anchor_pos });
+    for (const p of [...(node?.主角团 ?? []), ...(node?.要紧的人 ?? [])]) {
+        const mind = p.心思 ? Object.entries(p.心思).filter(([, v]) => typeof v === 'string').map(([k, v]) => `${k}：${v}`).join('；') : '';
+        add('人', `mind:${plan?.id}:${p.谁}`, [p.谁], [p.想干, p.下一步, mind].filter(Boolean).join('；'), { kind: '候选', pos: plan?.anchor_pos });
+    }
+    const recentRelations = new Set([...currentRelations(null, { records: live, roster: names }).dir.values()].map(r => r.id));
+    const moneyMoves = new Set(buildLedger(live).moves.map(r => r.id));
+    for (const r of live) {
+        const who = owner(r);
+        if (r.type === '余波' && afterLines([r], { name: who[0], dayOf: s.dayOf, today: s.today, lastPos: s.lastPos + 1, recent: 0, timeScale: s.ts }).length)
+            add('人', `record:${r.id}`, who, `${r.text}${r.relation?.until ? `；等到${r.relation.until}才过去` : ''}`, { pos: r.pos, links: linksOf(r) });
+        if (r.type === '关系' && recentRelations.has(r.id) && s.lastPos - r.pos <= ACTIVE_MESSAGES)
+            add('人', `record:${r.id}`, who, r.text, { pos: r.pos, links: linksOf(r) });
+        if (s.lastPos - r.pos <= ACTIVE_MESSAGES && (moneyMoves.has(r.id) || (r.type === '做' && r.matter?.menu != null)))
+            add('人', `record:${r.id}`, who, r.text, { pos: r.pos, links: linksOf(r) });
+    }
+    // 用现成事账判是否仍有效；归并仅接受明确 promise_ref / matter.menu，不采用文字相似度。
+    const tl = timelineFor(store, records, chatKey, s.messages);
+    const pending = foldPending({ records: live, messages: s.messages, menu, timeline: tl });
+    const byRecord = new Map(live.map(r => [r.id, r]));
+    for (const p of pending.items.filter(p => ['约定', '钱'].includes(p.kind) && ['排着', '等着', '到了'].includes(p.status))) {
+        const r = byRecord.get(p.source.id);
+        if (!r) continue;
+        const due = p.when ?? dueOf(r.money?.every || r.text, { saidDay: s.dayOf(r.pos), timeScale: s.ts });
+        if (!due || !Number.isFinite(due.day)) continue;
+        add('事', `record:${r.id}`, owner(r), `${r.text}；时间：${r.promise?.when || r.money?.every || s.when({ pos: r.pos })}`, { pos: r.pos, links: linksOf(r) });
+    }
+    const complete = m => !m.after_title || menu.some(p => p.id !== m.id && p.plan_id === m.plan_id && p.title === m.after_title && ['shown', 'used'].includes(p.status));
+    const next = menu.filter(m => ['waiting', 'pocket'].includes(m.status) && focusLine(m, node) && complete(m) && !goalOf(m))
+        .sort((a, b) => a.ready_day - b.ready_day || a.id - b.id)[0];
+    if (next) {
+        const promise = byRecord.get(next.promise_ref);
+        add('事', `menu:${next.id}`, promise ? owner(promise) : [next.who], `${next.title}：${next.surface}`, { kind: '候选', line: next.line, pos: next.anchor_pos ?? plan?.anchor_pos,
+            links: next.promise_ref != null ? [`record:${next.promise_ref}`] : [] });
+    }
+    const lines = (node?.线 ?? []).map(l => ({ name: l.名, refs: menu.filter(m => m.line === l.名).flatMap(m => [`menu:${m.id}`, ...(m.promise_ref != null ? [`record:${m.promise_ref}`] : [])]) }));
+    return readDrive(rows, { focus: node?.焦点线 ?? lines.find(l => focusLine({ line: l.name }, node))?.name, lines, names: s.present });
+}
+
+export function sceneMaterial(store, records, chatKey, sources = {}) {
     const s = storyContext(store, records, chatKey);
     const seen = new Set();
     const uniq = list => list.filter(e => !seen.has(e.name) && seen.add(e.name));
@@ -2907,14 +3035,18 @@ export function sceneMaterial(store, records, chatKey) {
     try { told = JSON.parse(store.getMeta?.(`told:${s.chat.story_id}`) ?? '[]'); } catch {}
     // 讲过的往事挂在写它的那条消息上：那条还在本窗口才算讲过（分叉前共有的 fp 相同所以继承，分叉后各自不同所以不串，删回去也撤得掉）。旧数据只有 at 没有 fp，stillThere 按位置算。
     told = told.filter(t => t && stillThere({ pos: t.at, fp: t.fp }, s.messages, (a, b) => !!store.sameMessage?.(a, b)));
+    const { node } = latestNode(store, chatKey);
+    const drive = driveMaterial(store, records, chatKey, { ...sources, context: s, node });
     return {
+        drive, focus: node?.焦点线 ?? null, goal: node?.目标 ?? '',
         userName: s.userName ?? '玩家', today: s.today, setup: staleBackstory(store.setupOf?.(s.chat.story_id)?.data ?? null, s.visible, s.userName), present, offstage, recent, told,
         passive: passiveUser(s.messages), storyId: s.chat.story_id,
         // 手边的事：在场的人留下的、还没着落的改变（弄坏、弄乱、借了），给"顺手"当候选（用户 10/2）
         loose: looseEnds(s.visible, { present: s.present, lastPos: s.messages.at(-1)?.pos ?? 0, same }),
         // 写了前提（触发里的 goal）的不给提前：它写的"谁知道什么"是按前提发生过写的（试玩 10/14：一件写着"饭桌上听来的"的事，
         // 饭局没发生就被提前，那人就知道了饭桌上才会听到的事）
-        menu: (store.menuOf?.(chatKey) ?? []).filter(m => (m.status === 'waiting' || m.status === 'pocket') && !goalOf(m)).slice(0, 12),
+        menu: (store.menuOf?.(chatKey) ?? []).filter(m => (m.status === 'waiting' || m.status === 'pocket') && !goalOf(m))
+            .sort((a, b) => Number(focusLine(b, node)) - Number(focusLine(a, node))).slice(0, 12),
         lastScene: s.messages.slice(-SCENE_MESSAGES).map(m => `[${m.name ?? m.speaker}] ${String(m.text).replace(/<#[0-9.]+#>/g, '').replace(/\s+/g, ' ').trim().slice(0, SCENE_CHARS)}`),
         messages: s.messages,
     };
