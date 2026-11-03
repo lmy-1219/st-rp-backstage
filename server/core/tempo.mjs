@@ -35,6 +35,8 @@ const TABLE = {
 };
 // 中档按消息数沉的条数（剧情停在同一格时）：找上门的 40 条，慢沉的 100 条
 const SINK_MSGS = 40, SLOW_MSGS = 100;
+// 递出过几次还没人接，"跟着约定"的豁免（keep）就不再成立、照常沉底（T077）。中档 8 次；快档少一点、慢档多一点，和沉底条数同一个倍数
+const OFFER_MAX = 8;
 
 // x：整份开局单（有"节奏"）、"快"／"慢"这样的字、或者已经算好的一档（有 name）；timeScale 不给就按开局单的尺度（不是开局单就是天）。
 export function paceOf(x = null, timeScale = null) {
@@ -47,7 +49,7 @@ export function paceOf(x = null, timeScale = null) {
     return Object.freeze({
         name: name ?? MID, ...p, mix: Object.freeze({ ...p.mix }),
         sink: units(ts.sink, kSink), slow: units(ts.slow, kSlow),
-        sinkMsgs: Math.round(SINK_MSGS * kSink), slowMsgs: Math.round(SLOW_MSGS * kSlow),
+        sinkMsgs: Math.round(SINK_MSGS * kSink), slowMsgs: Math.round(SLOW_MSGS * kSlow), offerMax: Math.max(1, Math.round(OFFER_MAX * kSink)),
         // 收期按尺度换算：天尺度照表；小时尺度沉底是天的三倍格数，收期也三倍；月、年沉底只有一格，收期跟着减半（至少 1 格）
         close: Math.max(1, Math.round(p.close * ts.sink / DAY.sink)),
         unit: ts.word,

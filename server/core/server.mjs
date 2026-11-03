@@ -375,9 +375,19 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             if (!manual && g.refill && g.last && planner && !store.getMeta(REFILL_KEY(g.last.id))) {
                 store.setMeta(REFILL_KEY(g.last.id), '1');
                 try { requestPlanNow(store, records, chatKey, planner, { reason: 'node_empty', present }); refilled = true; } catch {}
+            } else if (!manual && g.stall && g.last && g.lastMessage && planner?.onStall && !store.getMeta(REFILL_KEY(g.last.id))) {
+                // 停得够久（T077）：往现有规划里补几件，不整份重排；同一份规划和上面共用一个记号，合计至多一次；没调通就放回去下次再试
+                const key = REFILL_KEY(g.last.id);
+                store.setMeta(key, '1');
+                try {
+                    const done = planner.onStall({ chatKey, planId: g.last.id, at: { pos: g.lastMessage.pos, fp: g.lastMessage.fp } });
+                    refilled = true;
+                    Promise.resolve(done).catch(() => store.setMeta(key, ''));
+                } catch { store.setMeta(key, ''); }
             }
-            const items = [...g.items.map(({ id, kind, text, fill }) => ({ id, kind, text, fill })), ...(g.skip ? [g.skip] : [])];
-            return { show: manual ? true : g.show, items, refilled, stuck: g.stuck, scene: g.scene };
+            // 沉浸挡着、停得够久时弹的轻卡：只有"跳到下一件事"，不放路标
+            const items = [...(g.light && !manual ? [] : g.items.map(({ id, kind, text, fill }) => ({ id, kind, text, fill }))), ...(g.skip ? [g.skip] : [])];
+            return { show: manual ? true : g.show, items, refilled, stuck: g.stuck, scene: g.scene, light: !manual && !!g.light };
         },
         'POST /v1/guide-pick': b => {
             const chatKey = str(b.chatKey, 'chatKey');

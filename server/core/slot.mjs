@@ -1599,7 +1599,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             const contentTier = activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null;
             for (const c of stepPocket(menu, { today, dayOf, at: lastPos, timeScale: scaleFor(store, chatKey), pace: paceFor(store, chatKey), contentTier, stacked, firm: { today: firmToday, dayOf: firmDayOf }, hold: promised?.hold ?? null, keep: promised?.keeps ?? (() => false), gone })) {
                 store.updateMenu(chatKey, c.id, c);
-                if (c.why) store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : 'menu_void', { id: c.id, why: c.why });
+                if (c.why && (c.status === 'expired' || c.status === 'void')) store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : 'menu_void', { id: c.id, why: c.why });
             }
             // 有日子的现场活动（eventlead.mjs，章程 L1，用户 10/12：她不知道就直接错过了）：前一格起引子还没送到就升级——
             // 挂到门上（找上门、牵头的人有卡又不在场），或者下一次开口那一格最前面一句；知道了却没去的，牵头的人镜头外照常办了、排一件回音
@@ -2486,6 +2486,8 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     }
     // 一轮只给一件（用户 10/1：给了几件"挑合适的用"，前台常是件件都用）：他自己牵头的优先；再是已经递给他的、冲着他来的；没有就给一件别人的（玩家那边的事算别人的）
     // 刚闹出的动静引来的后续（D-170）排在最前：它就是冲着眼前这一摊来的
+    // 同一档里递得少的在前（T077：同一件被挑了几十次、别的件轮不到）；档位规则不动，没递过的算 0 次，稳定排序
+    offered.sort((a, b) => (a.offered_n ?? 0) - (b.offered_n ?? 0));
     const shown = [offered.find(m => m.motif === NOW_MOTIF && (m.who === speaker || !present.includes(m.who))) ?? offered.find(m => m.who === speaker) ?? offered.find(m => holder(m) && sameAs(holder(m), speaker))
         ?? offered.find(m => named(`${m.title ?? ''}${m.surface ?? ''}`).some(x => sameAs(x, speaker))) ?? offered[0]].filter(Boolean);
     shown.forEach(pocket => {

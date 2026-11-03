@@ -1065,6 +1065,11 @@ export function openStore(file) {
             for (const s of steps) if (s.item_id === m.id && s.status === 'offered') Object.assign(m, { held_by: s.by_name, held_pos: s.pos });
             else if (s.item_id === m.id && s.status === KEPT) m.kept_pos = s.pos;
             else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_by: null, held_by: null, held_pos: null, settled_pos: null, settled_by: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_by: s.by_name ?? null } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_by: s.by_name ?? null } : {});
+            // offered_n（T077）：递出过几次——按不同消息位置去重（同一楼换人开口、左滑重来只算一次）；没递过的件不加这个字段
+            // 退回 waiting 的那一步（/停 撤回、重新规划）把这件重新算起：撤掉的递送没成，不计
+            const offeredAt = new Set();
+            for (const s of steps) if (s.item_id === m.id) { if (s.status === 'waiting') offeredAt.clear(); else if (s.status === 'offered') offeredAt.add(s.pos); }
+            if (offeredAt.size) m.offered_n = offeredAt.size;
         }
         const active = plans.filter(p => !replaced.has(p.id)).at(-1);
         const current = active?.id;

@@ -692,6 +692,8 @@ const REASONS = {
     idea: '眼下这个节点照旧；一个角色认真起了一个新念头（见依据）。给这个节点补 2～4 件从这个念头长出来的事（由他牵头的、或者因此找上门的），前后按剧情日排开，别一口气办完；只输出 {"事件": [...]}，格式同上，别的都不用写。',
     // 用户 10/6（N-293）：一个人去了某个地方，开局单里一条储备线的条件写着"在那儿"，规划里却一件都没有——剧情走到储备线写明的地方，展开那条线、补几件
     place: '眼下这个节点照旧；剧情走到了开局单里一条储备线写明的地方（见依据，这条线下面给了全文）。照那条线的写法（内容、条件、露法、门槛、拉扯）给这个节点补 2～4 件此刻在这个地方就能用上的事：由在场的人、这个地方的人牵头；要不在场的人才成的，写成他找过来、撞见；先后按眼下和之后排开，别一口气写完。只输出 {"事件": [...]}，格式同上，别的都不用写。',
+    // 玩家停得够久、一直没有新事（路标卡 guide.stall，T077）：口袋递不动了，给眼下这个节点补几件此刻就能用上的
+    stall: '眼下这个节点照旧；玩家已经连着好几轮没有新的事情发生了（口袋里的事递不出去，或者一直没人接）。给这个节点补 2～4 件此刻就能用上的事：由在场的人、眼下这个地方的人牵头，或者有人找上门；先后按眼下和之后排开，别一口气写完，也别替玩家做决定。只输出 {"事件": [...]}，格式同上，别的都不用写。',
     // 旧规则留下的（按剧情日、按菜单剩几条叫的）
     days: '上一份规划是一张短菜单：从眼下的局面出发，规划一个节点。',
     menu_low: '上一份规划是一张短菜单：从眼下的局面出发，规划一个节点。',
@@ -1211,7 +1213,9 @@ export function stepPocket(menu, { today, dayOf = null, at = 0, firm = null, hol
     const slow = m => entryOf(m) !== '找上门';
     const stale = m => sink.today - pocketDay(m) >= (slow(m) ? p.slow : p.sink) || (at && Number.isFinite(m.pocket_pos) && at - m.pocket_pos >= (slow(m) ? p.slowMsgs : p.sinkMsgs));
     // 跟着一件还没办的约定的（"看完病一起去看房"之于看房时碰上的那件）：等那件事去办，不按时间沉（keep，试玩 10/5）
-    for (const m of menu.filter(m => m.status === 'pocket' && !out(m) && stale(m) && !held(m) && !keep(m))) changes.push({ id: m.id, status: 'sunk' });
+    // 但递出去好几次（offerMax）都没人接的，这层豁免不再成立（T077，试玩局一件"说好的相关"的事被挑了 87 次、前台一次没演，口袋里待了 147 楼）：照常按上面的时间沉
+    const worn = m => (m.offered_n ?? 0) >= p.offerMax;
+    for (const m of menu.filter(m => m.status === 'pocket' && !out(m) && stale(m) && !held(m) && (!keep(m) || worn(m)))) changes.push({ id: m.id, status: 'sunk', ...(keep(m) ? { why: `递了 ${m.offered_n} 次没人接，不再等说好的那件事` } : {}) });
     const stillIn = menu.filter(m => m.status === 'pocket' && !out(m));
     // "在哪件之后"：同一份规划里那件还没了结（接了或沉了），这件就先等着；题目对不上就不拦。
     const statusOf = m => changes.find(c => c.id === m.id)?.status ?? m.status;

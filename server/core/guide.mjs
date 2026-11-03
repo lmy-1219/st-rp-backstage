@@ -19,9 +19,10 @@ export const GUIDE = Object.freeze({
     quiet: { default: 4, min: 1, max: 20 },    // 玩家连着几条消息没有新事就算停住
     scene: { default: 8, min: 2, max: 40 },    // 自上次换地方以来玩家发了几条就算停住
     max: { default: 3, min: 1, max: 5 },       // 卡上路标至多几条（另有"跳到下一件事""自己写"两条固定项）
+    stall: { default: 2, min: 2, max: 10 },    // 没新事的条数到 quiet 的几倍：后台补货；被沉浸挡着时弹一张只有"跳到下一件事"的轻卡（T077）
 });
 export const guideKnob = (v, k) => { const r = GUIDE[k], n = Number(v); return v != null && v !== '' && Number.isInteger(n) && n >= r.min && n <= r.max ? n : r.default; };
-export const guideConfig = raw => ({ enabled: raw?.enabled !== false, quiet: guideKnob(raw?.quiet, 'quiet'), scene: guideKnob(raw?.scene, 'scene'), max: guideKnob(raw?.max, 'max') });
+export const guideConfig = raw => ({ enabled: raw?.enabled !== false, quiet: guideKnob(raw?.quiet, 'quiet'), scene: guideKnob(raw?.scene, 'scene'), max: guideKnob(raw?.max, 'max'), stall: guideKnob(raw?.stall, 'stall') });
 
 const LIVE = new Set(['waiting', 'pocket']);
 const tidy = t => String(t ?? '').trim();
@@ -138,10 +139,15 @@ export function guideAt(input = {}) {
     const skip = skipLine({ menu: input.menu, today: input.today, timeScale: input.timeScale });
     const scene = immersive(messages);
     const hasChoice = items.length > 0 || !!skip;
-    return { enabled: cfg.enabled, ...st, scene, items, skip, empty: !hasChoice,
-        show: cfg.enabled && st.stuck && !st.already && !scene && hasChoice,
+    // 停得够久（没新事的条数到 quiet 的 stall 倍，T077）：后台补货（不看沉浸、不看弹过没有）；被沉浸挡着时弹轻卡（只有 skip，没有 skip 不弹）
+    const long = cfg.enabled && st.quietCount >= cfg.quiet * cfg.stall;
+    const light = long && st.stuck && !st.already && !!scene && !!skip;
+    return { enabled: cfg.enabled, ...st, scene, items, skip, empty: !hasChoice, long, light,
+        show: (cfg.enabled && st.stuck && !st.already && !scene && hasChoice) || light,
         // 该弹却除了"自己写"什么都给不出（不看沉浸：补货只是叫一次规划）
-        refill: cfg.enabled && st.stuck && !st.already && !hasChoice };
+        refill: cfg.enabled && st.stuck && !st.already && !hasChoice,
+        // 停得够久：往现有规划里补几件（同一份规划至多一次，server 管记号）
+        stall: long };
 }
 
 // ── 接 store ──────────────────────────────────────────

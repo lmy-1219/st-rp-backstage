@@ -83,6 +83,7 @@ export const KNOBS = [
     { path: 'guide.quiet', group: '路标卡', type: 'int', min: GUIDE.quiet.min, max: GUIDE.quiet.max, label: "连着几条没新事就弹", help: "新事＝拿出口袋的事、有人叩门或进场、换了地方、新规划。" },
     { path: 'guide.scene', group: '路标卡', type: 'int', min: GUIDE.scene.min, max: GUIDE.scene.max, label: "一个场景发了几条就弹", help: "自上次换地方以来你发的条数。" },
     { path: 'guide.max', group: '路标卡', type: 'int', min: GUIDE.max.min, max: GUIDE.max.max, label: "卡上至多几条路标", help: "另有「跳到下一件事」和「自己写」两条固定项。" },
+    { path: 'guide.stall', group: '路标卡', type: 'int', min: GUIDE.stall.min, max: GUIDE.stall.max, label: "停住几倍久就补货", help: "停到连着几条的几倍：后台补货，沉浸中弹轻卡。" },
     // 模型口味：总开关默认开；规划/检查默认自动认，前台/旁白需另行启用。
     { path: 'taste.enabled', group: '模型口味', type: 'bool', label: "按模型补口味", help: "按模型调整演法，建议保持默认。" },
     ...TASTE_KINDS.map(k => ({ path: `taste.${k}`, group: '模型口味', type: 'enum', options: TASTE_OPTIONS, label: TASTE_LABELS[k], help: TASTE_HELP[k] })),
