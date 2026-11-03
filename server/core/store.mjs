@@ -1103,6 +1103,12 @@ export function openStore(file) {
         if (!patch?.status) return;
         const h = historyOf(chatKey);
         const at = patch.at ?? { pos: h.last, fp: h.lastFp };
+        // 递出（offered）幂等（T080）：这一件最近一步就是同一处（pos+fp）、同一个人递的，不再写第二行；
+        // 左滑重来（同 pos 新 fp）、换人、中间有过别的步，照写
+        if (patch.status === 'offered') {
+            const last = q('select status, pos, fp, by_name from menu_log where chat_key = ? and item_id = ? order by id desc limit 1').get(chatKey, id);
+            if (last && last.status === 'offered' && last.pos === at.pos && last.fp === at.fp && (last.by_name ?? null) === (patch.by ?? null)) return;
+        }
         // pending：交给某人那一格里的一步，等他那条回复（见 menuOf）；只有写了是谁的才等
         q('insert into menu_log(chat_key, item_id, status, story_day, pos, fp, by_name, pending, why, created_at, by_plan) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
             .run(chatKey, id, patch.status, patch.pocket_day ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now(), Number.isSafeInteger(patch.byPlan) && patch.byPlan > 0 ? patch.byPlan : null);

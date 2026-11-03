@@ -65,7 +65,7 @@ function promiseItems(records, timeline, same) {
     return out;
 }
 
-function todoItems(records, messages, board, timeline, userName, same, boardAt = null) {
+function todoItems(records, messages, board, timeline, userName, same, boardAt = null, rosterNames = []) {
     same ??= (a, b) => a === b;
     const out = [];
     // 提问的人那会儿在不在外头：按提问那条的场面表算（有 boardAt 就用它），不按现在——昨天当面问的，今天他走了也不变成"等回音"
@@ -74,18 +74,24 @@ function todoItems(records, messages, board, timeline, userName, same, boardAt =
     for (const r of records.filter(x => askedOther(x) && !x.money && !x.standing)) {
         const asker = r.holder_name ?? r.holder ?? userName;
         const audience = names(r.audience).filter(n => !same(n, asker));
+        const known = names([...audience, ...(rosterNames ?? [])]).filter(n => !same(n, asker));
+        const named = audience.filter(n => textOf(r.text).includes(n) || (r.about && same(r.about, n)));
+        const namedAny = named.length ? named : known.filter(n => textOf(r.text).includes(n) || (r.about && same(r.about, n)));
+        const targets = namedAny.length ? namedAny : (r.about && !same(r.about, asker) ? [r.about] : audience);
         const answer = r.closed_by;
         let status = answer ? '有回音' : '等着', statusAt = answer?.pos ?? null;
         const remote = peopleAt(r.pos).find(p => same(p.name, asker) && ['remote', 'away'].includes(p.status));
         if (!answer) {
             const after = messages.filter(m => (m.pos ?? 0) > r.pos);
             // 谁开的口看 name（speaker 是头像文件名）；提问的人在外头时，只认正文里叫到他的那条（发给他的消息、打给他的电话）
-            const heard = after.find(m => audience.some(n => same(n, m.name ?? m.speaker)) && (!remote || textOf(m.text).includes(asker)));
+            const speaker = m => m.name ?? (m.is_user && userName ? userName : m.speaker);
+            const heard = after.find(m => !same(speaker(m), asker) && targets.some(n => same(n, speaker(m))) && (!remote || textOf(m.text).includes(asker)));
             if (heard) { status = '有回音'; statusAt = heard.pos; }
             else if (expiredTodo(r, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos), scaleOf(timeline?.scale))) { status = '失效'; statusAt = num(timeline?.today) ?? null; }
         }
-        out.push(base({ id: `ask:${r.id}`, kind: '要求', text: r.text, who: audience, with: audience, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `对方 #${statusAt} 回了` : status === '失效' ? '过了时候' : '' }));
-        if (remote) out.push(base({ id: `wait:${r.id}`, kind: '等回音', text: r.text, who: [asker], with: audience, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `第${statusAt}条有回音` : `已等${scaleOf(timeline?.scale).span(Math.max(0, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos))).replace(' ', '')}` }));
+        const who = targets.length ? targets : audience;
+        out.push(base({ id: `ask:${r.id}`, kind: '要求', text: r.text, who, with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `对方 #${statusAt} 回了` : status === '失效' ? '过了时候' : '' }));
+        if (remote) out.push(base({ id: `wait:${r.id}`, kind: '等回音', text: r.text, who: [asker], with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `第${statusAt}条有回音` : `已等${scaleOf(timeline?.scale).span(Math.max(0, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos))).replace(' ', '')}` }));
     }
     return out;
 }
@@ -183,7 +189,7 @@ function contactItems(contacts, messages, { anchors = null, arrivals = [] } = {}
 export function foldPending(input = {}) {
     const same = input.same ?? ((a, b) => a === b);
     const records = [...(input.records ?? [])].sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
-    const items = [...promiseItems(records, input.timeline ?? {}, same), ...todoItems(records, input.messages ?? [], input.board ?? {}, input.timeline ?? {}, input.userName, same, input.boardAt ?? null), ...ruleItems(records, input.timeline ?? {}), ...moneyItems(records, input.named ?? []), ...menuItems(input.menu), ...errandItems(input.awayPlans, input.board), ...contactItems(input.contacts, input.messages ?? [], { anchors: input.anchors ?? null, arrivals: input.arrivals ?? [] }), ...matterItems(records)];
+    const items = [...promiseItems(records, input.timeline ?? {}, same), ...todoItems(records, input.messages ?? [], input.board ?? {}, input.timeline ?? {}, input.userName, same, input.boardAt ?? null, input.rosterNames ?? []), ...ruleItems(records, input.timeline ?? {}), ...moneyItems(records, input.named ?? []), ...menuItems(input.menu), ...errandItems(input.awayPlans, input.board), ...contactItems(input.contacts, input.messages ?? [], { anchors: input.anchors ?? null, arrivals: input.arrivals ?? [] }), ...matterItems(records)];
     const byId = new Map(items.map(item => [item.id, item]));
     // 同一件几处来源：口袋和约定对得上（规划者写明了跟着哪件，或题目、露面、用在和约定说的是一回事），两边互相记着对方的编号
     for (const p of items.filter(x => x.kind === '约定')) for (const row of arr(input.menu)) {

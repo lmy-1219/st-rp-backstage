@@ -1679,18 +1679,19 @@ function scheduleSync(delay = 1500) {
     state.timer = setTimeout(() => syncNow(), delay);
 }
 
-function syncNow(force = false) {
+// light＝只等"后台认得这些消息"（sync 提交）；状态、门、日期、世界书、规划这些刷新放到后面跑，不挡调用的人（T080 返工：生成前的同步用）。
+function syncNow(force = false, light = false) {
     if (!state.chatKey || !settings().enabled) return Promise.resolve(false);
     // 调度必须等正在同步的那次连同撤销一起做完，不能只记 dirty 就拿旧场面排人。
     if (state.syncFlight?.epoch === state.epoch) { state.dirty = true; return state.syncFlight.promise; }
     const flight = { epoch: state.epoch, promise: null };
     state.syncFlight = flight;
-    flight.promise = syncOnce(force);
+    flight.promise = syncOnce(force, light);
     void flight.promise.finally(() => { if (state.syncFlight === flight) state.syncFlight = null; }).catch(() => {});
     return flight.promise;
 }
 
-async function syncOnce(force = false) {
+async function syncOnce(force = false, light = false) {
     state.syncing = true;
     clearTimeout(state.timer);   // 这就同步了：排着的那一次不用再来（一轮里同步四次，一半是重复的）
     const epoch = state.epoch;
@@ -1722,10 +1723,15 @@ async function syncOnce(force = false) {
             if (epoch !== state.epoch) return false;
             state.collapsed = result.collapsed ?? null;
             if (!result.committed) return false;
+            // 记下后台这次认得的序列：生成前用它判断锚点那条是不是已经同步过（anchorCovered）
+            state.synced = { chatKey: state.chatKey, epoch, seq: seq.map(s => ({ f: s.f, w: s.w })) };
             if (result.added || result.removed || result.edited) changed = true;
             // 删改、换稿后不等下一句排队：沿现有事件账落实 undo，不认新离场、不叫人说话。
             // 撤销开回的区间和取消静音后的名单也同步回后台，之后的场面才是新状态。
-            if (await autoPeek({ onlyUndo: true })) {
+            // light 且没有删改换稿时，undo 这趟只是顺手补做（上次没落实的重试），放到后面跑，不挡生成。
+            if (light && !(result.removed || result.edited)) {
+                void autoPeek({ onlyUndo: true }).then(done => { if (done && epoch === state.epoch) return syncNow(); }).catch(() => {});
+            } else if (await autoPeek({ onlyUndo: true })) {
                 if (epoch !== state.epoch) return false;
                 const live = ctx();
                 result = await api('sync', { ...payload, force: false, members: members(live), anchors: live.chatMetadata?.contextIsolation?.anchors ?? {} });
@@ -1734,7 +1740,8 @@ async function syncOnce(force = false) {
             force = false;
             state.note = '';
         } while (state.dirty && epoch === state.epoch);
-        if (epoch === state.epoch) {
+        const tail = async () => {
+            if (epoch !== state.epoch) return;
             state.status = await api('status', { chatKey: state.chatKey });
             noticeHandoffs(state.status.handoffs);
             noticeStory(state.chatKey, state.status.notice);
@@ -1767,7 +1774,8 @@ async function syncOnce(force = false) {
                 api('pack', { chatKey: state.chatKey }).then(p => { state.pack = p; render(); }).catch(() => {});
                 void refreshRelationsDraft();
             }
-        }
+        };
+        if (light) void tail().catch(() => {}); else await tail();
         return epoch === state.epoch;
     } catch (error) {
         if (epoch === state.epoch) {
@@ -1960,6 +1968,15 @@ async function join(epoch = state.epoch) {
 
 // ---------- 发言前注入 ----------
 
+// 锚点那条（连同它前面的）后台上次同步已经认得：逐条核指纹和左滑版本，一条对不上就当没同步（从严）。
+function anchorSynced(rows, c) {
+    const s = state.synced;
+    if (!s || s.chatKey !== state.chatKey || s.epoch !== state.epoch || state.syncFlight || state.dirty) return false;
+    const { seq } = buildSequence(rows, fallbackAvatar(c));
+    if (seq.length !== rows.length || s.seq.length < seq.length) return false;
+    return seq.every((x, i) => x.f === s.seq[i].f && x.w === s.seq[i].w);
+}
+
 globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
     clearPrompts();
     if (!settings().enabled || !state.chatKey || !INJECT_TYPES.has(type ?? 'normal')) return;
@@ -1977,7 +1994,10 @@ globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
         isolateCameraPrompts(character);
         state.cameraGenerating = true;
     }
-    const tSlot = performance.now();
+    // 组格前先让后台认得锚点那条（T080）：anchor 是你刚发的那句的指纹，后台不认得它就只能退回上一条，
+    // "接住"这类交给谁的判定会记在上一轮的回复上，那句同步进来以后判定就失效。
+    // 返工：锚点那条（连同它前面的）后台上次同步已经认得时不同步（左滑、续写、同一句下的第二个人）；
+    // 要同步时只等提交（light），状态、门、日期这些刷新放到后面跑。同步失败不拦生成，照旧去组格。
     const epoch = state.epoch, chatKey = state.chatKey, speaker = camera ? 'narrator' : character.avatar;
     // 左滑重生成/续写时，被替换的那条不算上文 ⇒ 和第一次生成拿到同一格。
     let rows = c.chat;
@@ -1985,6 +2005,8 @@ globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
     if ((type === 'swipe' || type === 'continue') && last && !last.is_user && speakerOf(last, fallbackAvatar(c)) === speaker) rows = rows.slice(0, -1);
     const before = rows.at(-1);
     const anchor = before ? `${rows.length}:${fingerprintMessage(before, speakerOf(before, fallbackAvatar(c)))}` : 'start';
+    if (!anchorSynced(rows, c)) await syncNow(false, true).catch(() => {});
+    const tSlot = performance.now();
     // 最近几句正文（后台拿来找相关的旧事；你刚发的那句可能还没同步过去）和此刻在场的人。
     const recent = rows.slice(-3).map(m => String(m.mes ?? ''));
     const recentUser = String([...rows.slice(-6)].reverse().find(m => m.is_user)?.mes ?? '');

@@ -277,3 +277,91 @@ export function varyLine({ name, ways = [], mold = null, userName = '对方', ec
     return `（${parts.join('；')}。${ask.join('；')}。）`;
 }
 
+// 同一件过渡琐事／同一段交代一再重复（T078）：看该说话人最近 CHORE_WINDOW 条非玩家回复的台词段，
+// 去掉名册人名、玩家名与别名后，至少 CHORE_MIN 条同时出现 >= CHORE_WORDS 个非通用 2～4 字词片（且非玩家当轮话题、非旧常词）。
+export const CHORE_WINDOW = 4;
+export const CHORE_MIN = 3;
+export const CHORE_WORDS = 2;
+export const CHORE_USUAL = 2;
+
+const CHORE_FUNC = new Set('的了着得地又都就也还很来去下上出过起在是有这那个一把被给让和与或而且会要能可你我他她它们不没吗呢吧啊呀么从往向到里外中前后左右儿自只再先才更最却但虽因为所以如果只因已正曾将当比跟同及并光单全总刚偏硬早晚多半一二三四五六七八九十百千万两几半每各某另别啥谁哪怎何点声下回次个只条张片块双件套副口手眼头脚身脸心话事人地方时候样子您');
+const CHORE_GENERIC = /^(?:今天|明天|昨天|昨晚|今晚|大清早|一会儿|咱俩|咱们|知道|看见|听见|看看|听说|打算|问题|东西|玩意|直接|顺手|干脆|彻底|已经|开始|动静|自己|什么|怎么|觉得|起来|出来|进来|出去|过来|过去|回去|下来|上来|下去|上去|地方|时候|姑娘|小子|混蛋|老子|家伙|神经|倒霉|垃圾|实在|确实|根本|干嘛|到底|反正|简直|居然|难道|偏偏|明明|差不多|不一定|指不定|说不定|保不准|保不齐|至于|关于|根据|建议|标准|常规|分钟|小时|意思|办法|规矩|消息|模样|脾气|力气|功夫|指望|现成)$/;
+
+const spokenOf = s => plain(s).replace(/[（(][^）)]*[）)]/g, '');
+function choreWordsOf(text, allNames) {
+    let s = spokenOf(text);
+    for (const n of allNames) {
+        const b = base(n);
+        if (b.length >= 2) s = s.replaceAll(b, ' ');
+        for (const p of b.split(/[·\s]+/)) if (p.length >= 2) s = s.replaceAll(p, ' ');
+    }
+    const out = new Set();
+    for (const seg of s.match(/[一-鿿]+/g) ?? []) {
+        for (let len = 2; len <= 4; len++) {
+            for (let i = 0; i + len <= seg.length; i++) {
+                const w = seg.slice(i, i + len);
+                if ([...w].some(c => CHORE_FUNC.has(c)) || CHORE_GENERIC.test(w)) continue;
+                out.add(w);
+            }
+        }
+    }
+    return out;
+}
+
+export function choreLoop({ messages = [], speaker, names = [], userName = null, aliases = [], last = CHORE_WINDOW, min = CHORE_MIN, minWords = CHORE_WORDS, usual = CHORE_USUAL } = {}) {
+    if (!speaker || speaker === 'narrator') return [];
+    const allNames = [...names, userName, ...aliases].filter(Boolean);
+    const allMine = messages.filter(m => !m?.is_user && m?.speaker === speaker);
+    const win = allMine.slice(-last);
+    if (win.length < min) return [];
+    const older = usual >= 0 ? allMine.slice(0, -last).map(m => spokenOf(m.text)) : [];
+    const firstPos = win[0].pos;
+    const firstIdx = messages.indexOf(win[0]);
+    const userSaid = messages.filter((m, idx) => m?.is_user && (firstPos != null && m.pos != null ? m.pos >= firstPos - 1 : idx >= Math.max(0, firstIdx - 1))).map(m => plain(m.text)).join(' ');
+    const counts = new Map();
+    for (const m of win) {
+        for (const w of choreWordsOf(m.text, allNames)) {
+            if (userSaid.includes(w)) continue;
+            if (usual >= 0 && older.filter(o => o.includes(w)).length > usual) continue;
+            counts.set(w, (counts.get(w) ?? 0) + 1);
+        }
+    }
+    const shared = [...counts.entries()].filter(([, c]) => c >= min).map(([w]) => w).sort((a, b) => b.length - a.length);
+    const dedup = [];
+    for (const w of shared) if (!dedup.some(x => x.includes(w))) dedup.push(w);
+    return dedup.length >= minWords ? dedup.slice(0, 4) : [];
+}
+
+// 连着劝玩家休息／回屋／躺下／别动（T078）
+export const REST_WINDOW = 3;
+export const REST_MIN = 2;
+export const REST_RE = /(?:你|先|快|回去|赶紧|乖乖|好好|老实)?(?:回屋|回房|上床|躺下|躺着|歇着|歇会儿|歇一歇|去歇|去睡|去躺|去休息|休息|睡一觉|睡会儿|睡吧|先睡|快睡|别动|别乱动|别乱跑|别下床|别起来|养着)/;
+const REST_NEG = /(?:不用|不必|别|不|没|未|省得|免得|哪能|怎么能)[^，。！？!?；;…\n]{0,4}(?:回屋|回房|上床|躺|歇|休息|睡|养)|别动不动|休息室|休息区/g;
+const USER_TIRED = /困|累|想睡|想歇|想躺|去睡|睡觉|上床|休息|歇会|躺会|晚安/;
+
+export function restHarping({ messages = [], speaker, userName = null, last = REST_WINDOW, min = REST_MIN } = {}) {
+    if (!speaker || speaker === 'narrator') return false;
+    const lastUser = [...messages].reverse().find(m => m?.is_user);
+    if (lastUser && USER_TIRED.test(plain(lastUser.text))) return false;
+    const mine = messages.filter(m => !m?.is_user && m?.speaker === speaker).slice(-last);
+    if (mine.length < min) return false;
+    const isRest = s => {
+        const c = String(s ?? '').replace(REST_NEG, ' ').trim();
+        if (!REST_RE.test(c)) return false;
+        if (/^(?:我|他|她|它)/.test(c) && !/你/.test(c) && !(userName && c.includes(userName))) return false;
+        return true;
+    };
+    return mine.filter(m => spokenOf(m.text).split(/[。！？!?\n…]+|(?<=[）)」”"])/).some(isRest)).length >= min;
+}
+
+export function choreLine({ name, userName = '对方', chores = [], rest = false } = {}) {
+    if (!chores?.length && !rest) return null;
+    const who = personWord(name);
+    const what = [
+        chores?.length && `围绕「${chores.slice(0, 4).join('、')}」这件过渡的小事${who}已经连着交代了好几回`,
+        rest && `催${userName}回屋、躺下、休息或别动这番叮嘱${who}也已经反复说过`,
+    ].filter(Boolean).join('；');
+    return `（${what}：这件过渡的小事／这番叮嘱已经交代过了，这一条一笔带过（当作办完了、听见了），直接落到办完之后的一刻、接眼前新的事；${userName}没起身换地方，就还在原处往下接，别替${userName}跳时间、别替${userName}定去哪做什么。）`;
+}
+
+

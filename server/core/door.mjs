@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { hasCard, callsFor, wayOf, partsBetween } from './arrival.mjs';
 import { boardFor } from './board.mjs';
 import { pendingFor } from './pending.mjs';
-import { entryOf } from './planner.mjs';
+import { entryOf, awaitingExtract } from './planner.mjs';
 import { sameName } from './setup.mjs';
 import { normalizeRelations, personOf, leaderOf } from './relations.mjs';
 import { absentPeople, pickContact } from './contacts.mjs';
@@ -21,6 +21,12 @@ export function earlyLeads(store, menu = [], timeline = null) {
     const days = menuDays(store, menu, timeline?.dayOf ?? null);
     const today = timeline?.today;
     return menu.map((m, i) => m.status === 'pocket' && m.pocket_by === '引子' && !leadReady(days[i], days, today) ? { ...m, early: true } : m);
+}
+
+// 递出去后回复还没记账的口袋件（T081）：门上这一轮先不算 ready，等记账确认是 shown 还是仍 pocket 再按原规则走
+export function awaitingPockets(menu = [], { messages = [], isDone = null, record = true, same = (a, b) => a === b } = {}) {
+    if (record === false || typeof isDone !== 'function' || !menu.some(m => m.status === 'pocket' && m.held_by && Number.isFinite(m.held_pos))) return menu;
+    return menu.map(m => awaitingExtract(m, { messages, isDone, record, same }) ? { ...m, awaiting: true } : m);
 }
 
 // 旁白留的记号"（该来：名字／方式）"：方式可缺；不一定在最末（模型常在后面又补一句），几处都有就认最后一个、全剥掉
@@ -104,8 +110,9 @@ export function doorAt(input = {}) {
                 continue;
             }
             const label = way === '打来电话' ? '来电' : way === '发来消息' ? '发来短讯' : /上门|来找|敲门/.test(`${m.title ?? ''}${m.surface ?? ''}`) ? '上门' : '可能会来';
-            // 活动快到了、替它挂上门的引子，引子自己没到点（doorFor 标 early）：门上列着，但不算到时候了（T073）
-            add('pocket', m.id, !m.early, false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m));
+            // 活动快到了、替它挂上门的引子，引子自己没到点（doorFor 标 early）；或递出后那条回复还没记账（标 awaiting，T081）：门上列着，但不算到时候了（T073/T081）
+            const awaiting = !!m.awaiting || awaitingExtract(m, { messages, isDone: input.isDone, record: input.record !== false, same });
+            add('pocket', m.id, !m.early && !awaiting, false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m));
         }
         if (reached) add('reach', reach.id ?? who, true, false, reach.matter ? `可能来联系：${reach.matter}` : '可能来联系', [...new Set([reach.matterText, reach.hook, ...(reach.threads ?? []).map(r => r.text)].filter(Boolean))].join('；'));
         candidates.sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b));
@@ -142,7 +149,11 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const pending = pendingFor(store, records, chatKey, options);
     const roster = store.getCast?.(chat.story_id) ?? [];
     const relations = store.relationsOf?.(chat.story_id) ?? null;
-    const menu = earlyLeads(store, store.menuOf?.(chatKey) ?? [], timeline);
+    const names = roster.map(e => e.name);
+    const rel = relations ? normalizeRelations(relations) : null;
+    const sameWho = (a, b) => sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names));
+    const isDone = typeof records?.isDone === 'function' ? fp => records.isDone(chat.story_id, fp) : null;
+    const menu = awaitingPockets(earlyLeads(store, store.menuOf?.(chatKey) ?? [], timeline), { messages, isDone, record: planner?.record !== false, same: sameWho });
     const holds = read(store, `arrival_hold:${chatKey}`, []);
     const arrivals = read(store, `arrivals:${chatKey}`, []);
     let anchors = null, members = [];
@@ -153,12 +164,9 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const dayOf = timeline?.dayOf ?? (pos => timeline?.rows?.filter(r => r.pos <= pos).at(-1)?.day ?? timeline?.today ?? 0);
     const offers = store.contactOffers?.(chatKey) ?? [];
     const lastPos = messages.at(-1)?.pos ?? 0;
-    const rel = relations ? normalizeRelations(relations) : null;
     const people = absentPeople({ records: records.visible(chatKey), messages, present, userName, roster, dayOf, openIdeaIds: new Set((records.openIdeas?.(chatKey) ?? []).map(r => r.id)) })
         .filter(p => (!planner?.provider || p.lastPos >= 0) && !(rel && leaderOf(rel, p.person, roster.map(e => e.name))));
     // "可能来联系"得有由头（场记章程 #2）：他和玩家之间有一件碰上了、还没下文的事才挂，label 带那件事的题；没出场过的也一样
-    const names = roster.map(e => e.name);
-    const sameWho = (a, b) => sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names));
     const visible = records.visible(chatKey);
     const reachable = people.flatMap(p => {
         // 没出场过的人也一样：门上不随机挑（他该怎么登场由规划、口袋、名册钩子排；旁白那一格里的"此刻可以有这件事"另算）

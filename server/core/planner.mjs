@@ -1335,6 +1335,18 @@ export function reachedFor(item, userText) {
     return words.filter(w => t.includes(w)).length >= 2;
 }
 
+// 待核实闸（T081）：口袋件递给某人后、那人已回但那条回复还没完成记账（isDone），这件先不算可再递、门上也不算 ready；
+// 超过 AWAIT_SPAN 条或没有 isDone／记账关了就放行，免得记账挂了把件卡死。
+export const AWAIT_SPAN = 10;
+const hisReply = (row, who, same) => !!row && !row.is_user && (row.name === who || same(row.name, who) || (who === '旁白' && row.speaker === 'narrator'));
+export function awaitingExtract(m, { messages = [], isDone = null, record = true, same = (a, b) => a === b, span = AWAIT_SPAN } = {}) {
+    if (record === false || typeof isDone !== 'function' || m?.status !== 'pocket' || !m.held_by || !Number.isFinite(m.held_pos)) return false;
+    const reply = (messages ?? []).find(row => Number.isFinite(row?.pos) && row.pos > m.held_pos && hisReply(row, m.held_by, same));
+    if (!reply?.fp) return false;
+    const lastPos = messages.at(-1)?.pos ?? reply.pos;
+    return lastPos - reply.pos <= span && !isDone(reply.fp);
+}
+
 // 规划者写的"知情"：这件事拿出来时牵头的人知道什么、看到什么（只给到他身上，别让他多知道）。
 // 规划者常顺手写"他不知道……"：那一句本身就把他不知道的交给了前台（试玩 9/30：点破了玩家角色的底细），那一句去掉。
 const NOT_KNOWN = /不知道|不清楚|不知情|并不知|还不知|没意识到|蒙在鼓里|不晓得|没察觉|没发现/;

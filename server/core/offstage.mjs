@@ -85,7 +85,8 @@ export function reachDeliveries({ visible = [], since = 0, roster = [] } = {}) {
 
 // ③ 在场的有卡的人隔着消息、电话问不在场的有卡的人。messages：最近几条（已经看过的不算）；absent(name)：他这会儿不在场（场面表）
 // 叙述（括号里）点了那个人的名，又写着发消息、打电话、联系、问他；他说出口的话（括号外）就是问的内容，没有就取那一段叙述
-const CONTACT = /联系|拨通|拨给|打给|发给|发了?条|发过去|问[一了]?问|求证|核实|回了?条|回电|回信|转告|捎话|留言|告诉/;
+const NOT_CONTACT = /要不要|要不|不如|还是先|打算|准备|想给|想去|改天|回头再|等会儿再|还没|没给|没有给|没打|没拨|没发|别给|不用给|先别/;
+const CONTACT = /联系|拨通|拨给|打给|打通|拨了|拨号|致电|去电|打了?个?电话|通了?个?电话|拨了?个?电话|打去电话|去了?个?电话|电话打通|电话接通|语音通话|发给|发去消息|发了?消息|发了?条|发过去|问[一了]?问|求证|核实|回了?条|回消息|回电|回信|传讯|转告|捎话|留言|告诉/;
 export function asksAway(messages = [], { roster = [], absent = () => false, userName = null, player = [] } = {}) {
     const carded = cardedOf(roster);
     const names = roster.map(e => e.name);
@@ -100,9 +101,9 @@ export function asksAway(messages = [], { roster = [], absent = () => false, use
         const spoken = tidy(text.replace(/（[^）]*）|\([^)]*\)/g, ' ').replace(/<#[0-9.]+#>|\([a-z ]+\)/g, ' ').replace(/\s+/g, ' '));
         for (const e of carded) {
             if (e === asker || !absent(e.name)) continue;
-            const block = blocks.find(b => b.includes(e.name) && (callsFor(b, [e.name]) || CONTACT.test(b)));
+            const block = blocks.find(b => b.includes(e.name) && !NOT_CONTACT.test(b) && (callsFor(b, [e.name]) || CONTACT.test(b)));
             if (!block) continue;
-            const way = callsFor(block, [e.name]) === '打来电话' || /电话|拨|打给|语音/.test(block) ? '电话' : '消息';
+            const way = callsFor(block, [e.name]) === '打来电话' || /电话|拨|打给|打通|致电|去电|通话|语音|扩音|免提/.test(block) ? '电话' : '消息';
             const asked = (spoken || tidy(block.slice(1, -1))).slice(0, 300);
             if (asked.length < 2) continue;
             out.push({ pos: m.pos, fp: m.fp, asker: asker.name, askerAvatar: asker.avatar, target: e.name, targetAvatar: e.avatar, way, text: asked, block: tidy(block.slice(1, -1)).slice(0, 200) });

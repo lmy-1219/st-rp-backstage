@@ -18,6 +18,9 @@ const MAX_STATE = 4;
 const MAX_OPEN = 2;
 const TODO_WINDOW = 80;      // 待办只看最近这么多条消息里的
 const SOFT_CHARS = 1500;
+export const REMOTE_CARRY_WINDOW = 120; // 近期隔空联络滚出 RECENT_WINDOW 后保底回看条数
+export const REMOTE_CARRY_DAYS = 2;     // 近期隔空联络保底召回的最大剧情日跨度
+export const REMOTE_CARRY_MAX = 2;      // 近期隔空联络保底并入 hits 的最大条数
 
 // "过了多久"换成天数（天尺度）。认法见 timescale.elapsedUnits：以前认得的照旧，另外认得年、季、旬这些大单位（"一走三年"＝1095 天）。
 // 留着这个名字给按天写的地方用；按这一局的单位算用 elapsedUnits(text, 尺度)。
@@ -229,6 +232,70 @@ const involves = (r, names) => names.some(n => n && ((r.about ?? '').includes(n)
 // 名字去掉括号里的后缀后相同（同一个人的两个版本）⇒ 算名字相近，前台容易把对方的话当成自己的。
 const baseName = n => String(n ?? '').replace(/[（(][^）)]*[）)]s*$/, '').trim();
 const similarNames = (a, b) => a && b && a !== b && baseName(a) === baseName(b);
+const sameNameLoose = (a, b) => !!a && !!b && (a === b || baseName(a) === baseName(b));
+export const isRemoteRecord = r => r?.type === '消息'
+    || /(?:（(?:电话|消息)）(?:问|回)|打来电话|发来消息|打电话给|发消息给|发短讯给|发短信给|在电话里|电话那头)/.test(String(r?.text ?? ''));
+const isOffstageDerived = r => isRemoteRecord(r)
+    || r?.type === '听说' || r?.type === '消息'
+    || r?.matter?.entry === '镜头外'
+    || (Array.isArray(r?.links) && r.links.some(l => l?.kind === '交代'));
+function checkEntry(mine, segs, current, lastPos) {
+    if (!current || !(lastPos - current.from <= 3)) return { show: false, lastSeen: null };
+    const closedSegs = (segs ?? []).filter(s => s !== current && s.to != null && s.to <= current.from && s.to > (s.from ?? 0));
+    const inPersonBefore = [...mine].reverse().find(r => r.pos < current.from && !isOffstageDerived(r)) ?? null;
+    if (closedSegs.length > 0) return { show: true, lastSeen: inPersonBefore };
+    if (inPersonBefore) return { show: false, lastSeen: null };
+    return { show: true, lastSeen: null };
+}
+const parsePromiseField = p => {
+    if (!p) return null;
+    if (typeof p === 'object') return p;
+    try { return JSON.parse(p); } catch { return null; }
+};
+function openForPerson(r, name, mine) {
+    if (r.holder_name === name) return true;
+    if (r.type === '想法' && !r.promise) return false;
+    const text = String(r.text ?? '');
+    if (r.promise) {
+        const p = parsePromiseField(r.promise);
+        const doers = Array.isArray(p?.doers) ? p.doers : [];
+        const withs = Array.isArray(p?.with) ? p.with : [];
+        if (doers.some(n => sameNameLoose(n, name)) || withs.some(n => sameNameLoose(n, name))) return true;
+        if (doers.length || withs.length) return text.includes(name) || sameNameLoose(r.about, name);
+        return text.includes(name) || sameNameLoose(r.about, name) || (r.audience ?? []).filter(Boolean).length <= 2;
+    }
+    if (r.todo && !r.promise && r.type !== '想法') {
+        const others = (r.audience ?? []).filter(a => a && !sameNameLoose(a, r.holder_name));
+        const targeted = text.includes(name) || sameNameLoose(r.about, name) || (others.length > 0 && others.every(a => sameNameLoose(a, name)));
+        if (!targeted) return false;
+        const answered = mine.some(x => x.pos > r.pos && sameNameLoose(x.holder_name, name) && !['时间', '心里'].includes(x.type) && (x.type === '了结' || x.pos - r.pos <= 6));
+        return !answered;
+    }
+    return false;
+}
+function carryRemoteRecords({ old, hits, plainHits, state, open, lastPos, today, toDay, recalled }) {
+    const cands = old.filter(r => r.type !== '时间' && r.type !== '余波' && r.type !== '想法' && r.type !== '了结'
+        && !(r.matter && !r.closed_by)
+        && lastPos - r.pos <= REMOTE_CARRY_WINDOW
+        && today - toDay(r.pos) <= REMOTE_CARRY_DAYS
+        && !recalled.has(r.id)
+        && isRemoteRecord(r)).sort((a, b) => a.pos - b.pos || a.id - b.id);
+    if (!cands.length) return [];
+    const maxPos = cands.at(-1).pos;
+    const carried = cands.filter(r => r.pos >= maxPos - 1).slice(-REMOTE_CARRY_MAX);
+    const inOther = r => state.some(s => s.id === r.id) || open.some(o => o.id === r.id);
+    const forHits = carried.filter(r => !hits.some(h => h.id === r.id) && !inOther(r));
+    if (forHits.length) {
+        hits.push(...forHits);
+        hits.sort((a, b) => a.pos - b.pos);
+    }
+    const forPlain = carried.filter(r => !plainHits.some(p => p.id === r.id) && !inOther(r));
+    if (forPlain.length) {
+        plainHits.push(...forPlain);
+        plainHits.sort((a, b) => a.pos - b.pos);
+    }
+    return carried;
+}
 
 const WIDE_WEIGHT = 1.5;         // 宽说法（大类、场合）对上的分量；用户原话、检索词对上是 2。质量窗 9/27 考题：1.5～3 都比不加强，取偏轻的
 const POOL_RELEVANT = 24;      // 给叙事组装的候选：相关的这么多条
@@ -311,8 +378,9 @@ export function selectMaterial({ name, present = [], messages, records: given, o
     let entry = null;
     const segs = avatar && anchors?.[avatar]?.segments;
     const current = segs?.find(s => s.to == null);
-    if (current && lastPos - current.from <= 3) {
-        const lastSeen = [...mine].reverse().find(r => r.pos < current.from);
+    const entryInfo = checkEntry(mine, segs, current, lastPos);
+    if (entryInfo.show) {
+        const lastSeen = entryInfo.lastSeen;
         entry = lastSeen
             ? `${name}刚到场。${name}上次在场是${when(lastSeen)}；那之后这里发生的事，${name}没看见，除非有人当面告诉过${name}。`
             : `${name}刚到场。进门之前这里发生的事、说过的话，${name}没看见也没听见，除非有人当面告诉过${name}。`;
@@ -412,8 +480,9 @@ export function selectMaterial({ name, present = [], messages, records: given, o
     // 打算里写明只管那一时的（"等天一亮再说""今晚先……"），过了那个时候不再惦记（约定另有到期那一套）
     const openAll = mine.filter(r => ((r.type === '想法' && openIdeaIds.has(r.id) && (r.promise || !timedOut(r, today - toDay(r.pos), timeScale))) || (r.promise && openIdeaIds.has(r.id)) || (r.todo && !r.closed_by && r.type !== '想法' && !r.promise && lastPos - r.pos <= TODO_WINDOW && !expiredTodo(r, today - toDay(r.pos), timeScale)))
         && !(r.promise?.kind === '畅想' && !(relevance.get(r.id) > 0)) && !skipOpen?.has(r.id)
-        && !used.has(r.id) && r.holder_name === name && !isStale(r.id));
+        && !used.has(r.id) && openForPerson(r, name, mine) && !isStale(r.id));
     const open = [...openAll.filter(r => r.pos < recentFrom), ...openAll.filter(r => r.pos >= recentFrom)].slice(-MAX_OPEN).sort((a, b) => a.pos - b.pos);
+    const remoteCarry = carryRemoteRecords({ old, hits, plainHits, state, open, lastPos, today, toDay, recalled });
 
     // 给叙事组装的候选：相关的（再用最相关几条的检索词扩一轮，接住换了说法的）、它们前后挨着的、
     // 以及他知道的人和东西的状态变化。模型从里面挑、串成线；这里宽一点，挑由它来。
@@ -446,7 +515,8 @@ export function selectMaterial({ name, present = [], messages, records: given, o
     }
     // 记住的一回：在场那个人的、最近几回都放进组装的候选（标出来），像不像眼下由模型看；字面对上的那几回也在里面
     const lessonPool = wantPool ? [...new Set([...lessons, ...[...lessonCands].sort((a, b) => b.pos - a.pos).slice(0, LESSON_POOL)])] : [];
-    if (lessonPool.length) pool = [...new Map([...pool, ...lessonPool].map(r => [r.id, r])).values()].sort((a, b) => a.pos - b.pos || a.id - b.id);
+    const extraPool = wantPool ? [...lessonPool, ...remoteCarry] : [];
+    if (extraPool.length) pool = [...new Map([...pool, ...extraPool].map(r => [r.id, r])).values()].sort((a, b) => a.pos - b.pos || a.id - b.id);
     const stale = new Set(pool.filter(r => isStale(r.id)).map(r => r.id));
     return { name, entry, hits, plainHits, quoted, state, open, pool, stale, when, who, relevance, direct, more, leads, lessons, lessonIds: new Set(lessonPool.map(r => r.id)) };
 }
@@ -481,10 +551,11 @@ export function renderPlain({ name, entry, hits, plainHits = null, quoted = null
 // 他问过、要过对方、还没回音的（他自己的"待办"里不是约定、不是想法的那些）单列：和他自己要办的混在"挑一件眼下就能做的"里，
 // 前台会把"你自己穿还是我替你塞"这种逼人的话当成待办再逼一遍（试玩 10/3）。对方没接话也是一种回答。
 export const askedOther = r => !!r.todo && !r.promise && r.type !== '想法';
+const askedByOwner = (r, name) => (!r.holder_name || r.holder_name === name) && !r.promise && askedOther(r);
 export function renderOpen({ name, open, when, who }) {
     if (!open.length) return [];
     const line = r => `· ${r.text}${who(r)}（${when(r)}）`;
-    const mine = open.filter(r => !askedOther(r)), asked = open.filter(askedOther);
+    const mine = open.filter(r => !askedByOwner(r, name)), asked = open.filter(r => askedByOwner(r, name));
     return [
         ...(mine.length ? [`${name}惦记着、想办的（挑一件眼下就能做或能问的；提不提、什么时候提由${personWord(name)}）：`, ...mine.map(line)] : []),
         ...(asked.length ? [`${name}问过、要过对方，还没回音的（对方没接也是一种回答；要不要再提由${personWord(name)}，别一句句追着要）：`, ...asked.map(line)] : []),

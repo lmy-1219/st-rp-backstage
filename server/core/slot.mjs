@@ -19,7 +19,7 @@ import { carryParts, lingerLines, afterLines, cueLine, pocketCarry } from './moo
 import { impulseLines, IN_PLACE, looseEnds, STAY_STATES, stillThere } from './scene.mjs';
 import { profileParts } from './profile.mjs';
 import { senseScores, textKey } from './vectors.mjs';
-import { onwardLine, absentAskLine, takenLine, moldOf, varyLine, lastEchoes, scopeLine, bodyHarping } from './pace.mjs';
+import { onwardLine, absentAskLine, takenLine, moldOf, varyLine, lastEchoes, scopeLine, bodyHarping, choreLoop, restHarping, choreLine } from './pace.mjs';
 import { bodyGate, bodyGuard, herTrouble } from './body.mjs';
 import { crewOf, crewEntry, latestNode, crewLines, pushedText, crewPushDue, pushedMeta, keyPersonEntry, mindLine } from './crew.mjs';
 import { warmWords } from './tone.mjs';
@@ -37,7 +37,7 @@ import { toText as relationsText } from './relations.mjs';
 import { normalizeRelations, slotLines as relationLines, leaderOf, followersOf, personOf, givesWork, giverLine, mentionLines, currentRelations } from './relations.mjs';
 import { pickSeed, seedLines, storyYear } from './world.mjs';
 import { picksOf } from './guide.mjs';
-import { SIGN_PICKS_MAX, NOW_MOTIF, placesIn, buildBrief, needsPlan, stepPocket, stackedHere, reachedFor, pocketLines, respondLines, shownLines, sinkLines, storyDigest, WORLD, OFFSCREEN_FIT, entryOf, nearPlace, timePassed, offscreenLines, errandLines, ifTakenOf, ifSunkOf, takenOf, expiredPocket, premiseGone, storyLayers, layerNote, briefBlocks, BRIEF_CHARS, BRIEF_SHARES, UNSQUEEZED, categoryCounts, draggingLines, overdueAhead, LOOKBACK_PLANS } from './planner.mjs';
+import { SIGN_PICKS_MAX, NOW_MOTIF, placesIn, buildBrief, needsPlan, stepPocket, stackedHere, reachedFor, awaitingExtract, AWAIT_SPAN, pocketLines, respondLines, shownLines, sinkLines, storyDigest, WORLD, OFFSCREEN_FIT, entryOf, nearPlace, timePassed, offscreenLines, errandLines, ifTakenOf, ifSunkOf, takenOf, expiredPocket, premiseGone, storyLayers, layerNote, briefBlocks, BRIEF_CHARS, BRIEF_SHARES, UNSQUEEZED, categoryCounts, draggingLines, overdueAhead, LOOKBACK_PLANS } from './planner.mjs';
 import { foldState, stateLines, herOwnOnly } from './state.mjs';
 import { timeline, clockNow, dateIn, dayNumber, weekdayIndex, PARTS, withNoteMarks, timeTag } from './timeline.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
@@ -1352,6 +1352,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         carded: who => absentCard(who), board, anchorAt: anchor ? (uptoAnchor(messages, anchor).at(-1)?.pos ?? null) : null,
         // 交给他的那几步挂在被回的那条上、等他这条回复（方案 删消息等于没发生过）：他这条删了、换了别人开口，那一步就撤
         anchorMsg: (anchor ? uptoAnchor(messages, anchor) : messages).at(-1) ?? null,
+        upto: anchor ? uptoAnchor(messages, anchor) : messages,
         // 他到日子以后离开过镜头没有：眼下在外头，或者隔离区间里有一段在那天或之后关上（to 是他看不到的第一条）
         wentOff: (who, day) => {
             const card = cardOf(who);
@@ -2071,7 +2072,20 @@ export function varyFor(store, { chatKey, speaker, name, userName = null, messag
     if (pace?.enabled !== false && userName && bodyHarping({ messages, speaker, userName, aliases: herAliases(store, chatKey, userName) })) ways = [...ways, `一再把话头拐到${userName}的身子上`];
     const mold = pace?.enabled !== false && pace?.shape !== false ? moldOf({ messages, speaker }) : null;
     const echoes = pace?.enabled !== false ? lastEchoes({ messages, speaker }) : [];
-    return varyLine({ name, ways, mold, userName: userName ?? '对方', echoes });
+    const baseLine = varyLine({ name, ways, mold, userName: userName ?? '对方', echoes });
+    let fast = null;
+    if (pace?.enabled !== false && speaker && speaker !== CAMERA) {
+        let names = [];
+        try {
+            const storyId = store.requireChat(chatKey).story_id;
+            names = (store.getCast?.(storyId) ?? []).map(e => e.name);
+        } catch {}
+        const aliases = userName ? herAliases(store, chatKey, userName) : [];
+        const chores = choreLoop({ messages, speaker, names, userName, aliases });
+        const rest = restHarping({ messages, speaker, userName });
+        fast = choreLine({ name, userName: userName ?? '对方', chores, rest });
+    }
+    return [baseLine, fast].filter(Boolean).join(' ') || null;
 }
 function herAliases(store, chatKey, userName) {
     try {
@@ -2081,7 +2095,7 @@ function herAliases(store, chatKey, userName) {
         return p ? [p.名, ...(p.又名 ?? [])].filter(Boolean) : [];
     } catch { return []; }
 }
-const VARY = /^（.*(一再用到的路数|是一个模子|的原话拎出来再接)/;
+const VARY = /^（.*(一再用到的路数|是一个模子|的原话拎出来再接|这件过渡的小事／这番叮嘱已经交代过了)/;
 // 换上去的那一句放回原来那句的位置；原来没有就放在范围那一句（scopeLine，总在最末）之前。
 const SCOPE = /^（这一条只写眼前这几分钟/;
 function swapVary(text, line) {
@@ -2396,8 +2410,13 @@ const maskName = (m, call) => {
     return { ...m, who: call, title: swap(m.title), surface: swap(m.surface), respond: swap(m.respond), know: swap(m.know), sink: swap(m.sink) };
 };
 
+const isDoneFor = (store, records, chatKey) => {
+    if (typeof records?.isDone !== 'function') return null;
+    const storyId = store.requireChat?.(chatKey)?.story_id;
+    return storyId != null ? fp => records.isDone(storyId, fp) : null;
+};
 const HOLD_SPAN = 6, AIM_WAIT = 6, ERRAND_GAP = 12, NODE_EVERY = 40;
-function menuFor(store, chatKey, { records = null, isCarded = () => false, scene = '', partAt = () => null, awaySince = () => false, speaker, present, recentUser, userName, today, dayOf = null, firm = null, at = 0, passive = false, record, carry = null, followers = () => [], giver = () => null, face = () => false, player = [], hold = null, keep = () => false, stranger = () => null, named = () => [], same = () => false, camera = false, carded = () => false, arrive = null, board = null, wentOff = null, anchorAt = null, anchorMsg = null, given = null, hide = () => false }) {
+function menuFor(store, chatKey, { records = null, isCarded = () => false, scene = '', partAt = () => null, awaySince = () => false, speaker, present, recentUser, userName, today, dayOf = null, firm = null, at = 0, passive = false, record, carry = null, followers = () => [], giver = () => null, face = () => false, player = [], hold = null, keep = () => false, stranger = () => null, named = () => [], same = () => false, camera = false, carded = () => false, arrive = null, board = null, wentOff = null, anchorAt = null, anchorMsg = null, upto = null, given = null, hide = () => false }) {
     // 在同一条上换了个人开口：前一个人那一步（他那条回复删了）不算，那件回到之前那一步（store.menuOf）
     const allowed = intimateAllowed(store, records, chatKey, { present });
     const menu = menuDays(store, store.menuOf(chatKey, { speaker }), dayOf).filter(m => !hide(m) && (m.purpose !== '亲密' || (!camera && m.who === speaker && isCarded(m.who) && allowed(m))));
@@ -2450,6 +2469,9 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     const redo = m => m.status === 'used' && m.settled_pos === (anchorAt ?? at) && !!m.settled_by && sameAs(m.settled_by, speaker);
     const pockets = menu.filter(m => (m.status === 'pocket' || redo(m)) && mine(m));
     const offered = [];
+    const isDone = isDoneFor(store, records, chatKey);
+    const uptoMsgs = upto ?? store.currentMessages?.(chatKey) ?? [];
+    const awaiting = m => awaitingExtract(m, { messages: uptoMsgs, isDone, record, same: sameAs });
     // 镜头外：时间真过去了没有；到现场：谁会去那儿（规划写了"谁去"就照它，没写从"用在"里认人名）、上回提他是哪条（隔 12 条才再提）
     // 镜头外的那件给不给他：剧情时间真过去了（跨天、时段跳两档）、玩家离开过，或者他自己到日子以后离开过镜头（离场去办事，试玩 10/7：
     // 他出去办过那件事、回来自己也提了，可那天一直是同一个时段，那件就一直等着）
@@ -2482,7 +2504,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
             add(0, [...respondLines(shownAs(pocket), { userName: userName ?? '玩家', speaker }), ...intimateLines(pocket), ...aside(pocket)]);
             carry?.push(pocketCarry(shownAs(pocket), { userName: userName ?? '玩家', speaker }));
             if (record) store.updateMenu(chatKey, pocket.id, step('used'));
-        } else if ((!hold || hold.related(pocket) || pocket.motif === NOW_MOTIF) && mayTake(pocket) && !(camera && (pocket.offscreen || OFFSCREEN_FIT.test(pocket.fit ?? '')))) offered.push(pocket);   // 今天有说好的事：和它无关的先放着（N-268）；镜头跟着玩家，玩家不在时发生在别人身上的不归它
+        } else if ((!hold || hold.related(pocket) || pocket.motif === NOW_MOTIF) && mayTake(pocket) && !awaiting(pocket) && !(camera && (pocket.offscreen || OFFSCREEN_FIT.test(pocket.fit ?? '')))) offered.push(pocket);   // 今天有说好的事：和它无关的先放着（N-268）；镜头跟着玩家，玩家不在时发生在别人身上的不归它
     }
     // 一轮只给一件（用户 10/1：给了几件"挑合适的用"，前台常是件件都用）：他自己牵头的优先；再是已经递给他的、冲着他来的；没有就给一件别人的（玩家那边的事算别人的）
     // 刚闹出的动静引来的后续（D-170）排在最前：它就是冲着眼前这一摊来的
@@ -2495,7 +2517,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
         if (camera && arrive && carded(pocket.who)) { arrive(pocket); return; }
         const call = stranger(pocket.who);
         const [head, ...body] = pocketLines(shownAs(pocket), { userName: userName ?? '玩家', speaker, camera });
-        if (record && pocket.who !== speaker) store.updateMenu(chatKey, pocket.id, step('offered'));
+        if (record) store.updateMenu(chatKey, pocket.id, step('offered'));
         // 一轮就这一件：超长让位时排在背景、关系这些常备的后面才让（试玩 10/1：今天有约、此刻的样子又长，老维那件被长度挤掉了）
         add(1, [head, ...body, ...intimateLines(pocket), ...aside(pocket),
             ...(hold?.related(pocket) && hold.label(pocket) ? [`  （这件和${hold.today?.(pocket) ? '今天' : ''}说好的「${hold.label(pocket)}」是一回事：办那件事的时候用得上）`] : []),
