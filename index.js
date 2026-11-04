@@ -402,6 +402,16 @@ async function showPending() {
     await ctx().callGenericPopup(html, ctx().POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
 }
 
+export function glanceHtml(glance) {
+    const groups = [['concern', '牵挂着'], ['open', '没了结'], ['changed', '最近变了']];
+    const sections = groups.map(([key, title]) => {
+        const rows = glance?.[key] ?? [];
+        if (!rows.length) return '';
+        return `<section><h4>${title}</h4>${rows.map(r => `<div style="margin:.4em 0">${r.rumor ? '（听说）' : `<b>${escapeHtml(r.kind)} · ${escapeHtml(r.status)}</b> `}${escapeHtml(r.text)}${r.when ? ` <small>${escapeHtml(r.when)}</small>` : ''}</div>`).join('')}</section>`;
+    }).join('');
+    return `<small>只列你知道的；没记下的不显示。</small>${sections || '<p>还没有记下能看的。</p>'}`;
+}
+
 // 后台给的一句不剧透的提示（比如剧情转向、重新规划了）：蓝色轻提示，每条只提示一次（记在本机，刷新页面也不重复）。
 export function planAttemptsHtml(planning, esc) {
     const entries = { auto: '自动', button: '按钮', supplement: '补规划', handoff: '外援交回', repair: '修格式' };
@@ -2243,6 +2253,7 @@ export function panelPageHtml(page) {
     const button = (action, text) => `<button class="menu_button" data-action="${action}" type="button" title="${panelHelp(action)}">${text}</button>`;
     const card = (title, html) => `<section class="rpe-card"><h4>${title}</h4>${html}</section>`;
     if (page === 'now') return `<div data-role="start-guide"></div><div data-joined>${card('此刻的场面', '<div data-role="board-row"></div><div class="rpe-grid">' + button('board-edit', '纠正场面') + button('camera-now', '旁白来一段') + '</div>')}
+        <details class="rpe-card" data-role="glance"><summary>眼下</summary><div data-role="glance-body"></div></details>
         <section class="rpe-card" data-role="tasks-card" hidden><h4>待处理</h4><div data-role="tasks"></div></section>
         ${card('幕后', '<p data-role="plan"></p><small data-role="secret-hint"></small><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + '<button class="menu_button" type="button" data-action="plan-repair" hidden title="只修已保存规划的格式，建议先看失败原因。">修格式</button><button class="menu_button" type="button" data-action="plan-abandon" hidden title="放弃挂着的规划，继续用已生效那份。">放弃这次重抽</button>' + button('plan-reveal', '看幕后（剧透）') + '</div>')}
         <details class="rpe-card" data-role="handoff-details"><summary>外援</summary><small>把未完成任务交给其他AI，建议按题目交回。</small><div data-role="handoffs" hidden></div><div data-role="extract-alert"></div></details></div>`;
@@ -2284,6 +2295,22 @@ function mountPanel() {
     panel.id = 'rp_emergence_panel';
     panel.innerHTML = panelShellHtml();
     const $ = sel => panel.querySelector(sel);
+    const glance = $('[data-role="glance"]');
+    let glanceChatKey = null;
+    let glanceRequest = 0;
+    glance.addEventListener('toggle', async () => {
+        const request = ++glanceRequest;
+        if (!glance.open || !state.chatKey || !settings().enabled) return;
+        const chatKey = state.chatKey;
+        const body = $('[data-role="glance-body"]');
+        body.textContent = '正在读取……';
+        try {
+            const result = await api('glance', { chatKey });
+            if (request === glanceRequest && glance.open && state.chatKey === chatKey) body.innerHTML = glanceHtml(result);
+        } catch {
+            if (request === glanceRequest && glance.open && state.chatKey === chatKey) body.textContent = '这次没读到，请收起再打开。';
+        }
+    });
     let currentTab = readPanelTab(() => settings().panelTab);
     const showPage = (next, save = false) => {
         currentTab = panelTab(next);
@@ -2297,6 +2324,12 @@ function mountPanel() {
     });
     render = () => {
         const s = settings(), st = state.status;
+        if (glanceChatKey !== state.chatKey) {
+            glanceChatKey = state.chatKey;
+            glanceRequest++;
+            glance.open = false;
+            $('[data-role="glance-body"]').textContent = '';
+        }
         $('[data-role="relations-draft"]').innerHTML = relationsDraftHtml(state.relationsDraft, escapeHtml);
         const hint=$('[data-role="installation-hint"]');
         hint.innerHTML=installationHint({backendDown:state.backendDown,backendStatus:state.backendStatus,localRelease:state.localRelease,backendRelease:state.release});hint.hidden=!hint.innerHTML;

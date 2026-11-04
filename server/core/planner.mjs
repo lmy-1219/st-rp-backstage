@@ -123,6 +123,7 @@ export const PLAN_SYSTEM = [
     '事情拿出来以后不会就这么完了：它会挂在知道的人心里，直到正文里有了着落（解决了、弄清了、放下了），或者过了一阵没人追，照"收尾"那句落地；有人问起、去查，就顺着来由往下。所以露面、应答只写这一拍，别替它收尾——它最多走到哪写在"收尾"里。',
     '一件事写一个拍子：露面、应答里别替场面收尾——谁什么时候走、一场戏什么时候散，看玩家和场面；别把离开、道别、"聊到后面"写进去。',
     '【说好的事】是角色和玩家自己定下的：排事以它们为骨架——到了那天会遇上什么、办的时候会撞见谁，排成跟着它的事（"跟着约定"写它的编号）；别排会把它挤掉的事。办不办、怎么办由前台和玩家；',
+    '事件若明确接着本次材料里带编号的已发生事实，可以写「起因」：{"记录": 编号}；若接着已有菜单的真实结果，可以写 {"菜单结果": 编号}。拿不准就不写，不能凭同人同地猜。编号只用于核对，不放进露面、应答或知情。',
     '已经有了结果的（办了、改了、没办成、就这么过去了），按结果排后续：谁因此高兴、失望、起疑、借机、找上门，小事也算，不带责备。几件事可以撞在同一天，让人分身乏术——先顾哪件、不顾哪件是角色自己的选择，都会有后果。',
     '【上一个节点里的事】里玩家接了的事写明了往后会落下什么；拿出来了还没下文的列在【还没下文的口子】里，每件在"口子"里答一句：收（"落地"写它是怎么落地的，一句，程序记成了结）或续（这一份里排一件接着它的，"续成"写那件的题，那件的"在哪件之后"写它）——续的才排后续，一件最多续一次，标了"这次只能收"的只能收；过程性的、玩家没再追的，收。沉了的，牵头的人心里记着，也可以从这里长出事来。',
     '那里面还排着、在口袋里的，每件在"旧件"里答一句：留（照旧留着，这一份别再写它）、撤（不合眼下了）、换（这一份里有一件接替它，"换成"写那件的题）。',
@@ -367,7 +368,7 @@ export function buildBrief(s) {
             + `${g.closeText ? `；上一份写的收尾：${clip(g.closeText, 100)}` : g.ifTaken ? `；没写收尾（接了会怎样：${clip(g.ifTaken, 100)}）` : ''}${g.cont >= 1 ? '；已经续过一次，这次只能收' : ''}`));
     // 旧件带一行露面（三家对比：只给题，有的同题重写了七件，口袋里会有两份），并说清怎么处理
     if (s.menu.length) out.push('', node?.目标 ? '【上一个节点里的事】' : '【上一张菜单的情况】', MENU_NOTE,
-        ...s.menu.flatMap(m => [`· ${m.line ? `〔${m.line}〕` : ''}${m.who}「${m.title}」：${m.taken && m.status === 'shown' ? '拿出来了，玩家伸手了' : { waiting: '还排着，没放出来', pocket: '还排着，在口袋里', shown: '拿出来了', used: '用上了', sunk: '沉底了', sunk_told: '沉底了', void: '不成立了，撤了', expired: '没赶上，过期了' }[m.status] ?? m.status}`
+        ...s.menu.flatMap(m => [`· ${Number.isSafeInteger(m.id) ? `[事${m.id}] ` : ''}${m.line ? `〔${m.line}〕` : ''}${m.who}「${m.title}」：${m.taken && m.status === 'shown' ? '拿出来了，玩家伸手了' : { waiting: '还排着，没放出来', pocket: '还排着，在口袋里', shown: '拿出来了', used: '用上了', sunk: '沉底了', sunk_told: '沉底了', void: '不成立了，撤了', expired: '没赶上，过期了' }[m.status] ?? m.status}`
             + ((m.taken ?? m.status === 'used') && ifTakenOf(m) ? ` → 往后：${ifTakenOf(m)}` : /sunk/.test(m.status) && ifSunkOf(m) ? `（没接：${ifSunkOf(m)}）` : ''),
         ...(String(m.surface ?? '').trim() ? [`  露面：${clip(m.surface, 60)}`] : [])]));
     if (s.bringNext?.length) out.push('', '【上次你说下次要带上的】', ...s.bringNext.map(x => `· ${x}`));
@@ -812,7 +813,22 @@ export const MAX_EVENTS = 12;
 // afterCap："第几天后"最多几格（天尺度 60；年尺度 20，见 timescale）；maxEvents：一个节点至多几件（按这局的节奏，慢档 8，见 tempo）
 // categories：这一局开局单的类别（章程 J1）——给了的话，这一份里一件都没撑到的类别记一句提醒（不退件）
 // crew：主角团名单（章程 K1，setup.crewOf，含玩家的角色）——主角团的事不到六成提醒一句；不给就用这一份自己写的"主角团"
-export function parsePlan(text, { names = [], foreign = [], leaderOf = () => null, player = [], cells = false, afterCap = 60, maxEvents = MAX_EVENTS, unitCap = 3, strictFormat = false, categories = [], crew = [], intimate = null, intimateProgress = [], carded = null, pace = null } = {}) {
+export function sourceIdsFromBrief(brief = '') {
+    const text = String(brief);
+    return {
+        records: new Set([...text.matchAll(/\[([1-9]\d*)\]/g)].map(m => Number(m[1]))),
+        menuResults: new Set([...text.matchAll(/\[事([1-9]\d*)\]/g)].map(m => Number(m[1]))),
+    };
+}
+export function verifiedPlanSourceIds(store, records, chatKey, brief) {
+    const ids = sourceIdsFromBrief(brief);
+    const visible = records.visible(chatKey);
+    const recordIds = new Set(visible.map(r => r.id));
+    const matters = new Map(visible.filter(r => r.type === '做' && r.matter?.menu != null && !r.matter.kind).map(r => [r.id, r.matter.menu]));
+    const results = new Set(visible.filter(r => r.type === '了结' && r.outcome && matters.has(r.idea_ref)).map(r => matters.get(r.idea_ref)));
+    return { records: new Set([...ids.records].filter(id => recordIds.has(id))), menuResults: new Set([...ids.menuResults].filter(id => results.has(id))) };
+}
+export function parsePlan(text, { names = [], foreign = [], leaderOf = () => null, player = [], cells = false, afterCap = 60, maxEvents = MAX_EVENTS, unitCap = 3, strictFormat = false, categories = [], crew = [], intimate = null, intimateProgress = [], carded = null, pace = null, sourceIds = null } = {}) {
     const s = String(text ?? '').replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '');
     const body = s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1);
     let raw;
@@ -825,7 +841,7 @@ export function parsePlan(text, { names = [], foreign = [], leaderOf = () => nul
     const REL_MAX = 400, LEFT_MAX = 160;
     const atStop = (t, max) => { if (t.length <= max) return t; const cut = t.slice(0, max); const i = Math.max(...['。', '；', '！', '？'].map(c => cut.lastIndexOf(c))); return i >= max / 2 ? cut.slice(0, i + 1) : cut; };
     const list = (v, n, max) => (Array.isArray(v) ? v : []).map(x => str(x, max)).filter(Boolean).slice(0, n);
-    const items = [], dropped = [];
+    const items = [], dropped = [], warnings = [];
     // 新面孔（D-107）：这个节点要用到、名册里没有的人。别的故事的人（名册里"不用"的）不收；只记真有事由他牵头的。
     const head = n => String(n).split(/[（(]/)[0].trim();
     const faces = (Array.isArray(raw['新面孔']) ? raw['新面孔'] : []).map(f => ({ name: str(f?.['名'], 20), who: str(f?.['是谁'], 200),
@@ -836,9 +852,22 @@ export function parsePlan(text, { names = [], foreign = [], leaderOf = () => nul
     const allowed = [...names, ...faces.map(f => f.name)];
     const events = Array.isArray(raw['事件']) ? raw['事件'] : Array.isArray(raw['菜单']) ? raw['菜单'] : [];
     for (const m of events) {
+        const rawCause = m?.['起因'];
+        let cause = null;
+        if (rawCause != null && rawCause !== '') {
+            const keys = rawCause && typeof rawCause === 'object' && !Array.isArray(rawCause) ? Object.keys(rawCause) : [];
+            const key = keys.length === 1 ? keys[0] : '';
+            const id = Number(rawCause?.[key]);
+            if (Number.isSafeInteger(id) && id > 0 && ((key === '记录' && sourceIds?.records?.has(id)) || (key === '菜单结果' && sourceIds?.menuResults?.has(id))))
+                cause = { type: key === '记录' ? 'record' : 'menu_result', id };
+            else {
+                const reason = `「${String(m?.['题'] ?? '').slice(0, 30)}」起因编号不在本次可核材料里，整件不收`;
+                dropped.push({ item: m, reason }); warnings.push(reason); continue;
+            }
+        }
         // 写进各格的"骰子"说明删掉（实测会写"一骰子长出来的——""（骰子：……）"，这一格前台看得见）
         const clean = v => str(v).replace(/[（(][^（()）]*骰子[^（()）]*[)）]/g, '').replace(/[一这]?骰子长出来的[——：:，,s]*/g, '').trim();
-        const item = { who: str(m['谁'], 40), title: str(m['题'], 30), surface: clean(m['露面']), respond: clipRespond(clean(m['应答'])), sink: clean(m['沉底']),
+        const item = { who: str(m['谁'], 40), title: str(m['题'], 30), surface: clean(m['露面']), respond: clipRespond(clean(m['应答'])), sink: clean(m['沉底']), ...(cause ? { cause } : {}),
             afterDays: Math.max(0, Math.min(afterCap, Math.round(Number(m['第几天后']) || 0))), fit: str(m['用在'], 120), weight: str(m['分量'], 40), know: stripUnknown(str(m['知情'], 300)), origin: stripUnknown(clean(m['来由']).slice(0, 300)),
             line: str(m['线'], 30), after: str(m['在哪件之后'], 30), motif: str(m['母题'], 12),
             promiseRef: Number(String(m['跟着约定'] ?? '').replace(/^\D+/, '')) || null,
@@ -906,7 +935,6 @@ export function parsePlan(text, { names = [], foreign = [], leaderOf = () => nul
     const romance = str(raw['感情线'], 300);
     const gaps = gapsOf(raw['口子']);
     // 头一格太密（章程 H5）：第 0 格（现在就行的）超过节奏表每格上限，提醒一句，不退件
-    const warnings = [];
     const first = kept.filter(i => !i.afterDays).length;
     if (unitCap > 0 && first > unitCap) warnings.push(`头一格排了 ${first} 件，节奏表每格至多 ${unitCap}`);
     // 开局单的类别这一份一件都没撑到（章程 J1）：只提醒，不退件
@@ -1393,6 +1421,13 @@ const knowLine = (m, speaker = null) => {
     const know = knownOnly(m.know);
     return know ? [m.who === WORLD ? `  （这时外面知道的、看得见的：${know}）` : `  （这时${m.who}知道的、看到的：${know}）`] : [];
 };
+// 起因由组格处按当前收件人的知情范围筛过；不能回退到可能含幕后内情的 origin。
+const eventLine = (m, text, speaker) => {
+    const body = String(text ?? '').trim();
+    const reason = String(m.causeText || m.early_why || '').trim().replace(/^因为/, '').replace(/[。．.!！；;]+$/, '');
+    if (reason) return `· ${m.who}因为${reason}，${body.startsWith(m.who) ? body.slice(m.who.length).replace(/^[：:，,\s]+/, '') : body}`;
+    return `· ${body.startsWith(m.who) ? body : `${m.who}：${body}`}`;
+};
 // 镜头外（试玩 10/1：规划写了"或者某人回来说起这一趟"，前台就让他在玩家床边一五一十讲了一遍早上一个人去办事撞上的事——按他的性子他根本不在乎那件事）：
 // 在玩家不在时发生在牵头的人身上的，是他自己的经历——提不提、怎么提、说几分由他；"用在"里"或者某人回来说起"那一截不递给前台。
 export const OFFSCREEN_FIT = /回来(?:说起|讲起|提起|说|讲)|事后(?:说|讲|提)|回头(?:说|讲|提)起/;
@@ -1463,18 +1498,18 @@ export function pocketLines(m, { userName = '玩家', speaker = null, camera = f
     return [
         camera ? `幕后口袋（可能发生在${userName}身边的一件事；由你挑时候：有自然的空当就让它冒出来；场面对不上就一直放着）：`
             : renderPronouns("幕后口袋（可能发生在〔当事人〕身边、或者〔当事人〕手上有的一件事；由你挑时候：有自然的空当就让它冒出来，正说到要紧处就先放着；场面对不上就一直放着）：", { person: speaker ?? m.who }),
-        `· ${m.surface}（${notes.join('；')}）`,
+        `${eventLine(m, m.surface, speaker)}（${notes.join('；')}）`,
         ...knowLine(m, speaker),
     ];
 }
 // 玩家伸手了：该给的别吊着、别挤牙膏（B 段实测：一点点往外挤，一件事拖十几轮）；但怎么给是他的——可以讲条件、留一手、打自己的算盘，那也是他的选择。
 const HIS_WAY = "怎么说、说到什么份上由〔当事人〕：可以讲条件、留一手、打自己的算盘——那是〔当事人〕的选择，瞒下的以后可能被翻出来";
 export function respondLines(m, { userName = '玩家', speaker = null } = {}) {
-    return [`${userName}伸手接了「${m.title}」这件事，这回别吊着、别挤牙膏（${renderPronouns(HIS_WAY, { person: speaker ?? m.who })}；这场戏什么时候散看${userName}和场面，别替它收尾、别让谁提前走）：`, `· ${m.respond}`, ...knowLine(m, speaker)];
+    return [`${userName}伸手接了「${m.title}」这件事，这回别吊着、别挤牙膏（${renderPronouns(HIS_WAY, { person: speaker ?? m.who })}；这场戏什么时候散看${userName}和场面，别替它收尾、别让谁提前走）：`, eventLine(m, m.respond, speaker), ...knowLine(m, speaker)];
 }
 // 角色已经把这件事拿出来了（记账认出来的）：下一次它牵头的人开口时交出后半截——玩家接了、问了就别吊着，没接不硬塞。
 export function shownLines(m, { userName = '玩家', speaker = null } = {}) {
-    return [`「${m.title}」这件事已经冒出来了：${userName}要是接了、问了，这回别吊着；没接就不用硬塞（${renderPronouns(HIS_WAY, { person: speaker ?? m.who })}；这场戏什么时候散看${userName}和场面，别替它收尾）：`, `· ${m.respond}`, ...knowLine(m, speaker)];
+    return [`「${m.title}」这件事已经冒出来了：${userName}要是接了、问了，这回别吊着；没接就不用硬塞（${renderPronouns(HIS_WAY, { person: speaker ?? m.who })}；这场戏什么时候散看${userName}和场面，别替它收尾）：`, eventLine(m, m.respond, speaker), ...knowLine(m, speaker)];
 }
 export function sinkLines(m) {
     return [renderPronouns("有件事一直没人接，就这么过去了（〔当事人〕知道的话，提不提、怎么提随〔当事人〕；不带责备）：", { person: m.who }), `· ${m.sink}`];

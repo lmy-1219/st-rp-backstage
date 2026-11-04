@@ -240,9 +240,11 @@ export function openRecords(db) {
         const byId = new Map(out.map(r => [r.id, r]));
         const targetOf = id => byId.get(id) ?? q('select id, text, holder_name from records where id = ?').get(id) ?? null;
         for (const r of out) {
+            Object.defineProperty(r, 'raw_text', { value: r.text });
             // 只说了"这条规矩他认""那件事她答应了"的（用户 10/8：前台看不出认的是哪条，规矩的内容和这句分开给，会误会）：
             // 它接上的那条（回答、改掉……）就是"这条"，读出来带上那条说的是什么
             const ref = DANGLING.test(r.text) ? (outgoing.get(r.id) ?? []).map(l => targetOf(l.to)).find(Boolean) : null;
+            if (ref) Object.defineProperty(r, 'ref_id', { value: ref.id });
             if (ref) { r.refers = ref.id; r.text = `${r.text}${REF_OPEN}${ref.holder_name ?? ''}那句：${String(ref.text).replace(/[。．.]+$/, '').slice(0, 80)}）`; }
             if (closed.has(r.id)) r.closed_by = closed.get(r.id);
             if (superseded.has(r.id)) r.superseded_by = superseded.get(r.id);

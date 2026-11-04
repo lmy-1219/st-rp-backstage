@@ -1,7 +1,7 @@
 {
-  "version": 24,
-  "label": "5.10",
-  "sourceCommit": "1c67eae487787709f1b5634f5ede4fbc7558e3f2",
-  "date": "2026-11-03T17:01:51.591Z",
+  "version": 25,
+  "label": "5.11",
+  "sourceCommit": "5c499ff6729abc314e6b05256bc8b1a493203e9b",
+  "date": "2026-11-04T01:18:39.289Z",
   "layout": 2
 }

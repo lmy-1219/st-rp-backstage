@@ -3,11 +3,12 @@
 import { createHash } from 'node:crypto';
 import { validAwayPlan } from './arrival.mjs';
 import { promiseOf, stageOf, settledTwins, settledByDoing, relatedTo, sameOccasion, LAPSED } from './promises.mjs';
-import { expiredTodo, timedOut, askedOther, answeredTodo } from './recall.mjs';
+import { expiredTodo, timedOut, askedOther, answeredTodo, recordKnownTo } from './recall.mjs';
 import { buildLedger, samePerson, sameParty, namedParties } from './money.mjs';
 import { entryOf, ifTakenOf, ifSunkOf } from './planner.mjs';
 import { settledMatter } from './matters.mjs';
-import { settledBy } from './slot.mjs';
+import { settledBy, paceFor, timelineFor } from './slot.mjs';
+import { timelineLabel } from './timeline.mjs';
 import { boardFor, boardLoader } from './board.mjs';
 import { lifeSheet } from './life.mjs';
 import { awayPlansOf } from './opening.mjs';
@@ -33,8 +34,10 @@ const conditionWords = text => {
 };
 const hasWord = (text, words) => words.some(w => textOf(text).includes(w));
 
-function base({ id, kind, text, who = [], with: with_ = [], owner = null, place = null, entry = null, when = null, since = 0, source, status = '排着', statusAt = null, why = '' }) {
-    return { id, kind, text: textOf(text), who: names(who), with: names(with_), owner, place: place ?? null, entry: entry ?? null, when: when ?? null, since: num(since) ?? 0, source, status, statusAt: num(statusAt), why: textOf(why) };
+function base({ id, kind, text, who = [], with: with_ = [], owner = null, place = null, entry = null, when = null, since = 0, source, status = '排着', statusAt = null, why = '', settledBy = null }) {
+    const item = { id, kind, text: textOf(text), who: names(who), with: names(with_), owner, place: place ?? null, entry: entry ?? null, when: when ?? null, since: num(since) ?? 0, source, status, statusAt: num(statusAt), why: textOf(why) };
+    if (settledBy != null) Object.defineProperty(item, 'settledBy', { value: settledBy });
+    return item;
 }
 
 function promiseItems(records, timeline, same) {
@@ -45,7 +48,8 @@ function promiseItems(records, timeline, same) {
     const timeScale = scaleOf(timeline?.scale);
     const settled = settledBy(records, { dayOf, partAt: part, weekdayOf, timeScale });
     const closed = new Map([...settled].map(([id, r]) => [id, r]));
-    const twins = settledTwins(visible, new Map([...settled].map(([id, r]) => [id, r.pos])));
+    const twinIds = new Map();
+    const twins = settledTwins(visible, new Map([...settled].map(([id, r]) => [id, r.pos])), twinIds);
     // 办了没人记了结的（用户 10/8）：办的人名下有一条说的是同一件的"做"
     const doing = settledByDoing(visible.filter(r => !closed.has(r.id) && !twins.has(r.id)), records, { dayOf, same });
     const out = [];
@@ -60,7 +64,7 @@ function promiseItems(records, timeline, same) {
         if (close) { status = close.outcome === '改了' ? '改了' : close.outcome === '没办成' ? '黄了' : close.outcome === '不做了' ? '黄了' : close.outcome === LAPSED ? '过去了' : '办了'; statusAt = close.pos; why = `${close.outcome ?? '办了'}（#${close.pos}）`; }
         else if (twins.has(r.id)) { status = '办了'; why = '跟着同一件事了结'; }
         else if (doing.has(r.id)) { status = '办了'; statusAt = doing.get(r.id).pos; why = `办了（#${doing.get(r.id).pos} 记着办的）`; }
-        out.push(base({ id: `promise:${r.id}`, kind: '约定', text: r.text, who: p.doers, with: p.with, owner: p.doers[0] ?? r.holder_name ?? r.holder, when: p.due, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why }));
+        out.push(base({ id: `promise:${r.id}`, kind: '约定', text: r.text, who: p.doers, with: p.with, owner: p.doers[0] ?? r.holder_name ?? r.holder, when: p.due, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why, settledBy: close?.id ?? settled.get(twinIds.get(r.id))?.id ?? doing.get(r.id)?.id }));
     }
     return out;
 }
@@ -91,8 +95,8 @@ function todoItems(records, messages, board, timeline, userName, same, boardAt =
             else if (expiredTodo(r, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos), scaleOf(timeline?.scale))) { status = '失效'; statusAt = num(timeline?.today) ?? null; }
         }
         const who = targets.length ? targets : audience;
-        out.push(base({ id: `ask:${r.id}`, kind: '要求', text: r.text, who, with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `对方 #${statusAt} 回了` : status === '失效' ? '过了时候' : '' }));
-        if (remote) out.push(base({ id: `wait:${r.id}`, kind: '等回音', text: r.text, who: [asker], with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `第${statusAt}条有回音` : `已等${scaleOf(timeline?.scale).span(Math.max(0, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos))).replace(' ', '')}` }));
+        out.push(base({ id: `ask:${r.id}`, kind: '要求', text: r.text, who, with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `对方 #${statusAt} 回了` : status === '失效' ? '过了时候' : '', settledBy: answer?.id }));
+        if (remote) out.push(base({ id: `wait:${r.id}`, kind: '等回音', text: r.text, who: [asker], with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `第${statusAt}条有回音` : `已等${scaleOf(timeline?.scale).span(Math.max(0, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos))).replace(' ', '')}`, settledBy: answer?.id }));
     }
     return out;
 }
@@ -135,13 +139,13 @@ function moneyItems(records, named = []) {
             // 数目一样就关；数目对不上（或说定没写数目）要说的是同一件事才关——同两方之间别的一笔付款不算（买鞋的钱不因为付了外卖钱就关）
             const paid = ledger.moves.find(x => ['付了', '花了'].includes(x.money?.stage) && x.pos > r.pos
                 && ((sameParties(x) && (x.money.amount === m.amount || sameMatter(x))) || (m.amount == null && samePerson(x.money.from, m.from) && sameMatter(x))));
-            out.push(base({ id: `money:${r.id}`, kind: '钱', text: r.text, who: [m.from], with: [m.to], owner: m.from, since: r.pos, source: { type: r.type, id: r.id }, status: paid ? '办了' : '等着', statusAt: paid?.pos ?? null, why: paid ? `付了 ${paid.money.amount}（#${paid.pos}）` : '说定了' }));
+            out.push(base({ id: `money:${r.id}`, kind: '钱', text: r.text, who: [m.from], with: [m.to], owner: m.from, since: r.pos, source: { type: r.type, id: r.id }, status: paid ? '办了' : '等着', statusAt: paid?.pos ?? null, why: paid ? `付了 ${paid.money.amount}（#${paid.pos}）` : '说定了', settledBy: paid?.id }));
         } else if (m.stage === '欠着') {
             const debt = ledger.debts.find(x => x.id === r.id);
             // 没写数目的欠账账本算不出还剩多少：之后同两方之间有"还了"才算还清，不然一直欠着（试玩 10/7："先赊着"被当成了还清）
             const repaid = m.amount == null ? ledger.moves.find(x => x.money?.stage === '还了' && x.pos > r.pos && sameParty(x.money.from, m.from, named) && sameParty(x.money.to, m.to, named)) : null;
             const open = debt || (m.amount == null && !repaid);
-            out.push(base({ id: `money:${r.id}`, kind: '钱', text: r.text, who: [m.from], with: [m.to], owner: m.from, since: r.pos, source: { type: r.type, id: r.id }, status: open ? '等着' : '办了', statusAt: repaid?.pos ?? null, why: debt ? `欠着 ${debt.left}` : open ? '欠着（数目不明）' : '还清' }));
+            out.push(base({ id: `money:${r.id}`, kind: '钱', text: r.text, who: [m.from], with: [m.to], owner: m.from, since: r.pos, source: { type: r.type, id: r.id }, status: open ? '等着' : '办了', statusAt: repaid?.pos ?? null, why: debt ? `欠着 ${debt.left}` : open ? '欠着（数目不明）' : '还清', settledBy: repaid?.id }));
         }
     }
     return out;
@@ -265,4 +269,63 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     pendingCache.set(key, value);
     while (pendingCache.size > 32) pendingCache.delete(pendingCache.keys().next().value);
     return value;
+}
+
+const CLOSED_STATUSES = new Set(['办了', '有回音', '改了', '黄了', '过去了', '沉了', '过期了', '撤了', '失效']);
+const subjectOf = (kind, item, r) => {
+    if (kind === '约定' || kind === '钱') return names(item?.who);
+    if (kind === '要求' || kind === '等回音') return names([item?.owner]);
+    if (kind === '碰上的事' || kind === '了结' || kind === '听说') return names([r.holder_name]);
+    return [];
+};
+
+// 面板只读玩家本人知道、且仍在当前窗口有效的记录；没有来源的事账项不猜。
+export function playerView(store, records, chatKey) {
+    const chat = store.requireChat(chatKey);
+    const messages = store.currentMessages(chatKey);
+    const visible = records.visible(chatKey);
+    const byId = new Map(visible.map(r => [r.id, r]));
+    const players = [[...messages].reverse().find(m => m.is_user)?.name, ...(store.playerNames?.(chat.story_id) ?? [])].filter(Boolean);
+    const known = r => !!r && players.some(name => recordKnownTo(r, name));
+    const safeText = r => {
+        let text = r.raw_text;
+        const target = byId.get(r.ref_id);
+        if (target && known(target)) text = `${text}（指的是${target.holder_name ? `${target.holder_name}那句` : '那句'}：${String(target.raw_text).replace(/[。．.]+$/, '').slice(0, 80)}）`;
+        if (r.guess) text += r.closed_by?.kind === '证实' && known(byId.get(r.closed_by.id))
+            ? `（${r.holder_name ? `${r.holder_name}猜的` : '猜的'}，后来证实了）`
+            : `（${r.holder_name ? `${r.holder_name}猜的` : '猜的'}）`;
+        return text;
+    };
+    const timeline = timelineFor(store, records, chatKey, messages);
+    const when = pos => timelineLabel(timeline, pos);
+    const lastPos = messages.at(-1)?.pos ?? 0;
+    const span = paceFor(store, chatKey).sinkMsgs;
+    const recent = pos => Number.isInteger(pos) && pos <= lastPos && lastPos - pos <= span;
+    const view = (r, kind, status, pos, rumor = false, item = null) => {
+        const who = item?.who ?? names([r.holder_name]);
+        const subjects = subjectOf(kind, item, r);
+        const shown = safeText(r);
+        if (!shown || !subjects.length) return null;
+        const text = subjects.some(name => r.raw_text.includes(name)) ? shown : `${subjects[0]}：${shown}`;
+        return { text, kind, status, who, when: when(pos), rumor };
+    };
+    const groups = { concern: [], open: [], changed: [] };
+    for (const item of pendingFor(store, records, chatKey, { timeline }).items) {
+        if (!['约定', '等回音', '要求', '钱', '碰上的事'].includes(item.kind)) continue;
+        if (!item.source?.id || !known(byId.get(item.source.id))) continue;
+        const source = byId.get(item.source.id);
+        const row = view(source, item.kind, item.status, item.since, false, item);
+        if (!row) continue;
+        if (CLOSED_STATUSES.has(item.status)) {
+            const evidence = byId.get(item.settledBy);
+            if (evidence && recent(evidence.pos) && known(evidence))
+                groups.changed.push({ ...row, when: when(evidence.pos), _pos: evidence.pos });
+        } else if (['约定', '等回音'].includes(item.kind)) groups.concern.push({ ...row, _pos: item.since });
+        else if (['要求', '钱', '碰上的事'].includes(item.kind)) groups.open.push({ ...row, _pos: item.since });
+    }
+    for (const r of visible) if (known(r) && recent(r.pos) && ['了结', '听说'].includes(r.type)) {
+        const row = view(r, r.type, r.type, r.pos, r.type === '听说');
+        if (row) groups.changed.push({ ...row, _pos: r.pos });
+    }
+    return Object.fromEntries(Object.entries(groups).map(([key, values]) => [key, values.sort((a, b) => b._pos - a._pos).slice(0, 6).map(({ _pos, ...row }) => row)]));
 }

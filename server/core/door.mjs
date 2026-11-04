@@ -113,6 +113,7 @@ export function doorAt(input = {}) {
             }
             const label = way === '打来电话' ? '来电' : way === '发来消息' ? '发来短讯' : /上门|来找|敲门/.test(`${m.title ?? ''}${m.surface ?? ''}`) ? '上门' : '可能会来';
             // 活动快到了、替它挂上门的引子，引子自己没到点（doorFor 标 early）；或递出后那条回复还没记账（标 awaiting，T081）：门上列着，但不算到时候了（T073/T081）
+            // 门上的候选还没有发生：只给方式，不把有卡人的动作、私下打算或亲密原文预先交给镜头。
             add('pocket', m.id, !m.early && !m.awaiting, false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m));
         }
         if (reached) add('reach', reach.id ?? who, true, false, reach.matter ? `可能来联系：${reach.matter}` : '可能来联系', [...new Set([reach.matterText, reach.hook, ...(reach.threads ?? []).map(r => r.text)].filter(Boolean))].join('；'));
@@ -172,7 +173,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const reachable = people.flatMap(p => {
         // 没出场过的人也一样：门上不随机挑（他该怎么登场由规划、口袋、名册钩子排；旁白那一格里的"此刻可以有这件事"另算）
         const r = sharedMatter(visible, { person: p.person, userName, same: sameWho });
-        return r ? [{ ...p, matter: String(r.matter?.title || r.text || '').slice(0, 24), matterText: String(r.text ?? '').slice(0, 80) }] : [];
+        return r ? [{ ...p, id: r.id, matter: String(r.matter?.title || r.text || '').slice(0, 24), matterText: String(r.text ?? '').slice(0, 80) }] : [];
     });
     const already = offers.find(o => o.round === String(recentUser).slice(-300));
     const justBack = store.absences?.(chatKey)?.at(-1)?.from_pos;

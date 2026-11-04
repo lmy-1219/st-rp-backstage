@@ -13,6 +13,11 @@ import { scaleOf, DAY_PARTS, relativeUnit } from './timescale.mjs';
 
 // 一天里的先后（凌晨排在深夜后面：故事里的"这一天"一般熬到睡下才算完）。默认尺度的那八段；别的尺度用 scaleOf(开局单).parts。
 export const PARTS = DAY_PARTS;
+// 场次和眼下面板共用同一日期标签；位置不在时间线上时不猜日期。
+export function timelineLabel(timeline, pos) {
+    const row = timeline.rows.find(r => r.pos === pos);
+    return row ? [dateIn(timeline.start, row.day)?.ymd, timeline.scale.ordinal(dayNumber(timeline.start, row.day)), row.part].filter(Boolean).join(' · ') : '';
+}
 const PART_WORDS = [
     [/凌晨|黎明|破晓/, '凌晨'],
     // 晚上十二点、午夜、零点是深夜那一格（试玩 10/11："到了晚上十二点"标成了晚上）；中午十二点不算

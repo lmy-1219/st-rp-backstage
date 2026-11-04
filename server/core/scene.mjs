@@ -28,7 +28,8 @@ export const SCENE_SYSTEM = [
     '按每个人的"节奏"挑（底子里写了的）：迁就对方状态的人，留下来聊、收拾、照顾，横着把这一刻过完；按自己节奏推的人，催过一回也得让，让完就干自己手边的事。两个人眼下的关系还在重新摸索、试探的（看"和玩家眼下"），"问你""冒一句"比别的更像。',
     '给了【刚到】时，玩家这边刚换了地方：这一回不用等空当（正紧张、正动手时照旧不插），看这里会有什么人、什么事，多半是"街头"（这地方的人和动静、有人凑过来），也可以是在场的人就地的反应。给了【这一局的几条线】时，冒的那件事对得上哪条，就照它的写法来（谁、怎么露、隔多久）；对不上别硬凑。',
     '别写成任务，别替玩家决定，别讲道理、别劝和；按各人自己的底子来，和【最近冒过的兴头】别重样。',
-    '只输出一个 JSON：{"玩家眼下": "能动|累着|难受|闷着|正忙", "有": true 或 false, "为什么": "一句", "种类": "念头|提前|邀约|街头|冒一句|问你|斗嘴|顺手|亲近", "手边": 顺手收拾【手边的事】时写它的编号，否则 null, "谁": "起头的人；街头写"世界"","对谁": "斗嘴、亲近时写，否则 null", "往事": 往事编号或 null, "什么": "一句", "怎么起": "一句：口气和由头（冒一句可以没有由头）", "编号": 提前时写袋编号，否则 null}',
+    '「为什么」只给后台说明挑这件的判断；「本人可知」只写起头的人亲历、听到或眼前看见的已发生事实，作为这件事的触发依据。两句分开，不能把焦点、规划目的、别人不知道的内情写进「本人可知」；没有可靠依据就留空。',
+    '只输出一个 JSON：{"玩家眼下": "能动|累着|难受|闷着|正忙", "有": true 或 false, "为什么": "后台判断，一句", "本人可知": "起头的人知道的触发依据，一句或空", "种类": "念头|提前|邀约|街头|冒一句|问你|斗嘴|顺手|亲近", "手边": 顺手收拾【手边的事】时写它的编号，否则 null, "谁": "起头的人；街头写"世界"","对谁": "斗嘴、亲近时写，否则 null", "往事": 往事编号或 null, "什么": "一句", "怎么起": "一句：口气和由头（冒一句可以没有由头）", "编号": 提前时写袋编号，否则 null}',
 ].join('\n');
 
 export const OUTING = new Set(['念头', '提前', '邀约', '街头']);
@@ -111,7 +112,7 @@ export function parseScene(text) {
     const to = clip(raw['对谁'], 40);
     const out = {
         open: true, kind, who: clip(raw['谁'], 40) || (kind === '街头' ? '世界' : ''), to: to && to !== 'null' ? to : null,
-        what: clip(raw['什么'], 160), how: clip(raw['怎么起'], 120), why: clip(raw['为什么'], 120),
+        what: clip(raw['什么'], 160), how: clip(raw['怎么起'], 120), why: clip(raw['为什么'], 120), knownWhy: clip(raw['本人可知'], 120),
         id: Number.isFinite(id) && id > 0 ? id : null, tale: Number.isFinite(tale) && tale > 0 ? tale : null,
         loose: kind === '顺手' && Number.isFinite(loose) && loose > 0 ? loose : null, userState,
     };
@@ -154,22 +155,23 @@ export function admitImpulse(v, { present = [], offstage = [], userName = '玩�
 }
 
 // 交给开口的人的那几行（可以用，也可以不用）。
-export function impulseLines(imp, { userName = '玩家' } = {}) {
+export function impulseLines(imp, { userName = '玩家', knownWhy = '' } = {}) {
     // 怎么起（由头、语气）只给场外来的（来邀、街上的事：怎么冒出来有用）；他自己就地做的不给——
     // 试玩 10/3："低骂着数落她""由头是电话不接害他把门禁干碎"被前台当剧本，照着报幕、照着刻薄。做什么交给他，怎么做照他的性子和眼前。
     const how = imp.how && (imp.kind === '邀约' || imp.kind === '街头') ? `——${imp.how}` : '';
+    const because = knownWhy ? `因为${knownWhy}，` : '';
     const own = `当是${imp.who}自己想的，别写成有人安排；${userName}接不接由${userName}`;
-    if (imp.kind === '念头') return [`（此刻的兴头，可以提、也可以不提：${imp.who}${imp.what}${how}。提了就${own}。）`];
+    if (imp.kind === '念头') return [`（此刻的兴头，可以提、也可以不提：${imp.who}${because}${imp.what}${how}。提了就${own}。）`];
     if (imp.kind === '邀约') return [`（这会儿不在场的${imp.who}可以来邀一下，用这个世界说得通的方式，可以用也可以不用：${imp.what}${how}；接不接由${userName}。）`];
     if (imp.kind === '街头') return [`（这会儿周围可以冒出一件事，场面对不上就当没看见：${imp.what}${how}。）`];
     if (imp.kind === '冒一句') return [`（这会儿${imp.who}可以没头没尾地冒一句，可以用也可以不用：${imp.what}${how}。不用由头，就是突然想起来、随口一说；${own}。）`];
-    if (imp.kind === '问你') return [`（这会儿${imp.who}可以问${userName}一件事，可以用也可以不用：${imp.what}${how}。${own}。）`];
-    if (imp.kind === '斗嘴') return [`（这会儿${imp.who}可以跟${imp.to}你来我往拌几句，可以用也可以不用：${imp.what}${how}。不一定冲着${userName}。）`];
+    if (imp.kind === '问你') return [`（这会儿${imp.who}可以问${userName}一件事，可以用也可以不用：${because}${imp.what}${how}。${own}。）`];
+    if (imp.kind === '斗嘴') return [`（这会儿${imp.who}可以跟${imp.to}你来我往拌几句，可以用也可以不用：${because}${imp.what}${how}。不一定冲着${userName}。）`];
     if (imp.kind === '顺手' && imp.loose?.text) return [`（这会儿${imp.who}可以顺手把自己留下的那件事收拾了——${imp.loose.text}：${imp.what}${how}。可以用也可以不用；不用特意说，手上做着就行。）`];
-    if (imp.kind === '顺手') return [`（这会儿${imp.who}手上可以正干着自己的事，给这一刻一点动静，可以用也可以不用：${imp.what}${how}。）`];
+    if (imp.kind === '顺手') return [`（这会儿${imp.who}手上可以正干着自己的事，给这一刻一点动静，可以用也可以不用：${because}${imp.what}${how}。）`];
     if (imp.kind === '亲近') {
         const target = imp.to ?? userName;
-        return [`（这会儿${imp.who}可以主动跟${target}亲近，可以用也可以不用：${imp.what}${how}。怎么起、到哪一步照两人眼下的关系和${personWord(imp.who)}的性子来，不用先把事说开。）`];
+        return [`（这会儿${imp.who}可以主动跟${target}亲近，可以用也可以不用：${because}${imp.what}${how}。怎么起、到哪一步照两人眼下的关系和${personWord(imp.who)}的性子来，不用先把事说开。）`];
     }
     return [];
 }

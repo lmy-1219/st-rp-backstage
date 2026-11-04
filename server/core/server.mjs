@@ -4,10 +4,10 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, menuDays, scaleFor, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
-import { labelsOf, sinceWord, dateIn, dayNumber } from './timeline.mjs';
+import { labelsOf, sinceWord, dateIn, dayNumber, timelineLabel } from './timeline.mjs';
 import { validMark, planFailure } from './store.mjs';
 import { digests } from './digest.mjs';
-import { parsePlan, nearPlace } from './planner.mjs';
+import { parsePlan, nearPlace, verifiedPlanSourceIds } from './planner.mjs';
 import { guideFor, markShown, recordPick, REFILL_KEY } from './guide.mjs';
 import { snapshot, applyPreset } from './presets.mjs';
 import { readOpeningPack, installPack, backupStFiles, findOpeningPacks, openingSources, httpsPackUrl, findMaterialPacks, materialPackSource, checkPack } from './pack-import.mjs';   // 一键导入开局包（_dev/开局包格式-20261017.md）
@@ -29,7 +29,7 @@ import { CAST_PROMOTION_DEFAULTS, MODEL_GROUPS, VOICE_GUIDANCE } from './config.
 import { voiceLibrary, voiceName } from './fresh.mjs';
 import { planRoster, normalizeRelations, toText as relationsText, fromText as relationsFromText, currentLines, personOf } from './relations.mjs';
 import { boardFor } from './board.mjs';
-import { pendingFor } from './pending.mjs';
+import { pendingFor, playerView } from './pending.mjs';
 import { doorFor } from './door.mjs';
 import { cameraShouldSpeak } from './camera-turn.mjs';
 import { promptOptionsFor, promptEnvironmentFor, allowedTiers, slotTable, setGlobalPromptPack, DEFAULT_PACK } from './prompt-slots.mjs';
@@ -349,6 +349,11 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const result = pendingFor(store, records, chatKey, { timeline: timelineFor(store, records, chatKey, messages) });
             return { items: result.items.map(({ id, kind, text, owner, who, with: with_, status, statusAt, why, since, place, entry }) => ({ id, kind, text, owner, who, with: with_, status, statusAt, why, since, place, entry })) };
         },
+        'POST /v1/glance': b => {
+            if (!records) bad('records unavailable');
+            const chatKey = str(b.chatKey, 'chatKey');
+            return playerView(store, records, chatKey);
+        },
         'POST /v1/door': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             store.requireChat(chatKey);
@@ -603,9 +608,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             store.requireChat(chatKey);
             const ran = b.run === true ? await settings().episodes?.run?.({ chatKey, force: true }) ?? { written: 0, off: true } : null;
             const tl = timelineFor(store, records, chatKey);
-            const row = new Map(tl.rows.map(r => [r.pos, r]));
-            const label = pos => (r => (r ? [dateIn(tl.start, r.day)?.ymd, tl.scale.ordinal(dayNumber(tl.start, r.day)), r.part].filter(Boolean).join(' · ') : ''))(row.get(pos));
-            const list = (store.episodesOf?.(chatKey) ?? []).map(e => ({ id: e.id, from: e.from_pos, to: e.to_pos, when: label(e.from_pos), place: e.place, present: e.present, text: e.text, edited: !!e.edited }));
+            const list = (store.episodesOf?.(chatKey) ?? []).map(e => ({ id: e.id, from: e.from_pos, to: e.to_pos, when: timelineLabel(tl, e.from_pos), place: e.place, present: e.present, text: e.text, edited: !!e.edited }));
             return { episodes: list, total: store.currentMessages(chatKey).length, ...(ran ? { ran } : {}) };
         },
         'POST /v1/episode-edit': b => {
@@ -817,7 +820,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             try {
             store.updatePlanAttempt(attempt, { stage: '解析', outputChars: typeof b.text === 'string' ? b.text.length : 0 });
             const chat = store.requireChat(plan.chat_key);
-            const parsed = parsePlan(str(b.text, 'text', { max: 100000 }), intimatePlanOptions(store, plan.chat_key, planRoster(store, chat.story_id, { chatKey: plan.chat_key })));
+            const parsed = parsePlan(str(b.text, 'text', { max: 100000 }), { ...intimatePlanOptions(store, plan.chat_key, planRoster(store, chat.story_id, { chatKey: plan.chat_key })), sourceIds: records ? verifiedPlanSourceIds(store, records, plan.chat_key, plan.brief) : { records: new Set(), menuResults: new Set() } });
             if (!parsed.items.length) bad(`菜单一条都没过：${parsed.dropped.map(d => d.reason).join('；')}`);
             const anchors = withPack(plan.chat_key).world.anchors;
             const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(chat.story_id)?.data).map(yearFlagText) : [];

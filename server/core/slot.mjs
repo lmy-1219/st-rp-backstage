@@ -91,6 +91,7 @@ export function wrap(text) {
 // 原来整格都在最后：背景和旧事排在玩家那句话后面、占着最显眼的位置，前台容易每件都去碰，真要紧的那几行反被冲淡；
 // 口袋放在最后时前台拿到就用（试玩 10/1：说好去老维那儿的早上，口袋里的中介、房东先进了场）。
 export const PLACES = ['world', 'base', 'mid', 'recall', 'now'];
+export const menuDeliveryKey = id => `menu:${id}`;
 // 场记是素材，不是提纲（用户 10/1：角色不是报幕的主持人；他有自己的选择，可以瞒、可以说谎，但有后果）
 const MATERIAL_NOT_SCRIPT = '这些是他手边的素材，不是要他照着念、照着办的提纲：他按自己的性子、处境和眼前的场面取舍——可以不提、晚点提、只说一半、瞒着不说，甚至说假话（那也是他做过的事，会被记下，往后有后果）。别把场记里的事一件件转述给对方，也别替对方安排下一步。';
 // 能编的和不能动的（N-279，用户 10/2：补全、瞎编要用在临时的小事、环境、姿态、念头、对已有的事的个人解读上，不是把写过的改得前后矛盾——
@@ -472,9 +473,29 @@ export async function composeSlot(store, records, args, opts = {}) {
     const carried = carryParts(prior, { name, userName: userName ?? '对方', now: Number.isFinite(at) ? at : messages.length, current: carry, dayOf, resolve, timeScale: scaleFor(store, chatKey), cut: guard.carry,
         tag: (n, today) => timeTag(n, { start: store.setupOf?.(chat.story_id)?.data?.时间 ?? null, today, timeScale: scaleFor(store, chatKey) }) });
     const scopedBlocks = (blocks ?? []).filter(p => !camera || p.scope !== 'person');
-    const all = [...(camera ? scopedBlocks : (blocks ?? [{ tier: 0, lines: extra, scope: 'person' }])),
+    const proposed = [...(camera ? scopedBlocks : (blocks ?? [{ tier: 0, lines: extra, scope: 'person' }])),
         { tier: 0, lines: carried.near, scope: 'person' }, { tier: 1, lines: carried.later, place: 'back', scope: 'person' },
         { tier: 2, lines: on ? linger : [], place: 'back', scope: 'person' }].filter(p => !camera || p.scope !== 'person');
+    const continuing = new Set(proposed.filter(p => p.candidate?.carry).map(p => p.candidate.sourceKey).filter(Boolean));
+    const compareRank = (x, y) => {
+        for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) - (y[i] ?? 0);
+        return 0;
+    };
+    const candidates = proposed.filter(p => p.candidate && !p.candidate.carry && !continuing.has(p.candidate.sourceKey)).sort((a, b) => {
+        const crossRank = p => p.candidate.kind === POCKET_KIND
+            ? [p.candidate.rank[0], p.candidate.rank[1], ...p.candidate.rank.slice(3)] : p.candidate.rank;
+        return compareRank(crossRank(a), crossRank(b));
+    });
+    // offered 已挂在这个锚点时，重组仍选同一件；计数变化不能把下一件顶上来。
+    // menuOf 只重放本窗口有效的步骤，删改或分叉撤回后不会锁住旧件。
+    // anchor 的数字是消息条数；updateMenu 写入的 at.pos 是末条消息的零起始位置，所以对齐 at - 1。
+    const givenPocket = opts.planner?.record === false || !Number.isFinite(at) ? null
+        : store.menuOf?.(chatKey, { speaker: speakerName || speaker }).find(m => m.held_pos === at - 1 && m.held_by === (speakerName || speaker));
+    const first = candidates[0] ?? null;
+    const chosen = givenPocket ? candidates.find(p => p.candidate.sourceKey === menuDeliveryKey(givenPocket.id)) ?? null
+        : first?.candidate.kind === POCKET_KIND
+            ? candidates.filter(p => p.candidate.kind === POCKET_KIND).sort((a, b) => compareRank(a.candidate.rank, b.candidate.rank))[0] : first;
+    const all = proposed.filter(p => !p.candidate || p.candidate.carry || p === chosen);
     // 三块各算各的长度（N-284 第二步，用户 10/4："1600 字上限不合理"）：底子（常备）、想起的（旧事＋放在那一块的几行）、眼下这一轮（口袋、此刻、背景）。
     // 以前想起的旧事算在 1600 里、自己又不让，一长就把眼下这一轮的挤掉；现在各让各的。想起的那块：玩家在问以前的事时放宽。
     const split = opts.slot?.split !== false;
@@ -482,7 +503,7 @@ export async function composeSlot(store, records, args, opts = {}) {
     const kept = new Set([...fitParts(0, all.filter(p => p.place === 'base'), BASE_CHARS), ...fitParts(base.text?.length ?? 0, all.filter(p => p.place === 'recall'), recallCap),
         ...fitParts(0, all.filter(p => p.place !== 'base' && p.place !== 'recall'), opts.slot?.maxChars ?? SLOT_CHARS)]);
     const more = all.filter(p => kept.has(p)).flatMap(p => p.lines);
-    const out = { ...base, contact, carry, room: fit, blocks: all.filter(p => kept.has(p)).map(({ tier, lines, place, scope }) => ({ tier, lines, place, scope })), text: !more.length ? base.text : base.text ? `${base.text}\n${more.join('\n')}` : finish(base.material.name, more) };
+    const out = { ...base, contact: chosen?.candidate.kind === 'contact' && kept.has(chosen) ? contact : null, carry, room: fit, blocks: all.filter(p => kept.has(p)).map(({ tier, lines, place, scope }) => ({ tier, lines, place, scope })), text: !more.length ? base.text : base.text ? `${base.text}\n${more.join('\n')}` : finish(base.material.name, more) };
     // 场次摘要（N-284）：问起哪天的、玩家这句正冲着的旧账落在哪场——那几场的经过整段给；另算长度，不和别的抢地方，不参与让位
     const episode = camera || opts.episodes === false ? '' : soften(episodeBlock(store, records, chatKey, { name, text: args.recentUser, hits: episodeHits(base.material), messages, roster: (store.getCast?.(chat.story_id) ?? []).map(e => e.name), cap: Math.round(EPISODE_CHARS * fit.s), count: Math.min(5, Math.max(1, Math.round(2 * fit.s))) }).join('\n'));
     if (episode) out.text = out.text ? `${out.text}\n${episode}` : episode;
@@ -524,6 +545,8 @@ export async function composeSlot(store, records, args, opts = {}) {
         };
     }
     if (pending) out.final = false;   // 推演还没回来：这一格先不钉住，左滑重来时能用上推好的
+    // final 只决定这格能否缓存；程序回退和等待推演时的文字同样已经交给前台。
+    for (const p of all) if (kept.has(p) && (p === chosen || p.candidate?.carry)) p.candidate?.commit?.();
     return out;
 }
 
@@ -925,7 +948,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     } catch {}
     const { material, queryKeys = [] } = base;
     const lines = [], blocks = [];
-    const add = (tier, arr, place = 'now', scope = 'person') => { if (arr?.length) { blocks.push({ tier, lines: arr, place, scope }); lines.push(...arr); } };
+    const add = (tier, arr, place = 'now', scope = 'person', candidate = null) => { if (arr?.length) { blocks.push({ tier, lines: arr, place, scope, ...(candidate ? { candidate } : {}) }); lines.push(...arr); } };
     let contact = null;
     const table = economy?.table ?? null;
     // 上一条：最近一条不是用户这句的消息（先开口的人可能正在问价）。
@@ -1253,19 +1276,24 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             // 只跟着别人出现的人不单独联系人（关系表的"跟着"）。
             // 出场过的人得有由头才递：他和玩家之间有一件碰上了、还没下文的事（场记章程 #2），不再随机挑人
             const sameWho = (a, b) => sameName(a, b, rosterNames) || (!!rel && !!personOf(rel, a, rosterNames) && personOf(rel, a, rosterNames) === personOf(rel, b, rosterNames));
+            const knower = camera ? userName : name;
             const list = (planner?.provider ? people().filter(p => p.lastPos >= 0) : people()).filter(p => !(rel && leaderOf(rel, p.person, rosterNames)))
-                .filter(p => p.lastPos < 0 || !!sharedMatter(visible, { person: p.person, userName, same: sameWho }));
+                .flatMap(p => { const reason = sharedMatter(visible, { person: p.person, userName, same: sameWho }); return p.lastPos < 0 || reason ? [{ ...p, reason: reason ?? p.reason }] : []; });
             const pick = already ? list.find(p => p.person === already.person)
                 : pickContact({ people: list, dayOf, lastPos, offers, minGap: contacts?.minGap ?? 16 });
             if (pick && camera && cardOf(pick.person)) {
                 // 镜头不替有卡的人演：他进门的名单（door.mjs 的"可能来联系"），这一格不写他
             } else if (pick) {
-                if (!already && contacts?.record !== false) store.putContactOffer({ chatKey, person: pick.person, day: today, at: lastPos, round, speaker });
                 const withHim = rel ? followersOf(rel, pick.person, rosterNames) : [];
                 const giver = rel ? personOf(rel, pick.person, rosterNames) : null;
-                add(2, guard.lines([...contactLines(pick, { when: material.when, lastSeen: tagDay(dayOf(pick.lastPos)) }),
+                const contactRecent = recentPlayerCause({ cause: pick.reason?.id ? { type: 'record', id: pick.reason.id } : null },
+                    { visible, lastPos, players: [userName, ...(store.playerNames?.(storyId) ?? [])].filter(Boolean), names: rosterNames, span: paceFor(store, chatKey).sinkMsgs });
+                add(2, guard.lines([...contactLines(pick, { when: material.when, lastSeen: tagDay(dayOf(pick.lastPos)), knower, same: sameWho }),
                     ...(withHim.length ? [`  （${withHim.join('、')}一直跟着${pick.person}）`] : []),
-                    ...(givesWork(giver) ? [`  （${personWord(giver.名)}是派活的：${giverLine(giver, priceOf)}）`] : [])]), 'now', 'scene');
+                    ...(givesWork(giver) ? [`  （${personWord(giver.名)}是派活的：${giverLine(giver, priceOf)}）`] : [])]), 'now', 'scene',
+                    { kind: 'contact', sourceKey: `contact:${pick.person}:${pick.reason?.id ?? ''}`,
+                        rank: [1, contactRecent ? 0 : 1, -1, offers.filter(o => o.person === pick.person).length, 0],
+                        commit: () => { if (!already && contacts?.record !== false && planner?.record !== false) store.putContactOffer({ chatKey, person: pick.person, day: today, at: lastPos, round, speaker }); } });
                 contact = pick.person;
             }
         }
@@ -1284,17 +1312,25 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         // 念头和就地的（冒一句、问你、斗嘴、顺手、亲近）只给起头的那个人；来邀、街上的事给哪个开口的都行
         const own = imp && (imp.kind === '念头' || IN_PLACE.has(imp.kind));
         // 发消息、打电话来的人不拿兴头：那是给在这儿的人的（试玩 10/7："往干燥暖和的后座里挤"给了在路口打电话的人，他就自己钻进了车里）
-        const mine = alive && !remote && (own ? sameName(imp.who, name, rosterNames) || imp.who === name : !contact);
+        const mine = alive && !remote && (own ? sameName(imp.who, name, rosterNames) || imp.who === name : true);
         if (mine) {
             // 念头、就地的是起头那个人的；来邀、街头的事是这地方的（旁白也拿）
-            add(own ? 1 : 2, guard.lines(impulseLines(imp, { userName: userName ?? '玩家' })), 'now', own ? 'person' : 'scene');
-            store.setMeta(`impulse:${chatKey}`, JSON.stringify({ ...imp, used: true, usedBy: name, usedAt: impAnchor ? { pos: impAnchor.pos, fp: impAnchor.fp } : null }));
-            // 交出去的往事算讲过了：同一件一局只讲一回（D-112）
-            if (imp.kind === '冒一句' && imp.tale?.text) {
-                let told = [];
-                try { told = JSON.parse(store.getMeta(`told:${storyId}`) ?? '[]'); } catch {}
-                store.setMeta(`told:${storyId}`, JSON.stringify([...told, { who: imp.who, n: imp.tale.n, text: imp.tale.text, at: lastPos, fp: messages.at(-1)?.fp }].slice(-80)));
-            }
+            const looseNow = imp.kind === '顺手' && imp.loose?.id && visible.some(r => r.id === imp.loose.id && r.pos >= lastPos - 1);
+            const recent = imp.loose?.id ? recentPlayerCause({ cause: { type: 'record', id: imp.loose.id } },
+                { visible, lastPos, players: [userName, ...(store.playerNames?.(storyId) ?? [])].filter(Boolean), names: rosterNames, span: paceFor(store, chatKey).sinkMsgs }) : false;
+            const commit = () => {
+                if (planner?.record === false) return;
+                store.setMeta(`impulse:${chatKey}`, JSON.stringify({ ...imp, used: true, usedBy: name, usedAt: impAnchor ? { pos: impAnchor.pos, fp: impAnchor.fp } : null }));
+                // 交出去的往事算讲过了：同一件一局只讲一回（D-112）
+                if (imp.kind === '冒一句' && imp.tale?.text) {
+                    let told = [];
+                    try { told = JSON.parse(store.getMeta(`told:${storyId}`) ?? '[]'); } catch {}
+                    store.setMeta(`told:${storyId}`, JSON.stringify([...told, { who: imp.who, n: imp.tale.n, text: imp.tale.text, at: lastPos, fp: messages.at(-1)?.fp }].slice(-80)));
+                }
+            };
+            add(own ? 1 : 2, guard.lines(impulseLines(imp, { userName: userName ?? '玩家', knownWhy: !camera && sameName(imp.who, name, rosterNames) ? imp.knownWhy : '' })), 'now', own ? 'person' : 'scene',
+                { kind: 'impulse', carry: !!looseNow, sourceKey: `impulse:${imp.at?.pos}:${imp.who}:${imp.kind}`,
+                    rank: [1, recent ? 0 : 1, own ? 1 : 2, 0, 0], commit });
         }
     }
 
@@ -1355,7 +1391,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 那件约定的当事人才拿得到它的内容（镜头照玩家的眼睛）
     const holdWho = camera ? userName : name;
     const pendingHold = pendingPocketRelated.size ? { related: m => pendingPocketRelated.has(`pocket:${m.id}`), label: m => (x => (x && [...(x.who ?? []), ...(x.with ?? [])].some(w => sameName(w, holdWho, rosterNames)) ? x.text : ''))(pendingLedger.items.find(x => x.kind === '约定' && OPEN_PROMISE.has(x.status) && (x.with ?? []).includes(`pocket:${m.id}`))).slice(0, 40) } : null;
-    const menuLines = drama && store.menuOf && !contact ? menuFor(store, chatKey, { records, isCarded: who => !!cardOf(who), speaker: camera ? CAMERA_NAME : name, camera, present, recentUser, userName, today, dayOf, firm: { today: firmToday, dayOf: firmDayOf }, at: lastPos, passive: passiveUser(messages), record: planner?.record !== false, carry, followers: who => (rel ? followersOf(rel, who, rosterNames) : []), face: who => roleOf(roster, who)?.role === '新面孔', stranger: strangerCall(roster, messages),
+    const menuLines = drama && store.menuOf ? menuFor(store, chatKey, { records, isCarded: who => !!cardOf(who), speaker: camera ? CAMERA_NAME : name, camera, present, recentUser, userName, today, dayOf, firm: { today: firmToday, dayOf: firmDayOf }, at: lastPos, passive: passiveUser(messages), record: planner?.record !== false, carry, followers: who => (rel ? followersOf(rel, who, rosterNames) : []), face: who => roleOf(roster, who)?.role === '新面孔', stranger: strangerCall(roster, messages),
         giver: who => (p => (givesWork(p) ? giverLine(p, priceOf) : null))(rel ? personOf(rel, who, rosterNames) : null),
         player: [userName, ...(rel && userName ? (p => (p ? [p.名, ...p.又名] : []))(personOf(rel, userName, rosterNames)) : [])].filter(Boolean), hold: promised?.hold ? { related: m => promised.hold.related(m) || !!pendingHold?.related(m), label: m => (promised.hold.party?.(m, holdWho) ? promised.hold.label(m) : '') || pendingHold?.label(m) || '', today: m => !!promised.hold.strong?.(m) && !!promised.hold.party?.(m, holdWho) } : null, keep: m => !!(pendingHold?.related(m) || promised?.keeps?.(m)),
         // 口袋怎么进场（质量窗 10/5 方案）：到现场的看眼下在哪，镜头外的看时间过没过
@@ -1381,7 +1417,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         arrive: camera ? () => {} : null,
         // 说她伤病的那几件不递（bodyGuardFor）：规划排的，不是她自己写的；放着的照常沉底
         hide: guard.hidesItem }) : [];
-    for (const b of menuLines.blocks ?? [{ tier: 1, lines: menuLines }]) add(b.tier, b.lines, b.place ?? 'now', 'reply');
+    for (const b of menuLines.blocks ?? [{ tier: 1, lines: menuLines }]) add(b.tier, b.lines, b.place ?? 'now', 'reply', b.candidate);
     // 玩家交代跳过的一段（skip.mjs，章程 G1）：空白过后头一个开口的人多一块"这段时间"——纯程序拼，只给这一回（按消息认：他这条删了就再给）。
     // 旁白拿全部；有卡的人只拿他知道的：他自己办到哪儿、他找过没人应的、"世界"那边的、外面看得到的、他有份的约定
     try {
@@ -1428,7 +1464,20 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 门（D-175）：外头能来的有卡的人给旁白看，它觉得哪位顺理成章该出现了就写到他出现之前、末尾留记号；扩展认记号亮门，玩家点了才进场
     if (camera) {
         // 门上每人那几句多半是口袋里的题和来意：同样过一道换词（N-368）
-        try { add(0, doorLines(doorFor(store, records, chatKey, { anchor, present, recentUser, timeline: timelineFor(store, records, chatKey, messages), contacts, planner }).items.map(i => ({ ...i, lines: (i.lines ?? []).map(warmWords) }))), 'now', 'scene'); } catch {}
+        try {
+            const doors = doorFor(store, records, chatKey, { anchor, present, recentUser, timeline: timelineFor(store, records, chatKey, messages), contacts, planner }).items;
+            const menu = store.menuOf?.(chatKey) ?? [];
+            for (const item of doors) {
+                const carrying = ['named', 'promise', 'contact', 'errand'].includes(item.source?.type)
+                    || !!item.sent || (item.source?.type === 'pocket' && menu.some(m => m.id === item.source.id && m.status === 'shown'));
+                const source = item.source?.type === 'pocket' ? menu.find(m => m.id === item.source.id)?.cause
+                    : item.source?.type === 'reach' && Number.isSafeInteger(item.source.id) ? { type: 'record', id: item.source.id } : null;
+                const recent = recentPlayerCause({ cause: source }, { visible, lastPos, players: [userName, ...(store.playerNames?.(storyId) ?? [])].filter(Boolean), names: rosterNames, span: paceFor(store, chatKey).sinkMsgs });
+                const shown = { ...item, lines: (item.lines ?? []).map(warmWords) };
+                add(carrying ? 0 : 1, doorLines([shown]), 'now', 'scene', { kind: 'door', sourceKey: item.source?.type === 'pocket' ? menuDeliveryKey(item.source.id) : item.source?.type === 'reach' ? `contact:${item.who}:${item.source.id}` : `door:${item.source?.type}:${item.source?.id ?? item.who}`,
+                    ...(carrying ? { carry: true } : {}), rank: [1, recent ? 0 : 1, 0, 0, 0] });
+            }
+        } catch {}
     }
     if (drama && !contact && !menuLines.length && store.menuOf && planner?.record !== false) {
         // 玩家只跟着时先让这一刻活一会儿（D-112）：兴头在看场面、最近又没冒过就地的，先等几条再劝时间往后走
@@ -1470,7 +1519,17 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             const now = situationNow(situation.sit, { storyId, messages, visibleIds: new Set(visible.map(r => r.id)), dayOf: firmDayOf, live: moveLiveCtx(store, chatKey, { records: visible, principal: userName }) });
             const posOf = id => visible.find(r => r.id === id)?.pos;
             const fresh = now.delivered.some(s => userName && s.target === userName && posOf(s.record_id) != null && dayOf(posOf(s.record_id)) >= today);
-            add(fresh && camera ? 1 : 2, situationSlotLines(now, { name, today, records: visible, dayOf, notices: [], principal: userName, lastPos, camera }), fresh && camera ? 'now' : 'world', 'scene');
+            const context = { name, today, records: visible, dayOf, notices: [], principal: userName, lastPos, camera };
+            add(fresh && camera ? 1 : 2, situationSlotLines({ ...now, moves: [] }, context), fresh && camera ? 'now' : 'world', 'scene');
+            for (const move of now.moves ?? []) {
+                const seen = situationSlotLines({ ...now, delivered: [], moves: [move] }, context);
+                if (!seen.length) continue;
+                const source = Array.isArray(move.why) && move.why.length === 1 ? Number(move.why[0]) : null;
+                const recent = source && recentPlayerCause({ cause: { type: 'record', id: source } },
+                    { visible, lastPos, players: [userName, ...(store.playerNames?.(storyId) ?? [])].filter(Boolean), names: rosterNames, span: paceFor(store, chatKey).sinkMsgs });
+                add(2, seen, 'world', 'scene', { kind: 'outside', sourceKey: `move:${move.id}`,
+                    rank: [1, recent ? 0 : 1, 3, 0, move.id ?? 0] });
+            }
         } catch {}
     }
     // 有日子的活动的引子送不到（章程 L1，用户 10/12）：折那一步升级成"下一句"的，这一格最前面一句让她知道（旁白开口也算）；
@@ -2415,13 +2474,13 @@ export const callIn = (call, text) => {
 };
 // 口袋里一件事递给前台的那几格（题、露面、应答、知情、用在、由头、沉底、接了会怎样）过一道换词（用户 10/12，N-368：
 // 写成"利用""拿捏"，前台就把角色演成反派）。只换递出去的这一份，库里的原文不动
-const WARM_CELLS = ['title', 'surface', 'respond', 'know', 'fit', 'errand', 'sink', 'if_taken'];
+const WARM_CELLS = ['title', 'surface', 'respond', 'know', 'fit', 'errand', 'sink', 'if_taken', 'causeText', 'early_why'];
 const warmItem = m => (m ? { ...m, ...Object.fromEntries(WARM_CELLS.filter(k => typeof m[k] === 'string').map(k => [k, warmWords(m[k])])) } : m);
 const maskName = (m, call) => {
     if (!call) return m;
     const head = String(m.who).split(/[·・（(]/)[0];
     const swap = t => (t == null ? t : (c => String(t).split(m.who).join(c).split(head.length >= 2 ? head : m.who).join(c))(callIn(call, t)));
-    return { ...m, who: call, title: swap(m.title), surface: swap(m.surface), respond: swap(m.respond), know: swap(m.know), sink: swap(m.sink) };
+    return { ...m, who: call, title: swap(m.title), surface: swap(m.surface), respond: swap(m.respond), know: swap(m.know), sink: swap(m.sink), causeText: swap(m.causeText), early_why: swap(m.early_why) };
 };
 
 const isDoneFor = (store, records, chatKey) => {
@@ -2429,25 +2488,39 @@ const isDoneFor = (store, records, chatKey) => {
     const storyId = store.requireChat?.(chatKey)?.story_id;
     return storyId != null ? fp => records.isDone(storyId, fp) : null;
 };
-const HOLD_SPAN = 6, AIM_WAIT = 6, ERRAND_GAP = 12, NODE_EVERY = 40;
+const HOLD_SPAN = 6, AIM_WAIT = 6, ERRAND_GAP = 12, NODE_EVERY = 40, POCKET_KIND = 'pocket';
+const focusNodeFor = (store, chatKey) => {
+    const last = playModeOf(store, chatKey) === 'full' ? store.lastReadyPlan?.(chatKey) : null;
+    try { return last?.node ? JSON.parse(last.node) : null; } catch { return null; }
+};
 function menuFor(store, chatKey, { records = null, isCarded = () => false, scene = '', partAt = () => null, awaySince = () => false, speaker, present, recentUser, userName, today, dayOf = null, firm = null, at = 0, passive = false, record, carry = null, followers = () => [], giver = () => null, face = () => false, player = [], hold = null, keep = () => false, stranger = () => null, named = () => [], same = () => false, camera = false, carded = () => false, arrive = null, board = null, wentOff = null, anchorAt = null, anchorMsg = null, upto = null, given = null, hide = () => false }) {
     // 在同一条上换了个人开口：前一个人那一步（他那条回复删了）不算，那件回到之前那一步（store.menuOf）
     const allowed = intimateAllowed(store, records, chatKey, { present });
     const menu = menuDays(store, store.menuOf(chatKey, { speaker }), dayOf).filter(m => !hide(m) && (m.purpose !== '亲密' || (!camera && m.who === speaker && isCarded(m.who) && allowed(m))));
     if (!menu.length) return [];
+    const node = focusNodeFor(store, chatKey);
     // 交给他的这一步：挂在被回的那条上，等他这条回复（store.menuOf 的 pending）
     const step = status => ({ status, by: speaker, pending: true, ...(anchorMsg ? { at: { pos: anchorMsg.pos, fp: anchorMsg.fp } } : {}) });
     // 到日子的进口袋、放久了沉底：在折那一步做（advanceWorld，组格前已经跑过），这里拿到的菜单就是折过的
     const lines = [], blocks = [];
     // place：露面（由他挑时候的）和刚沉下去的放中段（最近两轮之前）；玩家伸手接了的、已经拿出来要交后半截的放最后（是对眼下这句的回应）
-    const add = (tier, arr, place = 'now') => { if (arr?.length) { blocks.push({ tier, lines: arr, place }); lines.push(...arr); } };
+    const add = (tier, arr, place = 'now', candidate = null) => { if (arr?.length) { blocks.push({ tier, lines: arr, place, ...(candidate ? { candidate } : {}) }); lines.push(...arr); } };
+    const sourceKey = m => menuDeliveryKey(m.id);
     const intimateLines = m => m.purpose === '亲密' ? [intimateDetail(m), pocketIntimateFor(store, chatKey)].filter(Boolean) : [];
     lines.blocks = blocks;
     // 沉底：刚沉下去的，给接下来开口的人顺带一提（只提一次）
     // 规划者写的"明早""今晚"按今天换说法；生人只用称呼
     const menuTs = scaleFor(store, chatKey);
     const dated = m => (Number.isFinite(m.said_day) && m.said_day !== today ? { ...m, ...Object.fromEntries(['surface', 'respond', 'know', 'sink', 'fit'].map(k => [k, m[k] == null ? m[k] : retime(m[k], m.said_day, today, menuTs)])) } : m);
-    const shownAs = m => warmItem(maskName(dated(m), stranger(m.who)));
+    const visible = records?.visible?.(chatKey) ?? [];
+    const causeText = m => {
+        const r = m.cause?.type === 'record' ? visible.find(x => x.id === m.cause.id)
+            : m.cause?.type === 'menu_result' ? menuResultRecord(visible, m.cause.id) : null;
+        const knower = camera ? userName : speaker;
+        if (!r || !knower || !(r.holder_name === knower || same(r.holder_name, knower) || (r.audience ?? []).some(x => x === knower || same(x, knower)))) return '';
+        return retime(String(r.text ?? '').slice(0, 120), dayOf?.(r.pos) ?? today, today, menuTs);
+    };
+    const shownAs = m => warmItem(maskName({ ...dated(m), causeText: causeText(m), early_why: m.early_why && m.who === speaker ? retime(m.early_why, m.pocket_day ?? today, today, menuTs) : '' }, stranger(m.who)));
     for (const m of menu.filter(m => m.status === 'sunk')) {
         add(3, sinkLines(shownAs(m)), 'mid');
         if (record) store.updateMenu(chatKey, m.id, step('sunk_told'));
@@ -2474,7 +2547,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     // 牵头的是不在场的有卡的人（他发来的消息、他的事）：后半截是他的话，只交给他本人——他从门上进来（发消息、打电话、上门）时拿；
     // 镜头、别的人不替他说（试玩 10/9：他发来的消息拿出来了，后半截交给了先开口的旁白，他本人一直拿不到）
     for (const m of menu.filter(m => m.status === 'shown' && mine(m) && mayTake(m) && !(carded(m.who) && !sameAs(m.who, speaker)))) {
-        add(0, [...shownLines(shownAs(m), { userName: userName ?? '玩家', speaker }), ...intimateLines(m), ...aside(m)]);
+        add(0, [...shownLines(shownAs(m), { userName: userName ?? '玩家', speaker }), ...intimateLines(m), ...aside(m)], 'now', { carry: true, sourceKey: sourceKey(m) });
         if (record) store.updateMenu(chatKey, m.id, step('used'));
     }
     // 在这一条上交给他、他这一条又删了重来的（试玩 10/7：#287 删了重新生成，那件挂在 #286 上一直算用过，后面几版都拿不到）：
@@ -2515,7 +2588,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
         }
         if (recentUser && reachedFor(pocket, recentUser)) {
             // 玩家伸手了：眼下开口的人接（冲着别人来的照样写明只写自己那份）
-            add(0, [...respondLines(shownAs(pocket), { userName: userName ?? '玩家', speaker }), ...intimateLines(pocket), ...aside(pocket)]);
+            add(0, [...respondLines(shownAs(pocket), { userName: userName ?? '玩家', speaker }), ...intimateLines(pocket), ...aside(pocket)], 'now', { carry: true, sourceKey: sourceKey(pocket) });
             carry?.push(pocketCarry(shownAs(pocket), { userName: userName ?? '玩家', speaker }));
             if (record) store.updateMenu(chatKey, pocket.id, step('used'));
         } else if ((!hold || hold.related(pocket) || pocket.motif === NOW_MOTIF) && mayTake(pocket) && !awaiting(pocket) && !(camera && (pocket.offscreen || OFFSCREEN_FIT.test(pocket.fit ?? '')))) offered.push(pocket);   // 今天有说好的事：和它无关的先放着（N-268）；镜头跟着玩家，玩家不在时发生在别人身上的不归它
@@ -2524,14 +2597,18 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     // 刚闹出的动静引来的后续（D-170）排在最前：它就是冲着眼前这一摊来的
     // 同一档里递得少的在前（T077：同一件被挑了几十次、别的件轮不到）；档位规则不动，没递过的算 0 次，稳定排序
     offered.sort((a, b) => (a.offered_n ?? 0) - (b.offered_n ?? 0));
-    const shown = [offered.find(m => m.motif === NOW_MOTIF && (m.who === speaker || !present.includes(m.who))) ?? offered.find(m => m.who === speaker) ?? offered.find(m => holder(m) && sameAs(holder(m), speaker))
-        ?? offered.find(m => named(`${m.title ?? ''}${m.surface ?? ''}`).some(x => sameAs(x, speaker))) ?? offered[0]].filter(Boolean);
-    shown.forEach(pocket => {
+    offered.forEach((pocket, order) => {
         // 镜头那一格：不在场的、有卡的人牵头的事，镜头不替他演——改成"这一段让他来"，那件事留在口袋里，等他来了自己拿出来（N-292）
         if (camera && arrive && carded(pocket.who)) { arrive(pocket); return; }
         const call = stranger(pocket.who);
         const [head, ...body] = pocketLines(shownAs(pocket), { userName: userName ?? '玩家', speaker, camera });
-        if (record) store.updateMenu(chatKey, pocket.id, step('offered'));
+        const playerNames = [...new Set([...player, ...(store.playerNames?.(store.requireChat(chatKey).story_id) ?? [])])];
+        const recent = recentPlayerCause(pocket, { visible, lastPos: at, players: playerNames, names: [...present, speaker], span: paceFor(store, chatKey).sinkMsgs });
+        const ownRank = pocket.who === speaker ? 0 : holder(pocket) && sameAs(holder(pocket), speaker) ? 1
+            : named(`${pocket.title ?? ''}${pocket.surface ?? ''}`).some(x => sameAs(x, speaker)) ? 2 : 3;
+        const candidate = { kind: 'pocket', sourceKey: sourceKey(pocket),
+            rank: [pocket.motif === NOW_MOTIF && (pocket.who === speaker || !present.includes(pocket.who)) ? 0 : 1, recent ? 0 : 1, focusLine(pocket, node) && !(pocket.offered_n > 0) ? 0 : 1, ownRank, pocket.offered_n ?? 0, order],
+            commit: () => { if (record) store.updateMenu(chatKey, pocket.id, step('offered')); } };
         // 一轮就这一件：超长让位时排在背景、关系这些常备的后面才让（试玩 10/1：今天有约、此刻的样子又长，老维那件被长度挤掉了）
         add(1, [head, ...body, ...intimateLines(pocket), ...aside(pocket),
             ...(hold?.related(pocket) && hold.label(pocket) ? [`  （这件和${hold.today?.(pocket) ? '今天' : ''}说好的「${hold.label(pocket)}」是一回事：办那件事的时候用得上）`] : []),
@@ -2549,7 +2626,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
             ...(giver(pocket.who) ? [`  （${pocket.who}是派活的：${giver(pocket.who)}）`] : []),
             // B 段实测：用户只说"嗯""好"时，角色一直让场面停在原处，口袋里的事"挑时候"挑了二十来条也没拿出来。
             ...(passive && Number.isFinite(pocket.pocket_pos) && at - pocket.pocket_pos >= 10
-                ? [`  （这件放了好一阵了，${userName ?? '对方'}这一阵也只是跟着：可以让它这一轮冒出来——有人捎来话、有人敲门、${personWord(speaker)}自己想起来；${personWord(speaker)}怎么对待它，照${personWord(speaker)}的性子。）`] : [])], 'mid');
+                ? [`  （这件放了好一阵了，${userName ?? '对方'}这一阵也只是跟着：可以让它这一轮冒出来——有人捎来话、有人敲门、${personWord(speaker)}自己想起来；${personWord(speaker)}怎么对待它，照${personWord(speaker)}的性子。）`] : [])], 'mid', candidate);
     });
     return lines;
 }
@@ -2574,6 +2651,23 @@ export function storyContext(store, records, chatKey, { present = null } = {}) {
     const when = r => timeTag(dayOf(r.pos), { start: timeStart, today, timeScale: ts });
     return { chat, visible, messages, lastPos, dayOf, today, ts, userName, present: here, roster, openIdeaIds, closenessOf, when,
         people: () => absentPeople({ records: visible, messages, present: here, userName, roster, openIdeaIds, closenessOf, dayOf, timeScale: ts }) };
+}
+
+// 近期因果只看同一窗口里仍有效的来源记录，以及记录认定的当事人。
+// audience/about 表示知情或被提及，不能充当玩家做了这件事的证据。
+export function recentPlayerCause(item, { visible = [], lastPos = 0, players = [], names = [], span = 0 } = {}) {
+    const source = item?.cause;
+    if (!source || !(span > 0)) return false;
+    const record = source.type === 'record' ? visible.find(r => r.id === source.id)
+        : source.type === 'menu_result' ? menuResultRecord(visible, source.id) : null;
+    if (!record || lastPos - record.pos >= span || record.pos > lastPos) return false;
+    const holder = record.holder_name || (String(record.holder ?? '').startsWith('name:') ? record.holder.slice(5) : '');
+    return !!holder && players.some(p => sameName(holder, p, names));
+}
+
+function menuResultRecord(visible, menuId) {
+    const happened = new Set(visible.filter(r => r.type === '做' && r.matter?.menu === menuId && !r.matter.kind).map(r => r.id));
+    return visible.find(r => r.type === '了结' && r.outcome && happened.has(r.idea_ref)) ?? null;
 }
 
 // 现在就叫规划者（发言前按需触发、面板按钮、/聊 都走这里）：攒简报、记一条"等规划"、交给 provider。
@@ -2920,13 +3014,26 @@ export function writeNodeVerdict(store, chatKey, planId, verdict, at) {
 }
 
 // 写入前重新取菜单、约定、叠场和过期状态，拒绝已经变化的回包。
-export function advanceImpulse(store, records, chatKey, id, at) {
+export function advanceImpulse(store, records, chatKey, id, at, { expected = null, knownWhy = '' } = {}) {
     const s = storyContext(store, records, chatKey);
     if (!at?.fp || !s.messages.some(m => m.pos === at.pos && m.fp === at.fp)) return null;
+    if (expected) {
+        if (store.lastReadyPlan(chatKey)?.id !== expected.planId || store.lastPlan(chatKey)?.id !== expected.planId) return null;
+        if (JSON.stringify(s.messages.map(m => [m.pos, m.fp])) !== JSON.stringify(expected.messages)) return null;
+        if (JSON.stringify(s.present) !== JSON.stringify(expected.present)) return null;
+    }
     const menu = menuDays(store, store.menuOf(chatKey), s.dayOf), item = menu.find(m => m.id === id);
     const { node } = latestNode(store, chatKey), names = s.roster.map(p => p.name);
     const players = [s.userName, ...(store.playerNames?.(s.chat.story_id) ?? [])].filter(Boolean);
     if (!earlyEligible(item, menu, { node, players, names })) return null;
+    if (item.after_title) {
+        const prior = menu.filter(p => p.id !== item.id && p.plan_id === item.plan_id && p.title === item.after_title);
+        const done = p => {
+            const happened = s.visible.filter(r => r.type === '做' && r.matter?.menu === p.id && !r.matter.kind);
+            return happened.some(r => s.visible.some(x => x.type === '了结' && x.idea_ref === r.id && x.outcome));
+        };
+        if (!prior.length || !prior.every(done)) return null;
+    }
     const rel = store.relationsOf?.(s.chat.story_id);
     const promised = promisesNow(store, records, chatKey, { ...s, present: s.present, rosterNames: names, rel: rel ? normalizeRelations(rel) : null, setup: store.setupOf?.(s.chat.story_id)?.data });
     const board = boardFor(store, records, chatKey, { present: s.present, recentUser: '', timeline: timelineFor(store, records, chatKey, s.messages) });
@@ -2935,7 +3042,7 @@ export function advanceImpulse(store, records, chatKey, id, at) {
     const contentTier = activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null;
     const gate = pocketGate(menu, { today: s.today, at: s.lastPos, hold: promised.hold, gone, stacked, pace: paceFor(store, chatKey), timeScale: s.ts, contentTier });
     if (!gate.canEnter(id, { ignoreReadyDay: true })) return null;
-    store.updateMenu(chatKey, id, { status: 'pocket', pocket_day: s.today, at });
+    store.updateMenu(chatKey, id, { status: 'pocket', pocket_day: s.today, at, by: '兴头', ...(knownWhy && item.who ? { why: knownWhy } : {}) });
     return item;
 }
 // 来源由现有调用方带入；这里只读已有结果，不补跑任何推演。

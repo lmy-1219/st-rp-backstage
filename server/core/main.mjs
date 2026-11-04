@@ -32,7 +32,7 @@ import { openSituation, SITUATION_SYSTEM, parseSituation, recordOutcomes, repRec
 import { loadAnchors, indexAnchors, planYearFlags, yearFlagText } from './years.mjs';
 import { storyYear } from './world.mjs';
 import { turnWorth, planRetryDue } from './planner.mjs';   // 转向检查先程序初筛（10/16）；规划连不上自己再试（T074）
-import { NOW_MOTIF, PLAN_SYSTEM, withIntimate, API_PLAN_NOTE, placePrep, parsePlan, NODE_CHECK_SYSTEM, nodeCheckPrompt, parseNodeCheck, TURN_CHECK_SYSTEM, turnCheckPrompt, parseTurnCheck, premiseWaiting, premiseVoids } from './planner.mjs';
+import { NOW_MOTIF, PLAN_SYSTEM, withIntimate, API_PLAN_NOTE, placePrep, parsePlan, verifiedPlanSourceIds, NODE_CHECK_SYSTEM, nodeCheckPrompt, parseNodeCheck, TURN_CHECK_SYSTEM, turnCheckPrompt, parseTurnCheck, premiseWaiting, premiseVoids } from './planner.mjs';
 import { planRoster, normalizeRelations, personOf, leaderOf } from './relations.mjs';
 import { ARRIVAL_SYSTEM, arrivalPrompt, parseArrival, lastLeave, awaySpan, validAwayPlan, LEAVE_SYSTEM, leavePrompt, parseLeave, isRemote, metInPerson, justLeft, openNow } from './arrival.mjs';
 import { enteredSince, landSent } from './landing.mjs';
@@ -132,6 +132,7 @@ const advisorNote = id => (advisor.ready() ? [
 ].join('\n') : null);
 // strict：年份和年表对不上就退回让写的人改（窗口写的）；调 API 写的没人能改，照收并记一笔。
 const planOptions = chatKey => intimatePlanOptions(store, chatKey, planRoster(store, store.requireChat(chatKey).story_id, { chatKey }));
+const planSourceIds = (chatKey, brief) => verifiedPlanSourceIds(store, records, chatKey, brief);
 const planSystemFor = (chatKey, model, config) => { const options = promptOptionsFor(store, chatKey, config); return renderPronouns(withIntimate(withTaste(paceCap(planSystem(options), paceFor(store, chatKey)), { ...options, kind: 'plan', model }), intimateSetup(store, chatKey), options), playerContext(store, chatKey)); };
 const requirePlanAttempt = id => { if (!store.ownsPlanAttempt(id)) throw Object.assign(new Error('plan_late：迟到作废'), { status: 409 }); };
 const observePlanAttempt = id => {
@@ -155,7 +156,7 @@ const applyPlan = (planId, text, { strict = true, strictFormat = false, attempt 
     requirePlanAttempt(attempt);
     store.updatePlanAttempt(attempt, { stage: '解析', outputChars: text.length });
     const chat = store.requireChat(plan.chat_key);
-    const parsed = parsePlan(text, { ...planOptions(plan.chat_key), strictFormat });
+    const parsed = parsePlan(text, { ...planOptions(plan.chat_key), strictFormat, sourceIds: planSourceIds(plan.chat_key, plan.brief) });
     if (!parsed.items.length) throw Object.assign(new Error(`规划里的事一件都没过：${parsed.dropped.map(d => d.reason).join('；')}`), { status: 400 });
     const anchors = packOf(plan.chat_key)?.anchors;
     const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(chat.story_id)?.data).map(yearFlagText) : [];
@@ -604,7 +605,7 @@ async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, t
     records.logAssemble({ chatKey, speaker: '(规划)', model: p.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
     requirePlanAttempt(attempt);
     store.updatePlanAttempt(attempt, { ...r.telemetry, stage: '解析', outputChars: r.text.length });
-    const parsed = parsePlan(r.text, planOptions(chatKey));
+    const parsed = parsePlan(r.text, { ...planOptions(chatKey), sourceIds: planSourceIds(chatKey, brief) });
     // 到了那个地方补的、当天就用的：此刻就在那儿才用得上，不排在口袋里别的事后头（按"当下"放：到了就进口袋、不占份数，先递）——
     // 试玩 10/9：吧台那几件补进来以后，口袋被两件别处的事占满，一直进不来
     const items = parsed.items.slice(0, 4).map(m => ({ ...m, line: m.line || line, ...(reason === 'place' && !(m.afterDays > 0) ? { motif: NOW_MOTIF } : {}) }));
@@ -972,7 +973,7 @@ async function askAway({ chatKey, pos, fp, asker, askerAvatar, target, targetAva
         const got = parseAsk(r.text);
         if (!got) return { ok: false };
         for (const d of exchangeRecords({ ask: { fp, asker, askerAvatar, target, targetAvatar, way, text }, reply: got.reply, aside: got.aside })) records.addDerived({ storyId: chat.story_id, ...d });
-        store.setMeta(`offstage_reply:${chatKey}:${asker}`, JSON.stringify({ pos, fp, target, way, reply: got.reply, aside: got.aside, at: messages.at(-1)?.pos ?? pos, used: false }));
+        store.setMeta(`offstage_reply:${chatKey}:${asker}`, JSON.stringify({ pos, fp, target, way, question: text, reply: got.reply, aside: got.aside, at: messages.at(-1)?.pos ?? pos, used: false }));
         log(`askAway ${chatKey}: ${asker} → ${target} (${way}) ${costUsd.toFixed(4)}`);
         return { ok: true, ...got };
     } catch (error) {
@@ -1386,9 +1387,16 @@ function prepareScene({ chatKey }) {
     if (cfg.pace?.lateral === false) m.loose = [];   // 横向生长关着：不给手边的事、不记玩家眼下的样子
     const arcs = moved ? (m.setup?.储备线 ?? []).filter(x => !x.终局).slice(0, 10) : [];
     const user = scenePrompt({ ...m, recent: m.recent.slice(-6), arrived: moved, arcs });
+    const sceneVersion = messages.map(row => [row.pos, row.fp]);
+    const sceneView = JSON.stringify([m.present, m.lastScene]);
+    const scenePlan = store.lastReadyPlan(chatKey)?.id ?? null;
+    const scenePresent = storyContext(store, records, chatKey).present;
     // 收结果：玩家眼下的样子（累着、难受……）没出兴头也记下，那一格里约定那几行照它改口气（用户 10/2）；
     // 程序这一关（人在场、各自隔一阵、斗嘴亲近有对象、亲近得有来往、讲过的往事不再讲）：scene.admitImpulse。返回存下的那一条，没有就 null
     const apply = v => {
+        if (JSON.stringify(store.currentMessages(chatKey).map(row => [row.pos, row.fp])) !== JSON.stringify(sceneVersion)) return null;
+        const currentScene = sceneMaterial(store, records, chatKey, { seeds: packOf(chatKey)?.seeds ?? [], prices: packOf(chatKey)?.table ?? null, sit: cfg.situation.enabled ? situation : null });
+        if (JSON.stringify([currentScene.present, currentScene.lastScene]) !== sceneView) return null;
         if (v.userState && cfg.pace?.lateral !== false) store.setMeta(`user_state:${chatKey}`, JSON.stringify({ state: v.userState, pos: last.pos, fp: last.fp }));
         if (!v.open) return null;
         const at = { pos: last.pos, fp: last.fp };
@@ -1396,7 +1404,7 @@ function prepareScene({ chatKey }) {
         if (!imp) return null;
         if (v.kind === '提前') {
             if (!m.menu.some(x => x.id === v.id)) return null;
-            const item = advanceImpulse(store, records, chatKey, v.id, at);
+            const item = advanceImpulse(store, records, chatKey, v.id, at, { expected: { planId: scenePlan, messages: sceneVersion, present: scenePresent }, knownWhy: m.menu.find(x => x.id === v.id)?.who === v.who ? v.knownWhy : '' });
             if (!item) return null;
             imp = { ...imp, who: item.who, what: item.title, used: true };
         } else store.setMeta(`impulse:${chatKey}`, JSON.stringify(imp));
@@ -1740,7 +1748,16 @@ async function situationOnce({ chatKey, day, loud = null, skip = null }) {
         // 后续（N-268：事事有着落）：刚有了结果的事留下的后续，补进眼下这个节点（挂在推演那条消息上，删到它之前就撤回），由合适的人挑时候拿出来
         const plan = store.lastReadyPlan(chatKey);
         if (v.followups.length && plan) {
-            store.appendMenu(plan.id, v.followups.map(f => ({ who: f.who, title: f.title, surface: f.surface, respond: f.respond, sink: null, fit: null, weight: f.weight, know: f.know || null, origin: f.origin || null, line: '后续', after: null, motif: f.loud ? NOW_MOTIF : '后续', afterDays: f.afterDays })), { storyDay: day, at: m.anchor });
+            const visible = records.visible(chatKey);
+            const causeOf = source => {
+                if (/^事[1-9]\d*$/.test(source)) return { type: 'menu_result', id: Number(source.slice(1)) };
+                if (/^约[1-9]\d*$/.test(source)) {
+                    const result = visible.find(r => r.type === '了结' && r.idea_ref === Number(source.slice(1)) && r.outcome);
+                    return result ? { type: 'record', id: result.id } : null;
+                }
+                return /^[1-9]\d*$/.test(source) ? { type: 'record', id: Number(source) } : null;
+            };
+            store.appendMenu(plan.id, v.followups.map(f => ({ who: f.who, title: f.title, surface: f.surface, respond: f.respond, sink: null, fit: null, weight: f.weight, know: f.know || null, origin: f.origin || null, cause: causeOf(f.source), line: '后续', after: null, motif: f.loud ? NOW_MOTIF : '后续', afterDays: f.afterDays })), { storyDay: day, at: m.anchor });
             log(`situation ${chatKey} day ${day}: follow-ups ${v.followups.map(f => `${f.source}→${f.who}「${f.title}」`).join('、')}`);
         }
         // 镜头外有了动静（D-171，用户 10/6："发酵有了但整体规划反而落后"）：让每轮那次检查看一眼，规划设想的局面还成不成立；不成立就照常重新规划

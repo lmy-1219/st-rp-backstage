@@ -257,15 +257,16 @@ export function settledByDoing(list, records, { dayOf = () => 0, same = (a, b) =
 
 // 同一件约定记了好几条（试玩 10/5：四条"明天去老维那儿"，诊所看完了结了一条，另外三条一直挂着"今天要办"）：
 // 了结的那条之前说的、同一拨人、字面很像的，跟着算了结。closedAt：被了结的约定编号 → 了结记在哪条消息上。
-export function settledTwins(list, closedAt) {
+export function settledTwins(list, closedAt, matched = null) {
     const of = r => { let p = r.promise; if (typeof p === 'string') { try { p = JSON.parse(p); } catch { p = null; } } return p; };
     const doersOf = r => (Array.isArray(of(r)?.doers) && of(r).doers.length ? of(r).doers : [r.holder_name ?? r.holder]);
     const done = list.filter(r => closedAt.has(r.id));
     const out = new Set();
     for (const r of list) {
         if (closedAt.has(r.id) || !of(r)) continue;
-        if (done.some(c => closedAt.get(c.id) > (r.pos ?? 0) && doersOf(c).some(d => doersOf(r).includes(d))
-            && overlap(plainOf(c.text), plainOf(r.text)) >= 0.4)) out.add(r.id);
+        const twin = done.find(c => closedAt.get(c.id) > (r.pos ?? 0) && doersOf(c).some(d => doersOf(r).includes(d))
+            && overlap(plainOf(c.text), plainOf(r.text)) >= 0.4);
+        if (twin) { out.add(r.id); matched?.set(r.id, twin.id); }
     }
     return out;
 }

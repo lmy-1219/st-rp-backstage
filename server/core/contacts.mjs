@@ -46,7 +46,7 @@ export function absentPeople({ records, messages, present, userName = null, open
         const role = entry?.role ?? '常联系';
         const base = closenessOf ? closenessOf(person, entry).score : ROLE_WEIGHT[role];
         const score = base + Math.min(threads.length, 3) + (lastPos - seenPos <= 60 ? 1 : 0) + (entry?.priority ? 2 : 0);
-        people.push({ person, role, lastPos: seenPos, threads: threads.sort((a, b) => a.pos - b.pos).slice(-maxThreads), hook, score });
+        people.push({ person, role, lastPos: seenPos, threads: threads.sort((a, b) => a.pos - b.pos).slice(-maxThreads), reason: threads.at(-1) ?? null, hook, score });
     }
     // 新面孔（D-107）：没有卡，不会在聊天里自己开口；按记账里最后一次是他说的、做的算，有挂着的事或者有"是谁"就能来联系
     for (const e of roster) {
@@ -56,7 +56,7 @@ export function absentPeople({ records, messages, present, userName = null, open
         const threads = his.filter(r => mentions(r, [...here]) && ((r.type === '想法' && openIdeaIds.has(r.id)) || (r.todo && !r.closed_by) || (r.type === '说' && r.tense === '将来')));
         if (!threads.length && !e.hook) continue;
         const base = closenessOf ? closenessOf(e.name, e).score : ROLE_WEIGHT[e.role];
-        people.push({ person: e.name, role: e.role, lastPos: seenPos, threads: threads.sort((a, b) => a.pos - b.pos).slice(-maxThreads), hook: e.hook, score: base + Math.min(threads.length, 3) + (lastPos - seenPos <= 60 && seenPos >= 0 ? 1 : 0) + (e.priority ? 2 : 0) });
+        people.push({ person: e.name, role: e.role, lastPos: seenPos, threads: threads.sort((a, b) => a.pos - b.pos).slice(-maxThreads), reason: threads.at(-1) ?? null, hook: e.hook, score: base + Math.min(threads.length, 3) + (lastPos - seenPos <= 60 && seenPos >= 0 ? 1 : 0) + (e.priority ? 2 : 0) });
     }
     // 还没在这个窗口出场、名册里给了钩子的
     for (const e of roster) {
@@ -78,18 +78,19 @@ export function pickContact({ people, dayOf, lastPos, offers = [], minGap = 16 }
     return people.find(p => (p.lastPos < 0 ? today >= 1 : today - dayOf(p.lastPos) >= 1) && rested(p)) ?? null;
 }
 
-export function contactLines(pick, { when, lastSeen }) {
+export function contactLines(pick, { when, lastSeen, knower = null, same = (a, b) => a === b }) {
     const p = pick.person;
     if (pick.lastPos < 0) return [
         '此刻可以有这件事（用不用、怎么用由你定）：',
         `· ${p}还没在这个故事里出现过。${pick.hook}`,
         `· 要写的话，写成${p}捎来话、来信或者找上门（用这个世界里说得通的方式）；${p}只知道外面传开的消息和自己的经历，这个故事里之前发生的事${p}都不在场。`,
     ];
+    const known = r => !knower || r?.holder_name && same(r.holder_name, knower) || (r?.audience ?? []).some(n => same(n, knower));
+    const reason = known(pick.reason) ? pick.reason : null;
     return [
         '此刻可以有这件事（用不用、怎么用由你定）：',
-        `· ${p}有一阵没露面了（上次是${lastSeen}）。${pick.threads.length ? `${p}那边还挂着和在场的人有关的事：` : ''}`,
-        ...pick.threads.map(r => `  · ${when(r)}：${r.text}`),
-        ...(pick.hook ? [`  · ${pick.hook}`] : []),
+        `· ${p}有一阵没露面了（上次是${lastSeen}）。${reason ? `${p}这回惦记着${when(reason)}那件事：${reason.text}` : !knower && pick.hook ? `${p}这回来联系有个由头：${pick.hook}` : `${p}有事想来联系`}`,
+        ...pick.threads.filter(r => r.id !== reason?.id && known(r)).map(r => `  · ${p}另外还记得${when(r)}的事：${r.text}；提不提由${p}。`),
         `· 要写的话，写成${p}捎来话、来信或者找上门（用这个世界里说得通的方式）；${p}只知道自己经历过、听说过的事。`,
     ];
 }

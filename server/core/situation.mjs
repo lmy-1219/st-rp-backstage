@@ -144,7 +144,7 @@ export function parseSituation(text, { known = [], main = [], ids = new Set(), a
     }
     // 后续：哪件得是给过的结果；牵头的得认得（或者"世界"）；露面、应答都要有。
     for (const f of Array.isArray(obj?.['后续']) ? obj['后续'].slice(0, 5) : []) {
-        const source = clip(f?.['哪件'], 12), who = clip(f?.['谁'], 30), title = clip(f?.['题'], 20), surface = clip(f?.['露面'], 200), respond = clip(f?.['应答'], 600), know = clip(f?.['知情'], 200), origin = clip(f?.['来由'], 300);
+        const source = clip(f?.['哪件'], 12).replace(/^#(?=[1-9]\d*$)/, ''), who = clip(f?.['谁'], 30), title = clip(f?.['题'], 20), surface = clip(f?.['露面'], 200), respond = clip(f?.['应答'], 600), know = clip(f?.['知情'], 200), origin = clip(f?.['来由'], 300);
         const after = Math.round(Number(f?.['几天后']));
         // 记下的事（闹大了的那几条，或者这一天记下的、会在外头引起反应的；D-171：换天那次局势排的后续以前都被扔了）——就是冲着眼前来的，至多两件
         const n = Number(String(source).replace(/^#/, ''));

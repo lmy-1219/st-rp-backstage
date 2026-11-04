@@ -164,6 +164,6 @@ export function exchangeRecords({ ask, reply, aside = '' }) {
 // 问的人下一回开口时那一行（只给一回；他那条删了就没有）
 export function replyLines(r, { name }) {
     if (!r?.reply || !r?.target) return [];
-    return [`（${r.target}回了${name}${r.way === '电话' ? '电话里' : '发过去的消息'}问的那句：「${tidy(r.reply)}」${r.aside ? `，顺便说：${tidy(r.aside)}` : ''}——这段来往只有${name}和${r.target}知道；信不信、提不提、怎么用由${name}。）`];
+    return [`（${r.target}回了${name}${r.way === '电话' ? '电话里' : '发过去的消息'}问的${r.question ? `「${tidy(r.question).slice(0, 100)}」` : '那句'}：「${tidy(r.reply)}」${r.aside ? `，顺便说：${tidy(r.aside)}` : ''}——这段来往只有${name}和${r.target}知道；信不信、提不提、怎么用由${name}。）`];
 }
 

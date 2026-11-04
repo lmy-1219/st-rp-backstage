@@ -237,6 +237,7 @@ export function openStore(file) {
     try { db.exec('alter table menu add column offscreen integer'); } catch {}
     // 怎么进场（找上门／到现场／镜头外，质量窗 10/5 方案）；到现场的：在哪、谁去、去的由头
     try { db.exec('alter table menu add column origin text'); } catch {}   // 来由（用户 10/7）：这件事背后是怎么回事——规划者写，有人追查时才交给镜头一截
+    try { db.exec('alter table menu add column cause_ref text'); } catch {}   // 可核的起因；与不向前台直递的 origin 分开
     for (const col of ['entry', 'place', 'goer', 'errand', 'signpost']) { try { db.exec(`alter table menu add column ${col} text`); } catch {} }   // 镜头外：玩家不在时发生在牵头的人身上（规划者写的）
     try { db.exec('alter table slots add column ver text'); } catch {}
     try { db.exec('alter table menu_log add column by_name text'); } catch {}
@@ -920,6 +921,22 @@ export function openStore(file) {
         const rerollOf = Number(getMeta(`replan_of:${id}`)) || null;
         return rerollOf ? tx(() => submitPlanCore(id, args, rerollOf)) : submitPlanCore(id, args);
     }
+    // 只认当前窗口仍看得见、没有被改掉的事实。菜单结果另查真正落下的「碰上的事」，
+    // 单靠 shown/used 的菜单步骤不能证明那件事已有结果。
+    function causeFor(chatKey, cause) {
+        if (!cause || !['record', 'menu_result'].includes(cause.type) || !Number.isSafeInteger(cause.id) || cause.id <= 0) return null;
+        const rows = q(`select r.id, r.pos, r.fp, r.type, r.text, r.holder, r.holder_name, r.audience, r.matter, r.idea_ref, r.outcome
+            from (select r.*, min(s.pos) pos from records r
+                join chats c on c.key = ? and c.story_id = r.story_id
+                join chat_seq s on s.chat_key = c.key and s.fp = r.fp
+                where r.status = 'ok' group by r.id) r
+            where not exists (select 1 from record_links l join records newer on newer.id = l.from_id and newer.status = 'ok'
+                join chat_seq ns on ns.chat_key = ? and ns.fp = newer.fp
+                where l.to_id = r.id and l.kind in ('改掉', '否定'))`).all(chatKey, chatKey);
+        if (cause.type === 'record') return rows.find(r => r.id === cause.id) ?? null;
+        const happened = new Set(rows.filter(r => r.type === '做' && fromJson(r.matter)?.menu === cause.id && !fromJson(r.matter)?.kind).map(r => r.id));
+        return rows.find(r => r.type === '了结' && r.outcome && happened.has(r.idea_ref)) ?? null;
+    }
     // 交回的菜单落账。旧菜单里还没放出来的由新菜单接手（见 menuOf），口袋里那一样留着。
     // crew、romance、gaps（章程 K1）：规划交回的"主角团""感情线""口子"，存进 node（node.主角团、node.感情线、node.口子；没写的不加这一格）
     // keyPeople（用户 10/12，M 数据约定第 2 条）：规划交回的"要紧的人"（主角团以外有自己打算的，带心思），存进 node.要紧的人；没写的不加这一格
@@ -982,8 +999,8 @@ export function openStore(file) {
         const overtakenBy = old => items.find(n => nameOf(n.who) && nameOf(n.who) === nameOf(old.who)
             && ((nameOf(n.line) && nameOf(n.line) === nameOf(old.line)) || near(nameOf(n.title), nameOf(old.title))));
         (rerollOf ? (fn => fn()) : tx)(() => {
-            const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, updated_at, entry, place, goer, errand, origin, signpost, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
-            for (const m of items) ins.run(id, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, plan.story_day + m.afterDays, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, ...cellValues(m));
+            const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, updated_at, entry, place, goer, errand, origin, signpost, cause_ref, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
+            for (const m of items) ins.run(id, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, plan.story_day + m.afterDays, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, causeFor(plan.chat_key, m.cause) ? JSON.stringify(m.cause) : null, ...cellValues(m));
             q("update plans set status = 'ready', goal = ?, node = ?, bring_next = ?, raw = ?, ready_at = ? where id = ?").run(goal ?? null, node ? JSON.stringify(node) : null, JSON.stringify(bringNext ?? []), raw ?? null, now(), id);
             q('update notes set used_in_plan = ? where chat_key = ? and kind = ? and used_in_plan is null').run(id, plan.chat_key, '聊');
             if (items.length) putIntimateProgress(plan.chat_key, intimateProgress, { planId: id, storyDay: plan.story_day });
@@ -1020,8 +1037,8 @@ export function openStore(file) {
         const plan = planById(planId);
         if (!plan || plan.status !== 'ready') throw Object.assign(new Error('plan_not_ready'), { status: 409 });
         tx(() => {
-            const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, anchor_pos, anchor_fp, updated_at, entry, place, goer, errand, origin, signpost, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
-            for (const m of items) ins.run(planId, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, storyDay + m.afterDays, at.pos, at.fp, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, ...cellValues(m));
+            const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, anchor_pos, anchor_fp, updated_at, entry, place, goer, errand, origin, signpost, cause_ref, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
+            for (const m of items) ins.run(planId, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, storyDay + m.afterDays, at.pos, at.fp, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, causeFor(plan.chat_key, m.cause) ? JSON.stringify(m.cause) : null, ...cellValues(m));
             if (items.length) putIntimateProgress(plan.chat_key, intimateProgress, { planId, storyDay, at });
         });
         return menuOf(plan.chat_key);
@@ -1059,14 +1076,15 @@ export function openStore(file) {
             .filter(s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && replied(s));
         for (const m of items) {
             readCells(m);
+            m.cause = causeFor(chatKey, fromJson(m.cause_ref)) ? fromJson(m.cause_ref) : null;
             if (all) { const stopped = steps.filter(s => s.item_id === m.id && s.why?.startsWith('/停：')).at(-1); if (stopped) m.intimate_stop = { pos: stopped.pos, fp: stopped.fp }; }
-            Object.assign(m, { status: 'waiting', pocket_day: null, pocket_pos: null, pocket_by: null, settled_pos: null, settled_by: null, held_by: null, held_pos: null, why: null });
+            Object.assign(m, { status: 'waiting', pocket_day: null, pocket_pos: null, pocket_by: null, settled_pos: null, settled_by: null, held_by: null, held_pos: null, why: null, early_why: null });
             // settled_pos：有了结果（拿出来了、用上了、沉了、撤了）的那一步在哪条消息上——局势推演按它找"刚有了结果的事"
             // offered：这一件递给了谁（N-277），不改它在哪一步
             // pocket_by：谁把它放进口袋的（"引子"＝活动快到了替它挂上门的；门上按它判引子自己到点没，T073）
             for (const s of steps) if (s.item_id === m.id && s.status === 'offered') Object.assign(m, { held_by: s.by_name, held_pos: s.pos });
             else if (s.item_id === m.id && s.status === KEPT) m.kept_pos = s.pos;
-            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_by: null, held_by: null, held_pos: null, settled_pos: null, settled_by: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_by: s.by_name ?? null } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_by: s.by_name ?? null } : {});
+            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_by: null, held_by: null, held_pos: null, settled_pos: null, settled_by: null, early_why: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_by: s.by_name ?? null, early_why: s.by_name === '兴头' ? s.why ?? null : m.early_why } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_by: s.by_name ?? null } : {});
             // offered_n（T077）：递出过几次——按不同消息位置去重（同一楼换人开口、左滑重来只算一次）；没递过的件不加这个字段
             // 退回 waiting 的那一步（/停 撤回、重新规划）把这件重新算起：撤掉的递送没成，不计
             const offeredAt = new Set();
