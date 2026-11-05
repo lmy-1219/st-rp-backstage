@@ -288,7 +288,8 @@ export function doorHtml(items = [], lit = null, escape = s => String(s ?? ''), 
         const ways = solo
             ? `<span class="rpe-door-reason">要让${escape(item.who)}进场：把这个聊天转成群聊、把${escape(item.who)}拉进群</span>`
             : (item.ways ?? []).map(way => `<button type="button" class="menu_button rpe-door-way" data-who="${escape(item.who)}" data-avatar="${escape(item.avatar ?? '')}" data-way="${escape(way)}">${escape(labels[way] ?? way)}</button>`).join('');
-        return `<div class="rpe-door-item${isLit ? ' rpe-door-lit' : ''}"><span class="rpe-door-who" title="${escape(item.label ?? '')}">${escape(item.who)} · ${escape(item.label ?? '')}</span>${ways}<button type="button" class="menu_button rpe-door-cancel" data-who="${escape(item.who)}">×</button></div>`;
+        const display = item.display ?? item.label ?? '';
+        return `<div class="rpe-door-item${isLit ? ' rpe-door-lit' : ''}"><span class="rpe-door-who" title="${escape(display)}">${escape(item.who)} · ${escape(display)}</span>${ways}<button type="button" class="menu_button rpe-door-cancel" data-who="${escape(item.who)}">×</button></div>`;
     }).join('');
     const note = lit ? `<span class="rpe-door-reason">${escape(reason[lit.by] ?? '')}</span>` : '';
     return `<div class="rpe-door-title">外头的人${note}</div><div class="rpe-door-list">${blocks}</div>`;

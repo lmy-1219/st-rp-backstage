@@ -244,16 +244,16 @@ async function refreshDoor() {
     const chatKey = state.chatKey;
     try {
         const r = await api('door', { chatKey: state.chatKey, present, recentUser });
-        if (state.chatKey) { state.door = r; if (solo && state.chatKey === chatKey) noticeSoloDoor(r.items ?? []); }
+        if (state.chatKey) { state.door = r; if (solo && state.chatKey === chatKey) noticeSoloDoor(r.items ?? [], r.lit); }
     } catch { state.door = { items: [], lit: null }; }
     render();
 }
 // 单聊门上某人第一次到时候了：弹一次提示；同一件只弹一次，记在聊天元数据里（换页面不重复弹）
-function noticeSoloDoor(items) {
+function noticeSoloDoor(items, lit) {
     const c = ctx(), meta = c.chatMetadata;
-    if (!meta || currentGroup(c)) return;
+    if (!meta || currentGroup(c) || !lit?.who) return;
     const seen = Array.isArray(meta.rpeDoorNoticed) ? meta.rpeDoorNoticed : [];
-    const fresh = freshDoorNotices(items, seen);
+    const fresh = freshDoorNotices(items.filter(item => item.who === lit.who), seen);
     if (!fresh.length) return;
     meta.rpeDoorNoticed = [...seen, ...fresh.map(x => x.key)].slice(-DOOR_NOTICE_KEEP);
     c.saveMetadata?.()?.catch?.(() => {});

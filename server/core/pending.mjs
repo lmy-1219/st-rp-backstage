@@ -229,7 +229,8 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     };
     // 版本里带上口袋各件的状态（进口袋、用上了是菜单日志变的，条数不变）
     const seqHash = createHash('sha1').update(messages.map(m => `${m.pos}:${m.fp}:${m.boardMark ?? ''}`).join('|')).digest('hex').slice(0, 16);
-    const key = JSON.stringify({ chatKey, seqHash, time: [timeline?.today, timeline?.part], records: [visible.length, visible.at(-1)?.id ?? null], menu: menu.map(m => `${m.id}:${m.status}:${m.held_by ?? ''}`).join(','), meta, anchor, present, recentUser });
+    const rowsHash = createHash('sha1').update((timeline?.rows ?? []).map(r => `${r.pos}:${r.day}:${r.part ?? ''}`).join('|')).digest('hex').slice(0, 16);
+    const key = JSON.stringify({ chatKey, seqHash, time: [timeline?.timeView ?? 'firm', timeline?.today, timeline?.part, rowsHash], records: [visible.length, visible.at(-1)?.id ?? null], menu: menu.map(m => `${m.id}:${m.status}:${m.held_by ?? ''}`).join(','), meta, anchor, present, recentUser });
     if (pendingCache.has(key)) {
         const value = pendingCache.get(key); pendingCache.delete(key); pendingCache.set(key, value); return value;
     }

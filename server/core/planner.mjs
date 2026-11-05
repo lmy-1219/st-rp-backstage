@@ -1265,11 +1265,11 @@ export function stepPocket(menu, { today, dayOf = null, at = 0, firm = null, hol
     // 但递出去好几次（offerMax）都没人接的，这层豁免不再成立（T077，试玩局一件"说好的相关"的事被挑了 87 次、前台一次没演，口袋里待了 147 楼）：照常按上面的时间沉
     const worn = m => (m.offered_n ?? 0) >= p.offerMax;
     for (const m of menu.filter(m => m.status === 'pocket' && !out(m) && stale(m) && !held(m) && (!keep(m) || worn(m)))) changes.push({ id: m.id, status: 'sunk', ...(keep(m) ? { why: `递了 ${m.offered_n} 次没人接，不再等说好的那件事` } : {}) });
-    const gate = pocketGate(menu, { today, at, hold, pace: p, stacked, contentTier, timeScale, gone,
+    const gate = pocketGate(menu, { today: sink.today, at, hold, pace: p, stacked, contentTier, timeScale, gone,
         statusOf: m => changes.find(c => c.id === m.id)?.status ?? m.status });
     for (const m of gate.ready) {
         if (!gate.canEnter(m.id)) continue;
-        changes.push({ id: m.id, status: 'pocket', pocket_day: today });
+        changes.push({ id: m.id, status: 'pocket', pocket_day: sink.today });
         gate.take(m);
         // 镜头外、跟约定和当下后续的旧豁免仍然照常。
         if (entryOf(m) !== '镜头外' && !hold && !now(m) && gate.full()) break;

@@ -30,7 +30,8 @@ import { voiceLibrary, voiceName } from './fresh.mjs';
 import { planRoster, normalizeRelations, toText as relationsText, fromText as relationsFromText, currentLines, personOf } from './relations.mjs';
 import { boardFor } from './board.mjs';
 import { pendingFor, playerView } from './pending.mjs';
-import { doorFor } from './door.mjs';
+import { doorFor, capFresh } from './door.mjs';
+import { occasionOf, WHY as OCCASION_WHY } from './occasion.mjs';
 import { cameraShouldSpeak } from './camera-turn.mjs';
 import { promptOptionsFor, promptEnvironmentFor, allowedTiers, slotTable, setGlobalPromptPack, DEFAULT_PACK } from './prompt-slots.mjs';
 import { planSystem, withIntimate, intimatePair } from './planner.mjs';
@@ -116,6 +117,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
     };
     const setupNames = storyId => [...store.getCast(storyId).filter(e => e.role !== '不用').map(e => e.name), ...(store.playerNames?.(storyId) ?? [])];
     const withPack = chatKey => { const base = settings?.() ?? {}; const p = base.packOf?.(chatKey) ?? null; return { ...base, economy: { table: p?.table ?? null }, world: { seeds: p?.seeds ?? null, anchors: p?.anchors ?? null, facts: p?.facts ?? null }, factions: { net: p?.factions ?? null } }; };
+    worker?.setOnCommitted?.(chatKey => advance(store, records, chatKey, withPack(chatKey)));
     const draftRelations = (chat, cards) => {
         const service = settings().relationsDrafts;
         if (service) void service.start({ chatKey: chat.key, cards: Array.isArray(cards) ? cards : [] }).catch(() => {});
@@ -358,13 +360,16 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const chatKey = str(b.chatKey, 'chatKey');
             store.requireChat(chatKey);
             const messages = store.currentMessages(chatKey);
-            const items = doorFor(store, records, chatKey, { present: strings(b.present, 60, 200), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', timeline: timelineFor(store, records, chatKey, messages) }).items;
             const last = messages.at(-1);
+            let mark = null;
+            try { const v = JSON.parse(store.getMeta(`door_lit:${chatKey}`) ?? 'null'); if (v && (last?.pos ?? 0) - v.pos <= 4 && messages.find(m => m.pos === v.pos)?.fp === v.fp) mark = v; } catch {}
+            const items = capFresh(store, records, chatKey, { present: strings(b.present, 60, 200), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', timeline: timelineFor(store, records, chatKey, messages), litWho: ['narrator', 'named'].includes(mark?.by) ? mark.who : null });
+            const occasion = occasionOf(messages), holdReason = occasion ? `场合不合适：${OCCASION_WHY[occasion]}` : null;
             let lit = null;
-            try { const v = JSON.parse(store.getMeta(`door_lit:${chatKey}`) ?? 'null'); if (v && (last?.pos ?? 0) - v.pos <= 4 && messages.find(m => m.pos === v.pos)?.fp === v.fp && items.some(i => i.who === v.who)) lit = v; } catch {}
-            if (!lit) { const first = items.find(i => i.ready && i.known); if (first) lit = { who: first.who, way: first.ways[0] ?? '他过来', by: 'program' }; }
+            if (mark && (!holdReason || mark.by !== 'program') && items.some(i => i.who === mark.who && (mark.by !== 'program' || i.ready))) lit = mark;
+            if (!lit && !holdReason) { const first = items.find(i => i.ready && i.known); if (first) lit = { who: first.who, way: first.ways[0] ?? '他过来', by: 'program' }; }
             // 由头（reason，后台排的那件的原话）、他递过的那条的应答（sent）留在后台给进场那份用，扩展只要 label、ways
-            return { items: items.map(({ reason, sent, ...item }) => item), lit };
+            return { items: items.map(({ reason, sent, ...item }) => item), lit, holdReason };
         },
         // 停住时的「接下来」路标卡（T074，core/guide.mjs）。manual＝手动按钮（随时能看，不看停住、不看场面）；否则是自动弹那次问（看停住、看场面，弹了就记一笔）。
         // 卡不是聊天消息：这里只算要给玩家看的几行，不写进 chat、不进任何提示词。
@@ -622,10 +627,10 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         // 剧情日期的小标签（N-265）：每条都有——日期、从哪天算的第几天、时段、当天天气；拿不准的、用户点过的另标。只是界面装饰，扩展挂在消息名字旁边。
         'POST /v1/timeline': b => {
             const chatKey = str(b.chatKey, 'chatKey');
-            const tl = timelineFor(store, records, chatKey);
+            const seenTimeline = timelineFor(store, records, chatKey, store.currentMessages(chatKey), { seen: true });
             // 尺度（章程 G2）：扩展改日期的那个小窗按这一局的单位和时段写（"从这条起算新的一年"、时段选春夏秋冬）
-            return { labels: labelsOf(tl, tl.start, { seed: tl.seed, notes: store.stateNotesOf?.(chatKey) ?? [] }), today: tl.today, hasDate: !!tl.start?.日期, since: sinceWord(tl.start),
-                scale: { unit: tl.scale.unit, word: tl.scale.word, ord: tl.scale.ord, parts: [...tl.scale.parts] } };
+            return { labels: labelsOf(seenTimeline, seenTimeline.start, { seed: seenTimeline.seed, notes: store.stateNotesOf?.(chatKey) ?? [] }), today: seenTimeline.today, hasDate: !!seenTimeline.start?.日期, since: sinceWord(seenTimeline.start),
+                scale: { unit: seenTimeline.scale.unit, word: seenTimeline.scale.word, ord: seenTimeline.scale.ord, parts: [...seenTimeline.scale.parts] } };
         },
         'POST /v1/boards': b => {
             const chatKey = str(b.chatKey, 'chatKey');

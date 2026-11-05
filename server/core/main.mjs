@@ -64,7 +64,7 @@ import { LORE_SYSTEM, lorePrompt, parseLore, LORE_VERSION, loreBatch, loreTried,
 import { createMaterials, createRelationsDrafts, LOOK_SYSTEM, lookPrompt, parseLook, RELATIONS_SYSTEM } from './materials.mjs';
 import { weekOf, rollLong, activeLong, LONG_SYSTEM, longPrompt, parseLong } from './drift.mjs';
 import { briefSection } from './setup.mjs';
-import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stateBlock, timelineFor, timeMarksFor, settledBy, CAMERA_NAME, scaleFor, paceFor, pastNodesOf, RECENT_NODES, sofarOf } from './slot.mjs';
+import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stateBlock, timelineFor, settledBy, CAMERA_NAME, scaleFor, paceFor, pastNodesOf, RECENT_NODES, sofarOf } from './slot.mjs';
 import { paceCap } from './tempo.mjs';
 import { withTaste } from './taste.mjs';   // 模型口味层：规划、检查的通用底后面按型号补几句口味（用户 10/15）
 import { planSystem } from './planner.mjs';
@@ -74,7 +74,7 @@ import { renderPacket } from './handoff.mjs';
 import { dayNumber } from './timeline.mjs';
 import { EPISODE_SYSTEM, episodePrompt, parseEpisodes, spanOf, coveredUpTo } from './episodes.mjs';
 import { storyDigest, SOFAR_SYSTEM, sofarPrompt, parseSofar } from './planner.mjs';
-import { relativeDay, dayIndex } from './recall.mjs';
+import { relativeDay } from './recall.mjs';
 import { createModelClient, modelTally } from './model.mjs';
 import { createServer, VERSION } from './server.mjs';
 import { wantedProxy, proxyActive, proxyEnv } from './proxy.mjs';
@@ -825,37 +825,43 @@ async function settleAway({ chatKey, who, avatar = null, reason = '换时段', u
         if (enteredSince(unanswered.since.pos, { who, avatar, messages, anchors, arrivals })) return { ok: true, skipped: true, entered: true };
     }
     const tl = timelineFor(store, records, chatKey, messages);
+    const firm = { ...tl, today: tl.firmToday, part: tl.firmPart, rows: tl.firmRows, dayOf: tl.firmDayOf };
     let settled = null;
     try { settled = JSON.parse(store.getMeta(`settled:${chatKey}:${who}`) ?? 'null'); } catch {}
     if (!unanswered && settled && settled.fp && messages.some(m => m.pos === settled.pos && m.fp === settled.fp)
-        && settled.day === tl.today && settled.part === tl.part) return { ok: true, skipped: true, idempotent: true };
+        && settled.day === firm.today && settled.part === firm.part) return { ok: true, skipped: true, idempotent: true };
     const busyKey = `${chatKey}\u0001${who}`;
     if (settling.has(busyKey)) return { ok: true, skipped: true, busy: true };
     settling.add(busyKey);
-    try { return await settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unanswered }); } finally { settling.delete(busyKey); }
+    try { return await settleOnce({ chat, chatKey, messages, last, tl: firm, who, avatar, unanswered }); } finally { settling.delete(busyKey); }
 }
 async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unanswered }) {
     // 开局单里开场不在场的那份去向也算（opening.mjs）：结算写回时一起存下，之后就是记下的去向
     const plans = awayPlansOf(store, chatKey, { messages });
-    const plan = Object.values(plans).find(p => p?.who === who || p?.avatar === avatar);
     const board = boardFor(store, records, chatKey, { present: [], timeline: tl });
-    const person = board.people.find(p => p.name === who);
+    const rawRel = store.relationsOf?.(chat.story_id), castRows = store.getCast(chat.story_id) ?? [], roster = castRows.map(e => e.name);
+    const rel = rawRel ? normalizeRelations(rawRel) : null;
+    const sameP = (a, b) => sameName(a, b, roster) || (!!rel && !!personOf(rel, a, roster) && personOf(rel, a, roster) === personOf(rel, b, roster));
+    const plan = Object.values(plans).find(p => sameP(p?.who, who) || (!!avatar && p?.avatar === avatar));
+    const person = board.people.find(p => sameP(p.name, who) && p.status !== 'never') ?? board.people.find(p => sameP(p.name, who));
     const pending = pendingFor(store, records, chatKey, { present: [], timeline: tl });
     const errands = pending.items.filter(i => i.owner === who && i.kind === '去办' && ['排着', '到了'].includes(i.status));
     const waits = pending.items.filter(i => i.owner === who && i.kind === '等回音' && i.status === '等着');
+    const holder = r => castRows.find(c => c.avatar === r.holder)?.name ?? String(r.holder ?? '').replace(/^name:/, '');
+    const seenInRecords = records.visible(chatKey).some(r => [r.holder_name, r.holderName, holder(r), ...(r.audience ?? [])].some(n => sameP(n, who)));
+    const seenOnBoard = board.people.some(p => sameP(p.name, who) && (p.status !== 'never' || p.since != null));
+    const neverHere = !seenOnBoard && !seenInRecords && !plan && person?.status === 'never' && person.since == null;
     const left = person?.since ?? plan?.at ?? last.pos;
     const row = tl.rows.find(r => r.pos === left - 1) ?? tl.rows.find(r => r.pos === left) ?? null;
     const span = awaySpan(row, tl.rows.at(-1) ?? { day: tl.today, part: tl.part }, tl.scale);
     const clean = stripper(getConfig().strip);
-    const leaving = messages.filter(m => m.pos >= left - 2 && m.pos < left && !m.hidden).map(m => `${m.speaker === 'narrator' ? '旁白' : (m.name ?? m.speaker)}：${clean(m.text).slice(-300)}`).join(' ／ ');
+    const leaving = neverHere ? '' : messages.filter(m => m.pos >= left - 2 && m.pos < left && !m.hidden).map(m => `${m.speaker === 'narrator' ? '旁白' : (m.name ?? m.speaker)}：${clean(m.text).slice(-300)}`).join(' ／ ');
     // 读卡写的"兴趣和习惯"（不是整张卡的原文）
     const profile = store.profileOf?.(avatar)?.text ?? '';
-    const rawRel = store.relationsOf?.(chat.story_id), roster = (store.getCast(chat.story_id) ?? []).map(e => e.name);
-    const rel = rawRel ? normalizeRelations(rawRel) : null, userName = [...messages].reverse().find(m => m.is_user)?.name ?? '玩家';
+    const userName = [...messages].reverse().find(m => m.is_user)?.name ?? '玩家';
     const tie = rel ? personOf(rel, who, roster)?.关系?.find(r => sameName(r.对, userName, roster))?.是 ?? '' : '';
     // 没人接的那一回：他怎么找的、等了多久；他和别人约好的事；玩家此刻在哪、身边有谁；别的有卡的人此刻在哪（他找过去会不会碰上约他的人）
     // 名字照关系表认（记账里写"V"、名册里是全名）：不然他和玩家两人之间的小约定会当成有第三个人
-    const sameP = (a, b) => sameName(a, b, roster) || (!!rel && !!personOf(rel, a, roster) && personOf(rel, a, roster) === personOf(rel, b, roster));
     // 镜头外接着办（用户 10/12，N-363：角色没有自己的驱动，和没后台时一样）：原来没有待办（去办、等回音）就不结算；
     // 他是主角团的人、最新一份规划里有他的"下一步"、这一格时间里还没替他按打算推过，也跑一次，把他自己的打算交给结算。
     // 每人每格时间至多一次（crew.crewPushDue），别多花钱；不是主角团的人照旧
@@ -901,13 +907,13 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
         store.setMeta(`away_plan:${chatKey}`, JSON.stringify(Object.fromEntries(Object.entries(plans).filter(([, p]) => !p?.seed || p.who === who))));
         // 刚走没多久（同一格里，span 以"同一"开头）、不是没人接那种、他走时说的事还没到办的时候：结算说要联系也先按下——记成他心里的，不挂门上
         // （试玩 10/11：他下午刚道别说明天复查，过了一个时段就又发消息问药劲散没散；两条消息前才分开，不像人）
-        const justLeft = !unanswered && /^同一/.test(span) && !(got.errands ?? []).some(e => e.result === '办了');
+        const justLeft = !unanswered && (neverHere || (/^同一/.test(span) && !(got.errands ?? []).some(e => e.result === '办了')));
         // 不为问身子上门（用户 10/12，方案 叙事节奏与防棘轮 第四节；body.mjs）：要联系的来意是问她身子的，而她最近几条没提身子（或说已经好了）——
         // 照上面"刚分开先按下"的做法记成他心里惦记的，不挂门上；没人接的那一回照旧由下面管
         const gate = bodyGate({ messages, userName });
         const herAliases = rel ? (p => (p ? [p.名, ...(p.又名 ?? [])].filter(Boolean) : []))(personOf(rel, userName, roster)) : [];
         const bodyHold = !unanswered && holdBodyContact({ contact: got.contact, gate, userName, aliases: herAliases });
-        if (got.contact?.way !== '不' && justLeft) records.addDerived({ storyId: chat.story_id, fp, type: '心里', text: `${who}想过要${got.contact.way === '上门' ? '过去一趟' : got.contact.way === '电话' ? '打个电话' : '发条消息'}（${String(got.contact.text ?? '').slice(0, 80)}），想想刚分开没多久，先按下了`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+        if (got.contact?.way !== '不' && justLeft) records.addDerived({ storyId: chat.story_id, fp, type: '心里', text: `${who}想过要${got.contact.way === '上门' ? '过去一趟' : got.contact.way === '电话' ? '打个电话' : '发条消息'}（${String(got.contact.text ?? '').slice(0, 80)}），${neverHere ? '先按下了' : '想想刚分开没多久，先按下了'}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
         else if (bodyHold) records.addDerived({ storyId: chat.story_id, fp, type: '心里', text: heldContactText({ who, way: got.contact.way, userName, gate }), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
         else if (got.contact?.way !== '不') store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way: got.contact.way, text: got.contact.text, at: last.pos, fp, used: false }));
         // 没人接的那一回（waiting.mjs）：再找（发消息、打电话、找上门）→ 门上换成这一回的；放下 → 门上那一项收起（挂在这一条上，删回去就回来）
@@ -1786,9 +1792,8 @@ async function runCloseCheck({ chatKey }) {
     if (!chat.enabled) return { ran: false };
     const messages = store.currentMessages(chatKey), lastPos = messages.at(-1)?.pos ?? 0;
     const visible = records.visible(chatKey);
-    const dayOf = dayIndex([...visible.filter(r => r.type === '时间'), ...timeMarksFor(store, records, chatKey, messages)], lastPos, scaleFor(store, chatKey));
-    const today = dayOf(lastPos + 0.5);
-    const tl = timelineFor(store, records, chatKey, messages), part = tl.part ?? null;
+    const tl = timelineFor(store, records, chatKey, messages), dayOf = tl.dayOf;
+    const today = tl.today, part = tl.part ?? null;
     const key = `close_check:${chatKey}`;
     let done = null;
     try { done = JSON.parse(store.getMeta(key) ?? 'null'); } catch {}

@@ -172,7 +172,8 @@ const HEAD = {
 export const ORDER = ['today', 'late', 'met', 'overdue', 'eve', 'lapse'];
 // hold＝玩家眼下累着、难受：今天、过了时候的那两组合成一组"先放着"的口气；hold='drop' 时干脆不给（Q 实测：哪怕写着"先放着"，
 // 只要约定还在眼前，他照样倒数、下通牒——他本来就记得，不提才是让路）
-export function promiseLines(stages, { name, userName = '对方', today, when = d => `${d} 天前`, same = (a, b) => a === b, hold = false }) {
+export function promiseLines(stages, { name, userName = '对方', seenToday, when = d => `${d} 天前`, same = (a, b) => a === b, hold = false, ...legacy }) {
+    seenToday ??= legacy.today;
     const out = [];
     for (const stage of ORDER) {
         if (hold && stage === 'late') continue;
@@ -186,7 +187,7 @@ export function promiseLines(stages, { name, userName = '对方', today, when = 
         out.push((hold && stage === 'today' ? HEAD.hold : HEAD[stage])(name, userName), ...rows.slice(0, 3).map(p => {
             const at = p.due?.part && ['today', 'late', 'eve'].includes(stage) ? `${p.due.part}：` : '';
             const who = [...new Set([...p.doers, ...p.with])].join('、');
-            return `· ${at}${retime(p.r.text, p.saidDay, today).replace(/[。．.]+$/, '')}（${who}；${when(today - p.saidDay)}说的）`;
+            return `· ${at}${retime(p.r.text, p.saidDay, seenToday).replace(/[。．.]+$/, '')}（${who}；${when(seenToday - p.saidDay)}说的）`;
         }));
     }
     return out;

@@ -302,7 +302,8 @@ export function boardFor(store, records, chatKey, { anchor = null, present = nul
     const marks = messages.map(message => message.boardMark);
     // 消息序列（删改稿、左滑换版都变）和时间进版本，但只放一个哈希，键别有几千字
     const seqHash = createHash('sha1').update(messages.map(m => `${m.pos}:${m.fp}`).join('|')).digest('hex').slice(0, 16);
-    const key = `${chatKey}|${seqHash}|${timeline?.today ?? ''}:${timeline?.part ?? ''}|${anchor ?? ''}|${cacheVersion(store, chat, chatKey, presentList, recentUser, marks)}`;
+    const rowsHash = createHash('sha1').update((timeline?.rows ?? []).map(r => `${r.pos}:${r.day}:${r.part ?? ''}`).join('|')).digest('hex').slice(0, 16);
+    const key = `${chatKey}|${seqHash}|${timeline?.timeView ?? 'firm'}:${timeline?.today ?? ''}:${timeline?.part ?? ''}:${rowsHash}|${anchor ?? ''}|${cacheVersion(store, chat, chatKey, presentList, recentUser, marks)}`;
     if (cache.has(key)) {
         const value = cache.get(key);
         cache.delete(key);

@@ -42,15 +42,23 @@ const SKIP = new RegExp(`(?:^|[。！？!?…\\n（(）)】\\]]\\s*)(第二天|�
 const SKIP_COMMA = new RegExp(`[，,；;]\\s*(第二天|次日|隔天|翌日|第[二三四五六七八九十]天|第二年|次年|翌年|来年|次月|${SPAN}(?:之|以)?后|过了\\s*${SPAN})(${TIME_OF_DAY}|\\s*(?:[，,、：:。]|$))([^。！？!?\\n]*)`);
 const NIGHT = /(一夜过去|天亮了)\s*[。，,！!…]/;
 const PLAN = /再|要|会|打算|准备|到时|吧|见|咱们去|我们去/;
-export function timeSkipIn(text) {
+const PAST_REF = /那天|头一晚|那次|当时|上回|记得|想起|回忆|曾经/;
+const PAST_DONE = /(?:去|见|来|住|睡|待)过/;
+const NIGHT_PARTS = new Set(['晚上', '深夜', '凌晨', '夜里']);
+const pastAt = (text, index) => {
+    const clauses = text.slice(Math.max(0, index - 100), index).split(/[。！？!?\n]/);
+    return PAST_REF.test(clauses.slice(-2).join('')) || PAST_DONE.test(clauses.at(-1) ?? '');
+};
+export function timeSkipIn(text, { previousPart = null } = {}) {
     const t = String(text ?? '').replace(QUOTED, '');
     const m = SKIP.exec(t);
-    if (m && !(/[，,、：:]/.test(m[2]) && PLAN.test(m[3]))) return m[1].replace(/几/g, '三');
+    if (m && !pastAt(t, m.index) && !(/[，,、：:]/.test(m[2]) && PLAN.test(m[3]))) return m[1].replace(/几/g, '三');
     const c = SKIP_COMMA.exec(t);
     // 带上紧跟的时段（"第三天上午"），跨天那条的时段照它
-    if (c && !PLAN.test(c[3])) return `${c[1]}${/[，,、：:。]|^\s*$/.test(c[2]) ? '' : c[2].replace(/^的/, '')}`.replace(/几/g, '三');
+    if (c && !pastAt(t, c.index) && !PLAN.test(c[3])) return `${c[1]}${/[，,、：:。]|^\s*$/.test(c[2]) ? '' : c[2].replace(/^的/, '')}`.replace(/几/g, '三');
     const n = NIGHT.exec(t);
-    return n ? n[1] : null;
+    if (n && !pastAt(t, n.index) && (NIGHT_PARTS.has(previousPart) || (n[1] === '一夜过去' && !previousPart))) return n[1];
+    return null;
 }
 
 // 每条消息位置 → 第几天（从 0 起）。只看看得见的"时间"记录；

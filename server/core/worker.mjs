@@ -14,6 +14,8 @@ const MAX_FAILURES = 3;
 // extractor.provider = 'window' 时一律交给窗口（测试期不走中转）。交回的回答和模型的走同一套核对。
 export function createWorker({ store, records, getConfig, clientFactory = createModelClient, log = () => {}, intervalMs = 20000, handoffs = null }) {
     let busy = false, timer = null;
+    let onCommitted = null;
+    const afterCommit = async chatKey => { try { await onCommitted?.(chatKey); } catch (error) { log(`advance after extract ${chatKey}: ${error.message}`); } };
     const lastError = new Map();   // 记账出错提示按窗口记（N-441/D-260）：A 出错不影响 B 的 plan().lastError
     const startedAt = new Date().toISOString();   // 失败次数只算这次启动以后的：改了代码重启后给坏段落一次新机会
 
@@ -131,6 +133,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                 const r = applyReply({ records, config, chat, window, prepared, jobId, raw: text });
                 markShown(meta.chatKey, r.shown, r.voided);
                 noteFaces(chat);
+                void afterCommit(meta.chatKey);
                 kick();
                 return { accepted: r.accepted, rejected: r.rejected };
             } catch (error) {
@@ -182,6 +185,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                     const r = await runWindow({ records, client, config, chat, window, context, names, pocket: pocketOf(chatKey), known: knownOf(chat, names.user), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
                     markShown(chatKey, r.shown, r.voided);
                     noteFaces(chat);
+                    await afterCommit(chatKey);
                     results.push(r);
                 } catch (error) {
                     if (!handoffs || config.extractor.fallback === 'off' || !isTransient(error)) throw error;
@@ -231,5 +235,5 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     function start() { timer = setInterval(() => tick().catch(e => log(`tick: ${e.message}`)), intervalMs); }
     function stop() { clearInterval(timer); }
 
-    return { plan, setEnabled, run, retrySkipped, tick, kick, start, stop };
+    return { plan, setEnabled, run, retrySkipped, tick, kick, start, stop, setOnCommitted: callback => { onCommitted = callback; } };
 }

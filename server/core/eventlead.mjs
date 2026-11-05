@@ -170,7 +170,7 @@ export function moveEvent(store, records, chatKey, m, { to, at, roster = [], pla
 }
 
 // 折一次时（slot.advanceWorld，口袋走完之后）：该升级的升级，知道了却没去的给回音。menu＝套过日子（menuDays）的菜单；
-// today 认引子（临时认的跳转也算：门上、那一句都挂在消息上，删回去就撤）；firmToday 认"日子过了"（回音回不来，只按记下的日子）
+// 引子到点与回音都只按已确认的日子；挂到门上的入袋也会落库。
 export function eventStep(store, records, chatKey, { menu = [], messages = [], today, firmToday = today, here = [], roster = [], userName = null, player = [], node = null } = {}) {
     const last = messages.at(-1);
     if (!last || !menu.length) return { steps: [], echoes: [] };
@@ -181,9 +181,9 @@ export function eventStep(store, records, chatKey, { menu = [], messages = [], t
     const done = liveMap(read(store, LEADS_KEY(chatKey), {}), messages);
     const canDoor = lead => entryOf(lead) === '找上门' && !!tidy(lead.who) && lead.who !== WORLD && !herName(lead.who, player)
         && roster.some(e => hasCard(e) && same(e.name, lead.who)) && !here.some(n => same(n, lead.who));
-    const steps = leadSteps(menu, { today, node, done, moves, canDoor });
+    const steps = leadSteps(menu, { today: firmToday, node, done, moves, canDoor });
     for (const s of steps) {
-        if (s.how === 'door' && s.lead.status !== 'pocket') store.updateMenu(chatKey, s.lead.id, { status: 'pocket', pocket_day: today, by: '引子', why: '有日子的活动快到了，引子还没送到：挂到门上', at });
+        if (s.how === 'door' && s.lead.status !== 'pocket') store.updateMenu(chatKey, s.lead.id, { status: 'pocket', pocket_day: firmToday, by: '引子', why: '有日子的活动快到了，引子还没送到：挂到门上', at });
         done[s.event.id] = { how: s.how, lead: s.lead?.id ?? null, at };
         store.logEvent?.(chatKey, 'event_lead', { id: s.event.id, title: s.event.title, how: s.how, lead: s.lead?.title ?? null });
     }

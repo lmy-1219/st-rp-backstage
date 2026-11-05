@@ -8,18 +8,20 @@ import { sameName } from './setup.mjs';
 import { normalizeRelations, personOf, leaderOf } from './relations.mjs';
 import { absentPeople, pickContact } from './contacts.mjs';
 import { sharedMatter } from './matters.mjs';
-import { narrationOf, PARTS } from './timeline.mjs';
+import { narrationOf, canonicalPart, PARTS } from './timeline.mjs';
 // slot.mjs 也 import 这里（旁白那一格读名单）：两边都只在调用时用对方，循环引用没事
-import { timelineFor, playModeOf, menuDays } from './slot.mjs';
-import { enteredSince, emptySegment } from './landing.mjs';
+import { timelineFor, playModeOf, menuDays, paceFor } from './slot.mjs';
+import { enteredSince, emptySegment, arrivalLive } from './landing.mjs';
 import { leadReady } from './eventlead.mjs';
+import { PER_PART } from './knock.mjs';
+import { paceName, MID } from './tempo.mjs';
 
 // 被"引子"挂上门的那几件（活动快到了替它放进口袋，eventlead.eventStep）：按套过日子的菜单（和 eventStep 同一套）判引子自己到点没，
 // 没到点标 early——门上不算到时候了。别的进口袋路径（stepPocket、改期、局势当下）一概不动（T073）
 export function earlyLeads(store, menu = [], timeline = null) {
     if (!menu.some(m => m.status === 'pocket' && m.pocket_by === '引子')) return menu;
-    const days = menuDays(store, menu, timeline?.dayOf ?? null);
-    const today = timeline?.today;
+    const days = menuDays(store, menu, timeline?.firmDayOf ?? timeline?.dayOf ?? null);
+    const today = timeline?.firmToday ?? timeline?.today;
     return menu.map((m, i) => m.status === 'pocket' && m.pocket_by === '引子' && !leadReady(days[i], days, today) ? { ...m, early: true } : m);
 }
 
@@ -58,7 +60,12 @@ export function doorAt(input = {}) {
     const same = (a, b) => !!a && !!b && (sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names)));
     const menu = awaitingPockets(input.menu ?? [], { messages, isDone: input.isDone, record: input.record !== false, same });
     const last = messages.at(-1)?.pos ?? board.pos ?? 0;
-    const rowAt = pos => timeline.rows?.filter(r => r.pos <= pos).at(-1) ?? { day: timeline.today ?? board.time?.day ?? 0, part: timeline.part ?? board.time?.part };
+    const rowAt = pos => (timeline.firmRows ?? timeline.rows)?.filter(r => r.pos <= pos).at(-1) ?? { day: timeline.firmToday ?? timeline.today ?? board.time?.day ?? 0, part: timeline.firmPart ?? timeline.part ?? board.time?.part };
+    const parts = timeline.parts ?? PARTS, now = rowAt(last);
+    const earlyPart = m => {
+        const fit = /之前|以前|之后|以后|[前后不别或到]/.test(String(m.fit ?? '')) ? null : canonicalPart(m.fit, timeline.scale);
+        return !!fit && (parts.indexOf(now.part) < 0 || (now.day === m.ready_day && parts.indexOf(fit) > parts.indexOf(now.part)));
+    };
     const items = [];
     for (const card of roster.filter(e => hasCard(e) && e.name !== '旁白')) {
         const who = card.name;
@@ -93,9 +100,10 @@ export function doorAt(input = {}) {
         const add = (type, id, ready, known, label, reason, way = '', surface = '', at = null, extra = {}) => {
             const remote = remoteWay(way);
             const ways = remote ? [remote] : type === 'contact' ? ['他过来'] : defaults;
-            candidates.push({ who, avatar: card.avatar, known, ready, label, lines: known ? [...new Set([context, label].filter(Boolean))].slice(0, 2) : [label], ways, source: { type, id }, reason, ...(Number.isInteger(at) ? { at } : {}), ...extra });
+            const display = extra.display ?? (type === 'named' ? `玩家点名：${label}` : type === 'promise' ? `约定：${label}` : type === 'errand' ? `可能回来：${label}` : label);
+            candidates.push({ who, avatar: card.avatar, known, ready, label, display, lines: known ? [...new Set([context, label].filter(Boolean))].slice(0, 2) : [label], ways, source: { type, id }, reason, ...(Number.isInteger(at) ? { at } : {}), ...extra });
         };
-        for (const c of contacts) add('contact', c.source?.id ?? c.id, true, true, c.text, c.text, c.why || c.entry, '', c.since, c.earlier?.surface ? { earlier: c.earlier } : {});
+        for (const c of contacts) add('contact', c.source?.id ?? c.id, true, true, c.text, c.text, c.why || c.entry, '', c.since, { ...(c.earlier?.surface ? { earlier: c.earlier } : {}), display: `${c.entry === '电话来' ? '想打电话' : c.entry === '消息来' ? '想发消息' : '可能上门'}：${c.text}` });
         if (called || requested) add('named', request?.at ?? last, true, true, `玩家${called || '叫他过来'}`, `玩家${called || '叫他过来'}`, called);
         for (const p of promises) add('promise', p.source?.id ?? p.id, p.status === '到了', true, p.text, p.text);
         // 给玩家看的那句不带后台用语（排着、到了）：只说他去办什么，办得差不多了说一声
@@ -108,13 +116,14 @@ export function doorAt(input = {}) {
             if (m.status === 'shown' && way && !same(m.settled_by, who)) {
                 const phone = way === '打来电话';
                 add('pocket', m.id, true, false, `${phone ? '打来过电话' : '发来过消息'}：${String(m.surface || m.title || '').slice(0, 40)}`, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m),
-                    { sent: { id: m.id, way: phone ? '电话' : '消息', title: m.title ?? '', surface: m.surface ?? '', respond: m.respond ?? '' } });
+                    { display: `${phone ? '打来过电话' : '发来过消息'}：${m.surface || m.title || ''}`, sent: { id: m.id, way: phone ? '电话' : '消息', title: m.title ?? '', surface: m.surface ?? '', respond: m.respond ?? '' } });
                 continue;
             }
             const label = way === '打来电话' ? '来电' : way === '发来消息' ? '发来短讯' : /上门|来找|敲门/.test(`${m.title ?? ''}${m.surface ?? ''}`) ? '上门' : '可能会来';
             // 活动快到了、替它挂上门的引子，引子自己没到点（doorFor 标 early）；或递出后那条回复还没记账（标 awaiting，T081）：门上列着，但不算到时候了（T073/T081）
             // 门上的候选还没有发生：只给方式，不把有卡人的动作、私下打算或亲密原文预先交给镜头。
-            add('pocket', m.id, !m.early && !m.awaiting, false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m));
+            const displayWay = label === '来电' ? '想打电话' : label === '发来短讯' ? '想发消息' : label === '上门' ? '可能上门' : '可能来联系';
+            add('pocket', m.id, !m.early && !m.awaiting && !earlyPart(m), false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m), { display: `${displayWay}：${m.surface || m.title || ''}` });
         }
         if (reached) add('reach', reach.id ?? who, true, false, reach.matter ? `可能来联系：${reach.matter}` : '可能来联系', [...new Set([reach.matterText, reach.hook, ...(reach.threads ?? []).map(r => r.text)].filter(Boolean))].join('；'));
         candidates.sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b));
@@ -135,7 +144,42 @@ export function doorAt(input = {}) {
         if (k < 0) one.push(i);
         else if (better(i, one[k]) < 0) one[k] = i;
     }
-    return { items: one.filter(i => i.ready).sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b)).slice(0, 3) };
+    const ready = one.filter(i => i.ready);
+    const itemsReady = [...ready].sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b)).slice(0, 3);
+    const allReady = ready.sort((a, b) => rank(a) - rank(b) || (a.at ?? 0) - (b.at ?? 0));
+    return { items: itemsReady, allReady };
+}
+
+// 只在门对外展示与自动叩门挑人时限量；组格和等待记录仍读 doorFor 的原始 items。
+export function capFresh(store, records, chatKey, { present = [], recentUser = '', timeline = null, litWho = null } = {}) {
+    const messages = store.currentMessages(chatKey);
+    timeline ??= timelineFor(store, records, chatKey, messages);
+    const { items, allReady = items } = doorFor(store, records, chatKey, { present, recentUser, timeline });
+    const chat = store.requireChat(chatKey), roster = store.getCast?.(chat.story_id) ?? [];
+    const names = roster.map(c => c.name), relations = store.relationsOf?.(chat.story_id);
+    const rel = relations ? normalizeRelations(relations) : null;
+    const same = (a, b) => !!a && !!b && (sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names)));
+    const knocks = read(store, `knocks:${chatKey}`, []), arrivals = read(store, `arrivals:${chatKey}`, []);
+    const entries = [...knocks, ...arrivals];
+    let anchors = null;
+    try { anchors = JSON.parse(chat.anchors ?? 'null'); } catch {}
+    const last = messages.at(-1)?.pos ?? 0, parts = timeline.parts ?? PARTS;
+    const rowAt = pos => (timeline.firmRows ?? timeline.rows)?.filter(r => r.pos <= pos).at(-1) ?? { day: timeline.firmToday ?? timeline.today, part: timeline.firmPart ?? timeline.part };
+    const now = rowAt(last), came = [];
+    for (const e of entries) {
+        if (!Number.isFinite(Number(e?.at)) || Number(e.at) > last + 1 || partsBetween(rowAt(Number(e.at)), now, parts) !== 0
+            || !arrivalLive(e, messages, entries, anchors) || !e.who || came.some(w => same(w, e.who))) continue;
+        came.push(e.who);
+    }
+    const paceValue = paceFor(store, chatKey);
+    const pace = paceName(paceValue?.name ?? paceValue) ?? MID;
+    const limit = PER_PART[pace];
+    let used = came.length;
+    return allReady.map(i => {
+        if (!['pocket', 'contact', 'reach'].includes(i.source.type) || i.sent || same(i.who, litWho) || came.some(w => same(w, i.who))) return i;
+        if (used >= limit) return { ...i, ready: false };
+        used++; return i;
+    }).sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b) || (a.at ?? 0) - (b.at ?? 0));
 }
 
 const caches = new WeakMap();
@@ -158,6 +202,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const menu = awaitingPockets(earlyLeads(store, store.menuOf?.(chatKey) ?? [], timeline), { messages, isDone, record: planner?.record !== false, same: sameWho });
     const holds = read(store, `arrival_hold:${chatKey}`, []);
     const arrivals = read(store, `arrivals:${chatKey}`, []);
+    const knocks = read(store, `knocks:${chatKey}`, []);
     let anchors = null, members = [];
     try { anchors = chat.anchors ? JSON.parse(chat.anchors) : null; } catch {}
     try { members = (chat.members ? JSON.parse(chat.members) : []).map(m => ({ avatar: m?.avatar ?? null, name: m?.name ?? null, disabled: !!m?.disabled })); } catch {}
@@ -179,7 +224,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const justBack = store.absences?.(chatKey)?.at(-1)?.from_pos;
     const reach = contacts?.enabled === false || !recentUser || (justBack != null && lastPos - justBack <= 8) ? null
         : already ? reachable.find(p => p.person === already.person) : pickContact({ people: reachable, dayOf, lastPos, offers, minGap: contacts?.minGap ?? 16 });
-    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, members };
+    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, knocks, members, pace: paceFor(store, chatKey) };
     const key = `${chatKey}:${createHash('sha1').update(JSON.stringify(input)).digest('hex')}`;
     let cache = caches.get(store);
     if (!cache) caches.set(store, cache = new Map());
