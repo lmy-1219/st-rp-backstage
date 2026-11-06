@@ -131,6 +131,11 @@ export function createRoutes(store, { worker = null, records = null, assembler =
     // 开局单分格 API 没响应 ⇒ 整份稿子写成外援包交给窗口；交回的和模型答的走同一套核对，进草稿等用户核对。
     handoffs?.register('setup', {
         stale: meta => store.setupDraft(meta.storyId)?.id !== meta.setupId,
+        dropped: (meta, h) => {
+            const draft = store.setupDraft(meta.storyId);
+            if (draft?.id === meta.setupId && draft.status === 'handoff')
+                store.failSetup(draft.id, `${h.payload.why || draft.error || '开局单分格未完成'}；外援已丢弃`);
+        },
         retry: async meta => {
             if (!setupMaker) throw new Error('setup_no_model');
             const d = store.setupDraft(meta.storyId);
@@ -1142,7 +1147,15 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 }
             }
             if (!handoffs) return { pending: [], others: [], auto: false };
-            if (b.action === 'retry') { handoffs.retry(Number(b.id)).catch(() => {}); }
+            let retryResult = null;
+            if (b.action === 'retry') {
+                const h = store.handoffById(Number(b.id));
+                if (h?.kind === 'extract') {
+                    const pendingMessages = worker?.plan({ chatKey: h.chat_key }).pendingMessages ?? 0;
+                    retryResult = { ...await handoffs.retry(Number(b.id)), pendingMessages };
+                }
+                else handoffs.retry(Number(b.id)).catch(() => {});
+            }
             let dropped = null;
             if (b.action === 'drop') {
                 const id = Number(b.id), h = store.handoffById(id);
@@ -1168,6 +1181,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const withChars = h => ({ ...h, chars: renderPrompt(store.handoffById(h.id)).length });
             return {
                 ...(dropped ?? {}),
+                ...(retryResult ? { retryResult } : {}),
                 pending: pending.map(({ file, ...h }) => withChars(h)),
                 others: (others ?? []).map(g => ({ chatKey: g.chatKey, label: g.label, n: g.n, items: g.items.map(({ file, ...h }) => withChars(h)) })),
                 auto: chatKey ? store.getMeta(`handoff_autoretry:${chatKey}`) === '1' : false,

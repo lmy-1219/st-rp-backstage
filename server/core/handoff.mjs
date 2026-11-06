@@ -65,7 +65,24 @@ export function createHandoffs({ store, home, log = () => {} }) {
     const kinds = new Map();
     const file = id => path.join(dir, `${id}.md`);
     const remove = id => { try { fs.rmSync(file(id)); } catch {} };
-    const retrying = new Set();
+    // 上次进程在处理途中退出：extract 已记过的消息、plan 已提交的节点会由各自 stale 收掉。
+    // 其余 kind 的 stale 不认「已经写入但还没关包」，重放可能覆盖用户改过的内容。
+    // 注册各 kind 的业务回调之后再恢复，丢包才能走与用户手动丢弃相同的回退。
+    const recovering = store.db.prepare("select id, kind from handoffs where status = 'processing'").all();
+    if (recovering.length) queueMicrotask(() => {
+        for (const h of recovering) {
+            store.db.prepare("update handoffs set status = 'pending' where id = ? and status = 'processing'").run(h.id);
+            if (h.kind === 'extract' || h.kind === 'plan') {
+                log(`handoff ${h.id} (${h.kind}) recovered: pending`);
+            } else if (self.drop(h.id, 'recovery_unsafe')) {
+                log(`handoff ${h.id} (${h.kind}) recovery dropped: apply may repeat or stale is unavailable`);
+            }
+        }
+    });
+    const claim = id => store.db.prepare("update handoffs set status = 'processing' where id = ? and status = 'pending'").run(id).changes === 1;
+    const finish = (id, status, result) => store.db.prepare("update handoffs set status = ?, result = ?, closed_at = ? where id = ? and status = 'processing'")
+        .run(status, result == null ? null : JSON.stringify(result), new Date().toISOString(), id).changes === 1;
+    const release = id => store.db.prepare("update handoffs set status = 'pending' where id = ? and status = 'processing'").run(id);
     const self = {
         dir,
         register(kind, spec) { kinds.set(kind, spec); },
@@ -92,7 +109,7 @@ export function createHandoffs({ store, home, log = () => {} }) {
                 store.closeHandoff(h.id, 'dropped', { reason: 'stale' });
                 remove(h.id);
                 return false;
-            }).map(h => ({ id: h.id, kind: h.kind, title: TITLES[h.kind] ?? h.kind, chatKey: h.chat_key, why: h.payload.why, createdAt: h.created_at, file: file(h.id), retry: !!kinds.get(h.kind)?.retry, busy: retrying.has(h.id) }));
+            }).map(h => ({ id: h.id, kind: h.kind, title: TITLES[h.kind] ?? h.kind, chatKey: h.chat_key, why: h.payload.why, createdAt: h.created_at, file: file(h.id), retry: !!kinds.get(h.kind)?.retry, busy: false }));
             if (chatKey == null) return all;
             const keys = new Set(store.historyOf(chatKey).keys);
             const pending = all.filter(h => h.chatKey == null || keys.has(h.chatKey));
@@ -108,36 +125,43 @@ export function createHandoffs({ store, home, log = () => {} }) {
             if (h.status !== 'pending') throw Object.assign(new Error('handoff_closed'), { status: 409 });
             const spec = kinds.get(h.kind);
             if (!spec) throw Object.assign(new Error(`no_handler_${h.kind}`), { status: 500 });
-            if (spec.stale?.(h.payload.meta, h)) {
-                store.closeHandoff(h.id, 'dropped', { reason: 'stale' });
+            if (!claim(h.id)) throw Object.assign(new Error('handoff_closed'), { status: 409 });
+            try {
+                if (spec.stale?.(h.payload.meta, h)) {
+                    finish(h.id, 'dropped', { reason: 'stale' });
+                    remove(h.id);
+                    throw Object.assign(new Error('handoff_stale'), { status: 409 });
+                }
+                const result = await spec.apply(cleanAnswer(text), h.payload.meta, h);
+                if (!finish(h.id, 'done', result ?? null)) throw Object.assign(new Error('handoff_closed'), { status: 409 });
                 remove(h.id);
-                throw Object.assign(new Error('handoff_stale'), { status: 409 });
+                log(`handoff ${h.id} (${h.kind}) done`);
+                return result;
+            } catch (error) {
+                release(h.id);
+                throw error;
             }
-            const result = await spec.apply(cleanAnswer(text), h.payload.meta, h);
-            store.closeHandoff(h.id, 'done', result ?? null);
-            remove(h.id);
-            log(`handoff ${h.id} (${h.kind}) done`);
-            return result;
         },
         // 再走一次 API（面板的"再试一次"、自动重试）：成了就收掉这份包；没成包留着，接着等外援或下次再试。
         // spec.retry 返回 'done'（这次就做完了）或 'started'（交回原来那一步去重试，结果之后才知道，比如记账）。
         async retry(id) {
             const h = store.handoffById(Number(id));
-            if (!h || h.status !== 'pending') throw Object.assign(new Error('handoff_closed'), { status: 409 });
+            if (!h || h.status !== 'pending') return { status: 'handled', message: '已被处理' };
             const spec = kinds.get(h.kind);
             if (!spec?.retry) throw Object.assign(new Error('no_retry'), { status: 409 });
-            if (retrying.has(h.id)) return { status: 'busy' };
-            retrying.add(h.id);
+            if (!claim(h.id)) return { status: 'handled', message: '已被处理' };
             try {
                 const how = await spec.retry(h.payload.meta, h);
-                if (how === 'done' || how === 'started') { store.closeHandoff(h.id, 'done', { via: `retry_${how}` }); remove(h.id); }
+                if (how === 'done' || how === 'started') {
+                    if (!finish(h.id, 'done', { via: `retry_${how}` })) return { status: 'handled', message: '已被处理' };
+                    remove(h.id);
+                } else release(h.id);
                 log(`handoff ${h.id} (${h.kind}) retry: ${how}`);
                 return { status: how };
             } catch (error) {
+                release(h.id);
                 log(`handoff ${h.id} (${h.kind}) retry failed: ${error.message}`);
                 return { status: 'failed', error: error.message };
-            } finally {
-                retrying.delete(h.id);
             }
         },
         canRetry(kind) { return !!kinds.get(kind)?.retry; },

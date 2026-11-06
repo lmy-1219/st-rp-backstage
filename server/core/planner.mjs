@@ -1252,7 +1252,7 @@ export function stepPocket(menu, { today, dayOf = null, at = 0, firm = null, hol
     const changes = [];
     if (gone) for (const m of menu.filter(m => m.status === 'pocket' || m.status === 'waiting')) {
         const g = gone(m);
-        if (g?.status) changes.push({ id: m.id, status: g.status, why: g.why ?? '' });
+        if (g?.status) changes.push({ id: m.id, status: g.status, why: g.why ?? '', ...(Number.isFinite(g.basisDay) ? { basisDay: g.basisDay } : {}) });
     }
     const out = m => changes.some(c => c.id === m.id);
     const sink = firm ?? { today, dayOf };
@@ -1260,11 +1260,16 @@ export function stepPocket(menu, { today, dayOf = null, at = 0, firm = null, hol
     // 放了两个剧情日没人碰，或者放了 40 条消息还没拿出来（剧情停在同一天时按剧情日永远沉不下去），就沉底。
     // 等着有人去那儿的（到现场）、等着时间过去的（镜头外）：沉得慢些——5 个剧情日、100 条
     const slow = m => entryOf(m) !== '找上门';
-    const stale = m => sink.today - pocketDay(m) >= (slow(m) ? p.slow : p.sink) || (at && Number.isFinite(m.pocket_pos) && at - m.pocket_pos >= (slow(m) ? p.slowMsgs : p.sinkMsgs));
+    const agedByDay = m => sink.today - pocketDay(m) >= (slow(m) ? p.slow : p.sink);
+    const stale = m => agedByDay(m) || (at && Number.isFinite(m.pocket_pos) && at - m.pocket_pos >= (slow(m) ? p.slowMsgs : p.sinkMsgs));
     // 跟着一件还没办的约定的（"看完病一起去看房"之于看房时碰上的那件）：等那件事去办，不按时间沉（keep，试玩 10/5）
     // 但递出去好几次（offerMax）都没人接的，这层豁免不再成立（T077，试玩局一件"说好的相关"的事被挑了 87 次、前台一次没演，口袋里待了 147 楼）：照常按上面的时间沉
     const worn = m => (m.offered_n ?? 0) >= p.offerMax;
-    for (const m of menu.filter(m => m.status === 'pocket' && !out(m) && stale(m) && !held(m) && (!keep(m) || worn(m)))) changes.push({ id: m.id, status: 'sunk', ...(keep(m) ? { why: `递了 ${m.offered_n} 次没人接，不再等说好的那件事` } : {}) });
+    for (const m of menu.filter(m => m.status === 'pocket' && !out(m) && stale(m) && !held(m) && (!keep(m) || worn(m)))) {
+        const change = { id: m.id, status: 'sunk', ...(keep(m) ? { why: `递了 ${m.offered_n} 次没人接，不再等说好的那件事` } : {}) };
+        if (agedByDay(m) && !(at && Number.isFinite(m.pocket_pos) && at - m.pocket_pos >= (slow(m) ? p.slowMsgs : p.sinkMsgs))) Object.defineProperty(change, 'basisDay', { value: sink.today });
+        changes.push(change);
+    }
     const gate = pocketGate(menu, { today: sink.today, at, hold, pace: p, stacked, contentTier, timeScale, gone,
         statusOf: m => changes.find(c => c.id === m.id)?.status ?? m.status });
     for (const m of gate.ready) {
@@ -1339,11 +1344,11 @@ export function expiredPocket(m, ctx = {}) {
     const inPocket = m.status === 'pocket' && Number.isFinite(m.pocket_pos);
     const day = inPocket && dayOf ? dayOf(m.pocket_pos) : (inPocket && Number.isFinite(m.pocket_day) ? m.pocket_day : m.ready_day);
     const dayGone = Number.isFinite(day) && today > day;
-    if (t.kind === '当天') return dayGone ? { status: 'expired', why: '没赶上：那一天已经过了' } : null;
+    if (t.kind === '当天') return dayGone ? { status: 'expired', why: '没赶上：那一天已经过了', basisDay: today } : null;
     const what = String(t.what ?? '').trim();
     if (t.follow === '时间') {
         const p = PART_ORDER.indexOf(partIn(what)), nowPart = PART_ORDER.indexOf(partAt(at));
-        return dayGone || (p >= 0 && nowPart > p) ? { status: 'expired', why: `没赶上：${what || '那个时候'}已经过了` } : null;
+        return dayGone || (p >= 0 && nowPart > p) ? { status: 'expired', why: `没赶上：${what || '那个时候'}已经过了`, basisDay: today } : null;
     }
     // 跟着人、跟着地方：得先在过（进口袋那一下、递出去那一下），现在不在了才算过期；一直没到过的照旧按时间沉
     const seenAt = [inPocket ? m.pocket_pos : null, Number.isFinite(m.held_pos) ? m.held_pos : null].filter(Number.isFinite);

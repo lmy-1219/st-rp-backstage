@@ -117,6 +117,11 @@ export function createRelationsDrafts({ store, records, handoffs, getConfig, cli
     };
     handoffs?.register('relations-draft', {
         stale: meta => !current(meta),
+        dropped: (meta, h) => {
+            const draft = read(meta.storyId);
+            if (current(meta) && draft.status === 'handoff' && draft.handoff === h.id)
+                write(meta.storyId, { ...draft, status: 'failed', reason: `${draft.reason || h.payload.why || '关系表起草未完成'}；外援已丢弃` });
+        },
         apply: (text, meta) => finish(text, meta, { via: 'handoff' }),
         retry: async (meta, h) => { await generate(meta, h.payload.user); return view(meta.storyId)?.status === 'drafted' ? 'done' : 'failed'; },
     });

@@ -22,7 +22,7 @@ const LIVE = new Set(['waiting', 'pocket']);
 const tidy = t => String(t ?? '').trim();
 const bare = t => { const s = tidy(t); return s.match(/「([^」]+)」/)?.[1].trim() || s; };
 const read = (store, key, fallback) => { try { return JSON.parse(store.getMeta?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
-const liveAt = (at, messages = []) => !!at && messages.some(m => m.pos === at.pos && m.fp === at.fp);
+const liveAt = (at, messages = [], store = null, chatKey = null, basisDay = null) => !!at && messages.some(m => m.pos === at.pos && m.fp === at.fp) && (store?.basisLive?.(chatKey, at.pos, basisDay) !== false);
 export const LEADS_KEY = chatKey => `event_lead:${chatKey}`;
 export const MOVES_KEY = chatKey => `event_moves:${chatKey}`;
 export const ECHO_KEY = chatKey => `event_echo:${chatKey}`;
@@ -135,24 +135,24 @@ export function movesOf(store, chatKey, messages = null) {
     const list = read(store, MOVES_KEY(chatKey), []);
     if (!Array.isArray(list) || !list.length) return [];
     const msgs = messages ?? store.currentMessages?.(chatKey) ?? [];
-    return list.filter(x => x && liveAt(x.at, msgs));
+    return list.filter(x => x && liveAt(x.at, msgs, store, chatKey, x.basisDay));
 }
 // 改期：活动的日子挪到改到的那一格（menuDays 套上；时效按日子算，跟着挪）
 export function applyMoves(menu = [], moves = []) {
     if (!moves.length) return menu;
     return menu.map(m => { const mv = moves.filter(x => x.id === m.id).at(-1); return mv ? { ...m, ready_day: mv.to, moved: mv } : m; });
 }
-const liveMap = (obj, messages) => Object.fromEntries(Object.entries(obj && typeof obj === 'object' ? obj : {}).filter(([, e]) => e && liveAt(e.at, messages)));
+const liveMap = (obj, messages, store, chatKey) => Object.fromEntries(Object.entries(obj && typeof obj === 'object' ? obj : {}).filter(([, e]) => e && liveAt(e.at, messages, store, chatKey, e.basisDay)));
 const holderOf = (roster, who) => roster.find(e => hasCard(e) && sameName(e.name, who, roster.map(x => x.name)))?.avatar ?? `name:${who}`;
 
 // 他在镜头外照常办了：他那一条经历＋一件回音；活动本身收掉（过期），别再进口袋
 export function echoEvent(store, records, chatKey, m, { at, day, roster = [], userName = null, player = [], storyId = null, why = '' } = {}) {
     const { holder, record, item } = echoParts(m, { userName: userName ?? '玩家', player });
     if (holder && record && records?.addDerived && storyId) records.addDerived({ storyId, fp: at.fp, type: '做', text: record.slice(0, 240), holder: holderOf(roster, holder), holderName: holder, audience: [holder], about: holder,
-        keys: [m.title, m.place].map(tidy).filter(x => x.length >= 2), matter: { menu: m.id, title: m.title ?? '', entry: '镜头外', who: holder } });
+        keys: [m.title, m.place].map(tidy).filter(x => x.length >= 2), known: [{ basis: { pos: at.pos, fp: at.fp, day, menu: m.id, menuStatus: 'expired' } }], matter: { menu: m.id, title: m.title ?? '', entry: '镜头外', who: holder } });
     const plan = store.lastReadyPlan?.(chatKey);
-    if (plan && store.appendMenu) store.appendMenu(plan.id, [item], { storyDay: day, at });
-    if (LIVE.has(m.status)) store.updateMenu(chatKey, m.id, { status: 'expired', by: '程序', why: why || `${userName ?? '玩家'}没去：${holder ?? '那边'}照常办了`, at });
+    if (plan && store.appendMenu) store.appendMenu(plan.id, [item], { storyDay: day, at, source: { pos: at.pos, fp: at.fp, day, menu: m.id, menuStatus: 'expired' } });
+    if (LIVE.has(m.status)) store.updateMenu(chatKey, m.id, { status: 'expired', by: '程序', why: why || `${userName ?? '玩家'}没去：${holder ?? '那边'}照常办了`, basisDay: day, at });
     store.logEvent?.(chatKey, 'event_echo', { id: m.id, title: m.title, holder, why });
     return { holder, item };
 }
@@ -161,11 +161,11 @@ export function echoEvent(store, records, chatKey, m, { at, day, roster = [], us
 // 给牵头的人记一句改期的缘由
 export function moveEvent(store, records, chatKey, m, { to, at, roster = [], player = [], storyId = null, timeScale = DAY } = {}) {
     const moves = read(store, MOVES_KEY(chatKey), []);
-    store.setMeta?.(MOVES_KEY(chatKey), JSON.stringify([...(Array.isArray(moves) ? moves : []), { id: m.id, from: m.ready_day, to, at }].slice(-40)));
+    store.setMeta?.(MOVES_KEY(chatKey), JSON.stringify([...(Array.isArray(moves) ? moves : []), { id: m.id, from: m.ready_day, to, at, basisDay: to }].slice(-40)));
     if (m.status === 'pocket') store.updateMenu(chatKey, m.id, { status: 'pocket', pocket_day: to, by: '改期', why: '跳过的那段里没办成，改了期', at });
     const holder = echoHolder(m, player), ts = scaleOf(timeScale);
     if (holder && records?.addDerived && storyId) records.addDerived({ storyId, fp: at.fp, type: '做', text: `${holder}那边：「${tidy(m.title)}」原定的那${ts.ord}临时没办成，改了期，挪到了${ts.this}`.slice(0, 240),
-        holder: holderOf(roster, holder), holderName: holder, audience: [holder], about: holder, keys: [m.title, m.place].map(tidy).filter(x => x.length >= 2) });
+        holder: holderOf(roster, holder), holderName: holder, audience: [holder], about: holder, known: [{ basis: { pos: at.pos, fp: at.fp, day: to } }], keys: [m.title, m.place].map(tidy).filter(x => x.length >= 2) });
     store.logEvent?.(chatKey, 'event_moved', { id: m.id, title: m.title, from: m.ready_day, to });
 }
 
@@ -178,31 +178,31 @@ export function eventStep(store, records, chatKey, { menu = [], messages = [], t
     const same = (a, b) => sameName(a, b, names);
     const at = { pos: last.pos, fp: last.fp };
     const moves = movesOf(store, chatKey, messages);
-    const done = liveMap(read(store, LEADS_KEY(chatKey), {}), messages);
+    const done = liveMap(read(store, LEADS_KEY(chatKey), {}), messages, store, chatKey);
     const canDoor = lead => entryOf(lead) === '找上门' && !!tidy(lead.who) && lead.who !== WORLD && !herName(lead.who, player)
         && roster.some(e => hasCard(e) && same(e.name, lead.who)) && !here.some(n => same(n, lead.who));
     const steps = leadSteps(menu, { today: firmToday, node, done, moves, canDoor });
     for (const s of steps) {
         if (s.how === 'door' && s.lead.status !== 'pocket') store.updateMenu(chatKey, s.lead.id, { status: 'pocket', pocket_day: firmToday, by: '引子', why: '有日子的活动快到了，引子还没送到：挂到门上', at });
-        done[s.event.id] = { how: s.how, lead: s.lead?.id ?? null, at };
+        done[s.event.id] = { how: s.how, lead: s.lead?.id ?? null, at, basisDay: firmToday };
         store.logEvent?.(chatKey, 'event_lead', { id: s.event.id, title: s.event.title, how: s.how, lead: s.lead?.title ?? null });
     }
     if (steps.length) store.setMeta?.(LEADS_KEY(chatKey), JSON.stringify(done));
-    const echoed = liveMap(read(store, ECHO_KEY(chatKey), {}), messages);
+    const echoed = liveMap(read(store, ECHO_KEY(chatKey), {}), messages, store, chatKey);
     const missed = missedEvents(menu, { today: firmToday, node, done, moves, echoed });
     const storyId = store.requireChat?.(chatKey)?.story_id ?? null;
     for (const m of missed) {
         echoEvent(store, records, chatKey, m, { at, day: firmToday, roster, userName, player, storyId, why: `${userName ?? '玩家'}知道了却没去：照常办了` });
-        echoed[m.id] = { at };
+        echoed[m.id] = { at, basisDay: firmToday };
     }
     if (missed.length) store.setMeta?.(ECHO_KEY(chatKey), JSON.stringify(echoed));
     return { steps, echoes: missed };
 }
 // 跳时间跳过去的、不是主线的那几件：照牵头的人在镜头外发生，回音照排；记一笔防重复
-export function markEchoed(store, chatKey, ids = [], at) {
+export function markEchoed(store, chatKey, ids = [], at, basisDay = null) {
     if (!ids.length) return;
     const echoed = read(store, ECHO_KEY(chatKey), {});
-    for (const id of ids) echoed[id] = { at };
+    for (const id of ids) echoed[id] = { at, basisDay };
     store.setMeta?.(ECHO_KEY(chatKey), JSON.stringify(echoed));
 }
 
@@ -213,7 +213,7 @@ export function leadNotice(store, chatKey, { menu = [], messages = [], anchorMsg
     const rows = [];
     let changed = false;
     for (const [id, e] of Object.entries(all && typeof all === 'object' ? all : {})) {
-        if (e?.how !== 'line' || !liveAt(e.at, messages)) continue;
+        if (e?.how !== 'line' || !liveAt(e.at, messages, store, chatKey, e.basisDay)) continue;
         if (e.given && liveAt(e.given, messages) && e.given.pos !== anchorMsg?.pos) continue;
         const m = menu.find(x => String(x.id) === id);
         if (!m || !LIVE.has(m.status) || (Number.isFinite(today) && m.ready_day < today)) continue;

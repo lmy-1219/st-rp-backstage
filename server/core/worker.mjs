@@ -9,11 +9,12 @@ import { remoteWayAt } from './arrival.mjs';
 import { boardLoader } from './board.mjs';
 
 const MAX_FAILURES = 3;
+const TRANSIENT_RETRY_MS = 10 * 60 * 1000;
 
 // 外援（D-73）：API 没响应（超时、断连、5xx）时，这一小窗写成外援包交给 AI 窗口，这个窗口的记账先停着等它交回；
 // extractor.provider = 'window' 时一律交给窗口（测试期不走中转）。交回的回答和模型的走同一套核对。
 export function createWorker({ store, records, getConfig, clientFactory = createModelClient, log = () => {}, intervalMs = 20000, handoffs = null }) {
-    let busy = false, timer = null;
+    let busy = false, runningChatKey = null, timer = null;
     let onCommitted = null;
     const afterCommit = async chatKey => { try { await onCommitted?.(chatKey); } catch (error) { log(`advance after extract ${chatKey}: ${error.message}`); } };
     const lastError = new Map();   // 记账出错提示按窗口记（N-441/D-260）：A 出错不影响 B 的 plan().lastError
@@ -75,15 +76,19 @@ export function createWorker({ store, records, getConfig, clientFactory = create
         const older = fromOf(chat) > 0 ? planWindows(messages.filter(m => m.pos < fromOf(chat)).concat(messages.at(-1) ?? []), done) : [];
         const pending = windows.flat();
         const skipped = (records.skipped?.(chat.story_id) ?? []).map(fp => messages.find(m => m.fp === fp)?.pos).filter(Number.isFinite);
+        const handoff = handoffs ? store.pendingHandoffs().find(h => h.kind === 'extract' && h.chat_key === chatKey) : null;
         return {
             configured: ready(config), model: config.extractor.provider === 'window' ? '交给窗口' : config.extractor.model,
             enabled: !!chat.extract, pendingMessages: pending.length,
             oldestPendingAt: pending[0]?.sent_at ?? null,
+            pendingFrom: pending[0]?.pos ?? null, pendingTo: pending.at(-1)?.pos ?? null,
+            batch: config.extractor.batch ?? 1, batchWaitMin: config.extractor.batchWaitMin ?? 0,
+            handoffWaiting: !!handoff, handoffBudget: !!handoff?.payload?.meta?.budget,
             estimate: estimateCost(windows, config.extractor),
             // 接入以前的旧消息没记的：补记要多少（面板上由用户点）
             olderMessages: older.reduce((n, w) => n + w.length, 0), olderEstimate: estimateCost(older, config.extractor),
             spentTodayUsd: records.spentToday(), dailyBudgetUsd: config.extractor.dailyBudgetUsd,
-            running: busy, lastError: lastError.get(chatKey) ?? null, failing: records.recentFailures?.(chatKey, startedAt) ?? 0, skipped,
+            running: busy && runningChatKey === chatKey, lastError: lastError.get(chatKey) ?? null, failing: records.recentFailures?.(chatKey, startedAt) ?? 0, skipped,
         };
     }
 
@@ -100,13 +105,13 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     const ready = config => extractorReady(config) || (config.extractor.provider === 'window' && !!handoffs);
     const waiting = chatKey => !!handoffs && store.pendingHandoffs().some(h => h.kind === 'extract' && h.chat_key === chatKey);
 
-    function handOff({ chat, window, context, names, why, budget = false }) {
+    function handOff({ chat, window, context, names, why, budget = false, transient = false }) {
         const prepared = prepareWindow({ records, config: getConfig(), chat, window, context, names, pocket: pocketOf(chat.key), known: knownOf(chat, names.user), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
         return handoffs.request({
             kind: 'extract', key: `${chat.key}:${window[0].fp}:${window.length}`, chatKey: chat.key, why,
             system: prepared.system, user: prepared.user,
             checks: '原文片段逐字核对、持有人和在场的人由程序定、每条消息最多记几条；不合格的条目会被拦下留痕',
-            meta: { chatKey: chat.key, fps: window.map(m => m.fp), ...(budget ? { budget: true } : {}) },
+            meta: { chatKey: chat.key, fps: window.map(m => m.fp), ...(budget ? { budget: true } : {}), ...(transient ? { transient: true } : {}) },
         });
     }
     // 今天的花费到没到上限；到了而且能交给窗口（没设 fallback: off）：记账交给窗口接着记（试玩 10/12：到了上限就停，落了八十多条）
@@ -156,6 +161,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
         // 流式读：中转对长的非流式回答会卡住（D-95）；只要有字进来就不算超时，整件事给足十分钟。
         if (!byWindow) client ??= clientFactory({ ...config.extractor, stream: true, timeoutMs: 600000 });
         busy = true;
+        runningChatKey = chatKey;
         const results = [];
         try {
             for (let i = 0; i < maxWindows; i++) {
@@ -189,7 +195,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                     results.push(r);
                 } catch (error) {
                     if (!handoffs || config.extractor.fallback === 'off' || !isTransient(error)) throw error;
-                    results.push({ handoff: handOff({ chat, window, context, names, why: `调模型没响应（${error.message}）` }) });
+                    results.push({ handoff: handOff({ chat, window, context, names, transient: true, why: `调模型没响应（${error.message}）` }) });
                     break;
                 }
             }
@@ -200,6 +206,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
             results.push({ error: error.message });
         } finally {
             busy = false;
+            runningChatKey = null;
         }
         return { ran: results.filter(r => r.jobId).length, results };
     }
@@ -218,6 +225,9 @@ export function createWorker({ store, records, getConfig, clientFactory = create
             // 花费又有余量了（过了零点、改了上限）：先前因为上限交给窗口、还没人接的那份收回来，照常走 API
             const parked = !over && handoffs ? store.pendingHandoffs().find(h => h.kind === 'extract' && h.chat_key === key && h.payload?.meta?.budget) : null;
             if (parked) { await handoffs.retry(parked.id).catch(() => {}); return; }
+            const transient = !over && handoffs && getConfig().extractor.provider !== 'window'
+                ? store.pendingHandoffs().find(h => h.kind === 'extract' && h.chat_key === key && h.payload?.meta?.transient && Date.now() - Date.parse(h.created_at) >= TRANSIENT_RETRY_MS) : null;
+            if (transient) { await handoffs.retry(transient.id).catch(() => {}); return; }
             if (p.pendingMessages && due && (!over || windowOnBudget()) && !waiting(key)) {
                 const result = await run({ chatKey: key, maxWindows: 1 });
                 if (result.ran) kick();   // 还有待记的就接着跑，出错则等下一轮

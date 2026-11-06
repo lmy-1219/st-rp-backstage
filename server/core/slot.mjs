@@ -1111,7 +1111,8 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             const fpAt = new Map(messages.map(m => [m.pos, m.fp]));
             let told = [];
             try { told = JSON.parse(store.getMeta?.(`long_told:${storyId}`) ?? '[]'); } catch {}
-            told = told.filter(t => t && fpAt.get(t.pos) === t.fp);
+            const rawTold = told;
+            told = liveLongTold(told, fpAt, (pos, day) => store.basisLive?.(chatKey, pos, day) !== false);
             const earlier = told.filter(t => t.who === who && t.pos < lastPos);
             const give = longGive(events, { day: today, lastPos, timeScale: ts, name: camera ? userName ?? name : name, sameName: (a, b) => sameName(a, b, rosterNames), when: tagDay,
                 place: remote ? '' : [board?.camera?.place, board?.fast?.place].filter(Boolean).join('\n'), talk: recentUser ?? '',
@@ -1119,7 +1120,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             add(2, give.lines, 'world', 'scene');
             const at = messages.at(-1);
             const fresh = give.told.filter(g => !told.some(t => t.who === who && t.pos === lastPos && t.kind === g.kind && t.k === g.k));
-            if (planner?.record !== false && at && fresh.length) store.setMeta?.(`long_told:${storyId}`, JSON.stringify([...told, ...fresh.map(g => ({ ...g, who, day: today, pos: at.pos, fp: at.fp }))].slice(-300)));
+            if (planner?.record !== false && at && fresh.length) store.setMeta?.(`long_told:${storyId}`, JSON.stringify([...rawTold, ...fresh.map(g => ({ ...g, who, day: today, basisDay: today, pos: at.pos, fp: at.fp }))].slice(-300)));
         }
     }
     // 别人讲到一半停下的（N-124）：他在场听了一半，过后还惦记着——有空当可以追问，讲完了（记账"了结"）就不再给。
@@ -1359,16 +1360,16 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         let given = {};
         try { given = JSON.parse(store.getMeta?.(`promise_given:${chatKey}`) ?? '{}'); } catch {}
         // 删回去以后，被删那段里提过的不算（位置比眼下还靠后的那几回）
-        for (const k of Object.keys(given)) given[k] = (given[k] ?? []).filter(pos => pos <= lastPos);
+        const liveGiven = givenHere(given, messages, lastPos, (a, b) => a === b || store.sameMessage?.(a, b), (pos, day) => store.basisLive?.(chatKey, pos, day) !== false);
         const NUDGE = new Set(['today', 'late', 'overdue']);
         const closedPromises = new Set((pendingLedger?.items ?? []).filter(x => x.kind === '约定' && ['办了', '改了', '黄了', '失效'].includes(x.status)).map(x => String(x.source?.id)).filter(Boolean));
-        const dueFilter = ({ p, stage }) => !closedPromises.has(String(p.r?.id ?? p.id)) && !(stage === 'lapse' && p.due?.soon) && !(lateral && NUDGE.has(stage) && (given[p.id] ?? []).length >= 2 && lastPos - (given[p.id].at(-1) ?? -Infinity) < 6);
+        const dueFilter = ({ p, stage }) => !closedPromises.has(String(p.r?.id ?? p.id)) && !(stage === 'lapse' && p.due?.soon) && !(lateral && NUDGE.has(stage) && (liveGiven[p.id] ?? []).length >= 2 && lastPos - (givenPos(liveGiven[p.id].at(-1)) ?? -Infinity) < 6);
         const due = promised.stages.filter(dueFilter);
         const seenDue = promised.seenStages.filter(dueFilter);
         add(0, promiseLines(seenDue, { name, userName: userName ?? '对方', seenToday, when: ago, same: promised.same, hold }), 'now', 'person');
         if (planner?.record !== false) {
             let marked = false;
-            for (const { p, stage } of due) if (NUDGE.has(stage) && partyOf(p, name, promised.same)) { (given[p.id] ??= []).push(lastPos); given[p.id] = given[p.id].slice(-4); marked = true; }
+            for (const { p, stage } of due) if (NUDGE.has(stage) && partyOf(p, name, promised.same)) { (given[p.id] ??= []).push({ pos: lastPos, fp: messages.at(-1)?.fp, basisDay: today }); given[p.id] = given[p.id].slice(-8); marked = true; }
             if (marked) store.setMeta?.(`promise_given:${chatKey}`, JSON.stringify(given));
             const told = promised.told;
             let changed = false;
@@ -1376,9 +1377,9 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             // "就这么过去了"那一笔还记在这里（第 2 步事账会改成现算不落账）：先给这一格那一行，再记，下一格起它就关上了
             for (const { p, stage } of promised.stages) {
                 if (stage === 'lapse' && at && records.addDerived) records.addDerived({ storyId, fp: at.fp, type: '了结', ideaRef: p.id, outcome: LAPSED, holder: p.r.holder, holderName: p.r.holder_name,
-                    audience: [...new Set([...p.doers, ...p.with])], text: `说好的事${p.due?.soon ? '当时没办' : '到日子没办'}，也没人再提，就这么过去了：${String(p.r.text).slice(0, 120)}` });
+                    audience: [...new Set([...p.doers, ...p.with])], known: [{ basis: { pos: at.pos, fp: at.fp, day: today } }], text: `说好的事${p.due?.soon ? '当时没办' : '到日子没办'}，也没人再提，就这么过去了：${String(p.r.text).slice(0, 120)}` });
                 // 记在哪条上提的（试玩 10/3：删回去重来以后，只记"提过了"不记在哪条，该重提的不提、该重新收尾的不收）
-                if (promised.once(p)(stage) && partyOf(p, name, promised.same)) { (told[p.id] ??= []).push(`${stage}@${at?.fp ?? ''}`); told[p.id] = told[p.id].slice(-8); changed = true; }
+                if (promised.once(p)(stage) && partyOf(p, name, promised.same)) { (told[p.id] ??= []).push({ tag: `${stage}@${at?.fp ?? ''}`, stage, fp: at?.fp ?? null, pos: at?.pos ?? null, basisDay: today }); told[p.id] = told[p.id].slice(-8); changed = true; }
             }
             if (changed) store.setMeta?.(`promise_told:${chatKey}`, JSON.stringify(told));
         }
@@ -1649,12 +1650,12 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
                 const dated = skipEvents(menu, skipNew, { node: latestNode(store, chatKey).node });
                 for (const m of dated.move) moveEvent(store, records, chatKey, m, { to: skipNew.toDay, at, roster, player, storyId, timeScale: scaleFor(store, chatKey) });
                 for (const m of dated.off) echoEvent(store, records, chatKey, m, { at, day: skipNew.toDay, roster, userName, player, storyId, why: '玩家交代跳过的这段时间里，那边照常办了' });
-                markEchoed(store, chatKey, dated.off.map(m => m.id), at);
+                markEchoed(store, chatKey, dated.off.map(m => m.id), at, skipNew.toDay);
                 const spare = new Set([...dated.move, ...dated.off].map(m => m.id));
                 for (const c of settleSkip(menu, skipNew, { keep: promised?.keeps ?? (() => false), blocked, isPlayer, spare: m => spare.has(m.id) })) {
-                    store.updateMenu(chatKey, c.id, { status: c.status, why: c.why, by: '空白', at });
+                    store.updateMenu(chatKey, c.id, { status: c.status, why: c.why, by: '空白', basisDay: skipNew.toDay, at });
                     // 沉底那句进"这段时间"那一块，不再单给一回
-                    if (c.status === 'sunk') store.updateMenu(chatKey, c.id, { status: 'sunk_told', why: c.why, by: '空白', at });
+                    if (c.status === 'sunk') store.updateMenu(chatKey, c.id, { status: 'sunk_told', why: c.why, by: '空白', basisDay: skipNew.toDay, at });
                     store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : 'menu_skip', { id: c.id, why: c.why });
                 }
             }
@@ -1673,7 +1674,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             try { stacked = pocketStack(store, records, chatKey, { menu, messages, rosterNames, today, dayOf }); } catch {}
             const contentTier = activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null;
             for (const c of stepPocket(menu, { today, dayOf, at: lastPos, timeScale: scaleFor(store, chatKey), pace: paceFor(store, chatKey), contentTier, stacked, firm: { today, dayOf }, hold: promised?.hold ?? null, keep: promised?.keeps ?? (() => false), gone })) {
-                store.updateMenu(chatKey, c.id, c);
+                store.updateMenu(chatKey, c.id, c.status === 'pocket' ? { ...c, basisDay: today } : c);
                 if (c.why && (c.status === 'expired' || c.status === 'void')) store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : 'menu_void', { id: c.id, why: c.why });
             }
             // 有日子的现场活动（eventlead.mjs，章程 L1，用户 10/12：她不知道就直接错过了）：前一格起引子还没送到就升级——
@@ -1858,7 +1859,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
     if (situation?.sit && situation.record !== false) {
         try {
             const now = situationNow(situation.sit, { storyId, messages, visibleIds: new Set(visible.map(r => r.id)), dayOf: dayOf });
-            deliverDue(situation.sit, now, { today: today, anchor: last, storyId, addRecord: records.addDerived, principal: userName });
+            deliverDue(situation.sit, now, { today: today, anchor: last, storyId, addRecord: records.addDerived, principal: userName, withBasis: true });
             // 认上次跑的那条消息、按现在的天数算（D-170，试玩 10/6：原来记的是"跑过第几天"，天数算法改正过以后它以为第 2 天跑过了，四天没再跑）
             const ran = Number(store.getMeta?.(`situation_ran:${chatKey}`) ?? -1);
             const since = Math.max(now.lastTick?.anchor_pos ?? -1, ran <= lastPos ? ran : -1);
@@ -2261,6 +2262,19 @@ function dayView(store, chatKey, lastPos, timeRecs, marks, { seen = false } = {}
     return dayIndex([...timeRecs, ...(seen ? marks : marks.filter(m => !m.provisional))], lastPos, scaleFor(store, chatKey));
 }
 
+export function confirmedDayFor(store, records, chatKey, messages = store.currentMessages(chatKey)) {
+    const timeRecs = (records.visible?.(chatKey) ?? []).filter(r => r.type === '时间');
+    const marks = timeMarksFor(store, { ...records, visible: () => timeRecs }, chatKey, messages);
+    return dayIndex([...timeRecs, ...firmTimeMarks(store, records, chatKey, messages, timeRecs, marks)], messages.at(-1)?.pos ?? 0, scaleFor(store, chatKey));
+}
+
+function firmTimeMarks(store, records, chatKey, messages, timeRecs, marks) {
+    const storyId = store.requireChat(chatKey).story_id;
+    const notes = store.stateNotesOf?.(chatKey) ?? [];
+    return withNoteMarks(marks.filter(m => !m.provisional), notes, timeRecs, scaleFor(store, chatKey),
+        pos => messages.some(m => m.pos === pos && records?.isDone?.(storyId, m.fp))).filter(m => !m.provisional);
+}
+
 // 这个窗口的剧情日期（timeline.mjs）：默认确认；仅显示和供料显式请求暂定视图。
 export function timelineFor(store, records, chatKey, messages = store.currentMessages(chatKey), { seen = false } = {}) {
     const chat = store.requireChat(chatKey);
@@ -2270,8 +2284,7 @@ export function timelineFor(store, records, chatKey, messages = store.currentMes
     const isDone = m => !!records?.isDone?.(chat.story_id, m.fp);
     const seenTimeline = seen ? timeline({ messages, timeRecs, marks, notes, start, isDone }) : null;
     // 暂定头只在 seen 中压过邻近 note；确认视图从已记账 note 独立重建日期记号。
-    const firmMarks = withNoteMarks(marks.filter(m => !m.provisional), notes, timeRecs, scaleFor(store, chatKey),
-        pos => messages.some(m => m.pos === pos && isDone(m))).filter(m => !m.provisional);
+    const firmMarks = firmTimeMarks(store, records, chatKey, messages, timeRecs, marks);
     // 确认视图保留已记账消息的叙述时段，以及记账、手标和已落库的时段 note；未记账叙述只供暂定显示。
     const firm = timeline({ messages: messages.map(m => isDone(m) ? m : { ...m, text: '' }), timeRecs,
         marks: firmMarks, notes, start, isDone, noteDays: false, confirmedParts: true });
@@ -2332,11 +2345,14 @@ export function nameFinder(rel, rosterNames = []) {
 }
 // 只提一次的已经在眼下这条历史上提过了没有：提的那条删掉了（删回去重来、换了分支）就当没提过。
 // "就这么过去了"不靠这个记：它记成一条了结，了结在就是收了尾，跟着消息删了就重新收尾。老格式（只记了阶段）照旧当提过。
-export function toldHere(told, id, stage, messages) {
+export function toldHere(told, id, stage, messages, basisLive = () => true) {
     if (stage === 'lapse') return false;
     const live = new Set(messages.map(m => m.fp));
-    return (told[id] ?? []).some(t => t === stage || (String(t).startsWith(`${stage}@`) && live.has(String(t).slice(stage.length + 1))));
+    return (told[id] ?? []).some(t => t === stage || (typeof t === 'object' && t?.stage === stage && live.has(t.fp) && basisLive(t.pos, t.basisDay)) || (String(t).startsWith(`${stage}@`) && live.has(String(t).slice(stage.length + 1))));
 }
+export const liveLongTold = (told, fpAt, basisLive = () => true) => told.filter(t => t && fpAt.get(t.pos) === t.fp && basisLive(t.pos, t.basisDay));
+const givenPos = e => typeof e === 'number' ? e : e?.pos;
+export const givenHere = (given, messages, lastPos, same = (a, b) => a === b, basisLive = () => true) => Object.fromEntries(Object.entries(given).map(([k, entries]) => [k, (entries ?? []).filter(e => typeof e === 'number' ? e <= lastPos : messages.some(m => m.pos === e.pos && same(m.fp, e.fp)) && basisLive(e.pos, e.basisDay))]));
 // 约定被了结在哪条上（idea_ref → 那条了结）。程序自己记的"就这么过去了"要按眼下的天数再核一遍：记它的时候天数算错了的不算
 // （试玩 10/6："从早上到午后"被算成过了一夜，那一拍把当天的五件约定都记成过去了，天数改回来以后它们还关着）。
 export function settledBy(visible, { dayOf = () => 0, partAt = () => null, weekdayOf = null, timeScale = DAY } = {}) {
@@ -2364,7 +2380,7 @@ export function promisesNow(store, records, chatKey, { visible, messages, dayOf,
     const allStages = visible.filter(r => r.promise && !closed.has(r.id))
         .map(r => promiseOf(r, { dayOf, partAt: pos => rows.get(pos) ?? null, weekdayOf, timeScale: tl.scale })).filter(Boolean)
         .map(p => ({ p, stage: stageOf(p, { today, part: tl.part, balance, timeScale: tl.scale }) }));
-    const stages = allStages.filter(({ p, stage }) => !(ONCE(p)(stage) && toldHere(told, p.id, stage, messages)));
+    const stages = allStages.filter(({ p, stage }) => !(ONCE(p)(stage) && toldHere(told, p.id, stage, messages, (pos, day) => store.basisLive?.(chatKey, pos, day) !== false)));
     // 约定里说到的人（别名也认）：后台排的事是不是由他牵头
     const { names } = nameFinder(rel, rosterNames);
     const here = [...present];
@@ -2558,7 +2574,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     const shownAs = m => warmItem(maskName({ ...dated(m), causeText: causeText(m), early_why: m.early_why && m.who === speaker ? retime(m.early_why, m.pocket_day ?? today, today, menuTs) : '' }, stranger(m.who)));
     for (const m of menu.filter(m => m.status === 'sunk')) {
         add(3, sinkLines(shownAs(m)), 'mid');
-        if (record) store.updateMenu(chatKey, m.id, step('sunk_told'));
+        if (record) store.updateMenu(chatKey, m.id, { ...step('sunk_told'), ...(m.settled_day != null ? { basisDay: today } : {}) });
     }
     // 口袋里可以同时有几件（份数看事态，见 stepPocket）。这一格只给和他有关的：他牵头的，外加至多一两件不在场的人或"世界"牵头的。
     // 玩家牵头的事（规划写成了"V 查账户""V 去找谁"）：没有哪个角色是玩家，交给在场开口的人，从他眼里带出来（试玩 9/30）

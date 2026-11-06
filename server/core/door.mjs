@@ -51,6 +51,17 @@ const priority = { contact: 0, named: 1, promise: 2, errand: 3, pocket: 4, reach
 // 旁白替他递过的消息、来电（sent）：排在结算的联系之后、玩家点名之前——他刚找过玩家，进来就接着这件说（场记章程 B1）
 const rank = c => (c.sent ? 0.5 : priority[c.source.type]);
 
+// 只有当前人的句首动作确实是门上这一项的联系方式，才省掉“方式：内容”。
+const surfaceSaysWay = (surface, who, entry, label) => {
+    if (!['消息', '电话', '找上门'].includes(entry)) return false;
+    let start = String(surface ?? '').trimStart();
+    if (start.startsWith(who)) start = start.slice(who.length).trimStart();
+    const said = /^(?:发来短讯|发来消息|打来电话|来了|上门)/.exec(start)?.[0];
+    return (label === '发来短讯' && ['发来短讯', '发来消息'].includes(said))
+        || (label === '来电' && said === '打来电话')
+        || (label === '上门' && ['来了', '上门'].includes(said));
+};
+
 // input：board、pending、roster、menu、relations、userName、recentUser、holds、timeline、messages、reach、request、anchors（隔离区间）、arrivals（进场记录）、members（群里的卡）。
 export function doorAt(input = {}) {
     const { board = {}, pending = {}, roster = [], userName = '玩家', recentUser = '', timeline = {}, messages = [], reach = null, request = null } = input;
@@ -119,11 +130,14 @@ export function doorAt(input = {}) {
                     { display: `${phone ? '打来过电话' : '发来过消息'}：${m.surface || m.title || ''}`, sent: { id: m.id, way: phone ? '电话' : '消息', title: m.title ?? '', surface: m.surface ?? '', respond: m.respond ?? '' } });
                 continue;
             }
-            const label = way === '打来电话' ? '来电' : way === '发来消息' ? '发来短讯' : /上门|来找|敲门/.test(`${m.title ?? ''}${m.surface ?? ''}`) ? '上门' : '可能会来';
+            const saysArrival = m.entry === '找上门' && surfaceSaysWay(m.surface, who, m.entry, '上门');
+            const label = way === '打来电话' ? '来电' : way === '发来消息' ? '发来短讯' : saysArrival || /上门|来找|敲门/.test(`${m.title ?? ''}${m.surface ?? ''}`) ? '上门' : '可能会来';
             // 活动快到了、替它挂上门的引子，引子自己没到点（doorFor 标 early）；或递出后那条回复还没记账（标 awaiting，T081）：门上列着，但不算到时候了（T073/T081）
             // 门上的候选还没有发生：只给方式，不把有卡人的动作、私下打算或亲密原文预先交给镜头。
             const displayWay = label === '来电' ? '想打电话' : label === '发来短讯' ? '想发消息' : label === '上门' ? '可能上门' : '可能来联系';
-            add('pocket', m.id, !m.early && !m.awaiting && !earlyPart(m), false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m), { display: `${displayWay}：${m.surface || m.title || ''}` });
+            const surface = m.surface || m.title || '';
+            const alreadySaysWay = surfaceSaysWay(surface, who, m.entry, label);
+            add('pocket', m.id, !m.early && !m.awaiting && !earlyPart(m), false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m), { display: alreadySaysWay ? surface : `${displayWay}：${surface}` });
         }
         if (reached) add('reach', reach.id ?? who, true, false, reach.matter ? `可能来联系：${reach.matter}` : '可能来联系', [...new Set([reach.matterText, reach.hook, ...(reach.threads ?? []).map(r => r.text)].filter(Boolean))].join('；'));
         candidates.sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b));

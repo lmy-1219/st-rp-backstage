@@ -2437,10 +2437,19 @@ function mountPanel() {
         ].filter(Boolean).join('');
         // 记账是一切的上游（D-174 第 5 步）：连败就亮红、能一键再试；判了"跳过"的能重记；落后几条也说一声
         const ex = st?.extract;
+        const pendingNotice = !ex?.pendingMessages ? '' : (() => {
+            const n = ex.pendingMessages, from = ex.pendingFrom ?? '?', to = ex.pendingTo ?? '?';
+            if (ex.running) return `后台正在补记第 ${from}～${to} 条（${n} 条），补完会自动消失；不会跳过。`;
+            if (ex.handoffBudget || ex.spentTodayUsd >= ex.dailyBudgetUsd) return `今天花费到上限了，第 ${from} 条起的 ${n} 条还没记；有余量后后台会接着补，不会跳过。`;
+            if (ex.handoffWaiting) return `第 ${from} 条起的 ${n} 条在等外援交回，或点“再试一次”重走 API；不会跳过，交回或重试后会一次补上。`;
+            const waited = ex.oldestPendingAt ? (Date.now() - Date.parse(ex.oldestPendingAt)) / 60000 : Infinity;
+            if (n < ex.batch && waited < ex.batchWaitMin) return `后台正在攒消息：攒够 ${ex.batch} 条或最早那条等满 ${ex.batchWaitMin} 分钟就记；这 ${n} 条不会跳过。`;
+            return `后台将补记第 ${from}～${to} 条（${n} 条），补完会自动消失；不会跳过。`;
+        })();
         $('[data-role="extract-alert"]').innerHTML = !ex ? '' : [
-            ex.failing >= 2 ? `<div style="color:var(--warning,#d33)">每条总结停了：连败 ${ex.failing} 次（最后一次：${escapeHtml(ex.lastError ?? '没说原因')}）；下游的检查、局势、口袋都在等它。 <button class="menu_button" type="button" data-action="extract-retry" title="重试失败总结，建议先检查错误。">再试一次</button>${ex.skipped?.length ? ` <button class="menu_button" type="button" data-action="extract-retry-skipped" title="补回跳过消息，建议核对后用。">重记跳过的 ${ex.skipped.length} 条</button>` : ''}</div>` : '',
-            ex.failing < 2 && ex.skipped?.length ? `<div style="color:var(--SmartThemeQuoteColor,#888)">有 ${ex.skipped.length} 条消息在总结时被跳过了（第 ${ex.skipped.join('、')} 条）。 <button class="menu_button" type="button" data-action="extract-retry-skipped" title="补回跳过消息，建议核对后用。">重记它们</button></div>` : '',
-            ex.pendingMessages >= 4 ? `<div style="color:var(--SmartThemeQuoteColor,#888)">每条总结落后 ${ex.pendingMessages} 条</div>` : '',
+            ex.failing >= 2 ? `<div style="color:var(--warning,#d33)">每条总结连败 ${ex.failing} 次（最后一次：${escapeHtml(ex.lastError ?? '没说原因')}）；下游的检查、局势、口袋都在等它。 <button class="menu_button" type="button" data-action="extract-retry" title="重试失败总结，建议先检查错误。">再试一次</button></div>` : '',
+            ex.skipped?.length ? `<div style="color:var(--SmartThemeQuoteColor,#888)">第 ${ex.skipped.join('、')} 条消息连续失败到上限，已单独跳过。 <button class="menu_button" type="button" data-action="extract-retry-skipped" title="补回跳过消息，建议核对后用。">重记它们</button></div>` : '',
+            pendingNotice ? `<div style="color:var(--SmartThemeQuoteColor,#888)">${escapeHtml(pendingNotice)}</div>` : '',
         ].filter(Boolean).join('') + driftHtml(st?.drift);
         const playReason = state.planStatus?.playReason ?? state.content?.playReason ?? '';
         $('[data-role="content-controls"]').insertAdjacentHTML('beforeend', playNoticeHtml(playReason));
@@ -2548,8 +2557,11 @@ function mountPanel() {
             }
             if (action === 'join') await join();
             if (action === 'handoff-retry') {
+                const packet = [...(state.handoffUi?.pending ?? []), ...(state.handoffUi?.others ?? []).flatMap(g => g.items ?? [])].find(h => h.id === Number(event.target.dataset.id));
                 state.handoffUi = await api('handoff-ui', { action: 'retry', id: Number(event.target.dataset.id) });
-                globalThis.toastr?.info('在重试（走 API）。成了会从这里消失；没成就还在，可以再点。');
+                if (packet?.kind === 'extract' && state.handoffUi.retryResult?.status === 'started') globalThis.toastr?.info(`已重新开始，后台正在补 ${state.handoffUi.retryResult.pendingMessages} 条，约需一两分钟。`);
+                else if (packet?.kind === 'extract' && state.handoffUi.retryResult?.status === 'failed') globalThis.toastr?.warning(`每条总结还没重新开始：${state.handoffUi.retryResult.error}`);
+                else globalThis.toastr?.info('在重试（走 API）。成了会从这里消失；没成就还在，可以再点。');
                 for (const wait of [5000, 20000, 60000, 180000]) setTimeout(() => api('status', { chatKey: state.chatKey }).then(st => { state.status = st; noticeHandoffs(st.handoffs); render(); }).catch(() => {}), wait);
             }
             if (action === 'handoff-drop') {

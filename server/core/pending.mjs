@@ -260,7 +260,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
         // 同一个人在名册里有两条（用户建的全名一条、程序早先按旧卡名自动加的短名一条，试玩 10/12）：认用户建的那条
         const c = (list => (l => l.find(x => x.set_by === 'user') ?? l.find(x => Number.isFinite(x.bond)) ?? l[0] ?? list[0])(list.filter(x => x.role !== '不用')))(cast.filter(x => x.name === name || same(x.name, name)));
         if (!c) continue;
-        try { const v = JSON.parse(r.value ?? 'null'); if (v && !(keyed.get(c.name)?.at > v.at)) keyed.set(c.name, { ...v, who: c.name, avatar: c.avatar ?? null }); } catch {}
+        try { const v = JSON.parse(r.value ?? 'null'); if (v && store.basisLive?.(chatKey, v.at, v.basisDay) !== false && !(keyed.get(c.name)?.at > v.at)) keyed.set(c.name, { ...v, who: c.name, avatar: c.avatar ?? null }); } catch {}
     }
     contacts.push(...keyed.values());
     let anchors = null, arrivals = [];

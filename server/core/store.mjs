@@ -196,6 +196,9 @@ export function diffSequences(oldFps, newFps) {
 
 export function openStore(file) {
     const db = new DatabaseSync(file);
+    let confirmedDayOf = null, confirmedDaysOf = null;
+    const setConfirmedDayOf = (fn, daysFn = null) => { confirmedDayOf = fn; confirmedDaysOf = daysFn; };
+    const basisLive = (chatKey, pos, basisDay) => !Number.isFinite(basisDay) || !confirmedDayOf || (Number.isInteger(pos) && confirmedDayOf(chatKey, pos) >= basisDay);
     db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma busy_timeout = 3000;');
     db.exec(SCHEMA);
     for (const column of ['partial text', 'continuation text', 'partial_kind text', 'repairable integer not null default 0', 'repair_error text', 'repaired integer not null default 0', 'source text']) {
@@ -561,7 +564,8 @@ export function openStore(file) {
 
     // 递过的"不在场的人来联系"机会。round＝那一轮用户那句话（一轮只递一个）；at＝当时的消息条数。
     function contactOffers(chatKey) {
-        return q('select person, day, at, round, speaker from contact_offers where chat_key = ? order by id').all(chatKey);
+        return q('select person, day, at, round, speaker from contact_offers where chat_key = ? order by id').all(chatKey)
+            .filter(o => basisLive(chatKey, o.at, o.day));
     }
     function putContactOffer({ chatKey, person, day, at, round, speaker }) {
         q('insert into contact_offers(chat_key, person, day, at, round, speaker, created_at) values (?, ?, ?, ?, ?, ?, ?)')
@@ -650,7 +654,12 @@ export function openStore(file) {
         if (at - act.last >= GAP_MIN_MS) setMeta(`gap:${chatKey}`, JSON.stringify({ from: act.last, to: at, fromFp }));
         setMeta(`act:${chatKey}`, JSON.stringify({ last: at }));
     }
-    function getMeta(key) { return memo('meta', key, () => q('select value from meta where key = ?').get(key)?.value ?? null); }
+    function getMeta(key) {
+        const value = memo('meta', key, () => q('select value from meta where key = ?').get(key)?.value ?? null);
+        const match = /^(settled|settled_contact|crew_pushed):([^:]+):/.exec(key);
+        if (!match || !value) return value;
+        try { const v = JSON.parse(value); return v && !basisLive(match[2], v.pos ?? v.at, v.basisDay) ? null : value; } catch { return value; }
+    }
     function setMeta(key, value) { q('insert or replace into meta(key, value) values (?, ?)').run(key, value == null ? null : String(value)); }
 
     // ---------- 规划与菜单（M6）：跟着消息走 ----------
@@ -742,6 +751,20 @@ export function openStore(file) {
         };
         return { last, lastFp: seq[last] ?? null, keys: [...limits.keys()], sees };
     }
+    function sourceReader(chatKey) {
+        const history = historyOf(chatKey), currentFps = currentMessages(chatKey).map(m => m.fp), days = new Map();
+        let confirmed;
+        const dayLive = (pos, day) => !Number.isFinite(day) || !confirmedDayOf || (Number.isInteger(pos) && (days.has(pos) ? days.get(pos) : (days.set(pos, (confirmed ??= confirmedDaysOf?.(chatKey) ?? null) ? confirmed(pos) : confirmedDayOf(chatKey, pos)), days.get(pos))) >= day);
+        return source => {
+        if (!history.sees(chatKey, source.pos, source.fp) || !dayLive(source.pos, source.day)) return false;
+        const current = currentFps[source.pos];
+        if (source.exact && current !== source.fp) return false;
+        if (source.menuStatus) return q('select fp, story_day from menu_log where chat_key = ? and item_id = ? and status = ? and pos = ?').all(chatKey, source.menu, source.menuStatus, source.pos)
+            .some(row => sameMessage(current, row.fp) && dayLive(source.pos, row.story_day));
+        return true;
+        };
+    }
+    const sourceLive = (chatKey, source) => sourceReader(chatKey)(source);
 
     // basis：因为哪条消息上的判定（转向、弄断、局面变了）要的这份规划——那条删了、改了，这份也不算（用户 10/4）
     const basisOf = p => { try { return JSON.parse(getMeta(`plan_basis:${p.id}`) ?? 'null'); } catch { return null; } };
@@ -1033,12 +1056,15 @@ export function openStore(file) {
         return menuOf(plan.chat_key);
     }
     // 给眼下这份规划补几件（角色起的新念头，D-107）：挂在 at 那条消息上；从 storyDay 起算第几天后。
-    function appendMenu(planId, items, { storyDay, at, intimateProgress = [] }) {
+    function appendMenu(planId, items, { storyDay, at, intimateProgress = [], source = null }) {
         const plan = planById(planId);
         if (!plan || plan.status !== 'ready') throw Object.assign(new Error('plan_not_ready'), { status: 409 });
         tx(() => {
             const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, anchor_pos, anchor_fp, updated_at, entry, place, goer, errand, origin, signpost, cause_ref, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
-            for (const m of items) ins.run(planId, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, storyDay + m.afterDays, at.pos, at.fp, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, causeFor(plan.chat_key, m.cause) ? JSON.stringify(m.cause) : null, ...cellValues(m));
+            for (const m of items) {
+                const id = ins.run(planId, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, storyDay + m.afterDays, at.pos, at.fp, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, causeFor(plan.chat_key, m.cause) ? JSON.stringify(m.cause) : null, ...cellValues(m)).lastInsertRowid;
+                if (source) setMeta(`event_source:${id}`, JSON.stringify(source));
+            }
             if (items.length) putIntimateProgress(plan.chat_key, intimateProgress, { planId, storyDay, at });
         });
         return menuOf(plan.chat_key);
@@ -1071,20 +1097,20 @@ export function openStore(file) {
         if (replacing != null) for (const old of rerollChain(replacing, live)) replaced.add(old);
         const ids = plans.map(p => p.id), marks = ids.map(() => '?').join(', ');
         const items = q(`select * from menu where plan_id in (${marks}) order by id`).all(...ids)
-            .filter(m => m.anchor_pos == null || h.sees(m.chat_key, m.anchor_pos, m.anchor_fp));
+            .filter(m => (m.anchor_pos == null || h.sees(m.chat_key, m.anchor_pos, m.anchor_fp)) && (!getMeta(`event_source:${m.id}`) || sourceLive(chatKey, JSON.parse(getMeta(`event_source:${m.id}`)))));
         const steps = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids)
-            .filter(s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && replied(s));
+            .filter(s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && basisLive(chatKey, s.pos, s.story_day) && replied(s));
         for (const m of items) {
             readCells(m);
             m.cause = causeFor(chatKey, fromJson(m.cause_ref)) ? fromJson(m.cause_ref) : null;
             if (all) { const stopped = steps.filter(s => s.item_id === m.id && s.why?.startsWith('/停：')).at(-1); if (stopped) m.intimate_stop = { pos: stopped.pos, fp: stopped.fp }; }
-            Object.assign(m, { status: 'waiting', pocket_day: null, pocket_pos: null, pocket_by: null, settled_pos: null, settled_by: null, held_by: null, held_pos: null, why: null, early_why: null });
+            Object.assign(m, { status: 'waiting', pocket_day: null, pocket_pos: null, pocket_by: null, settled_pos: null, settled_by: null, settled_day: null, held_by: null, held_pos: null, why: null, early_why: null });
             // settled_pos：有了结果（拿出来了、用上了、沉了、撤了）的那一步在哪条消息上——局势推演按它找"刚有了结果的事"
             // offered：这一件递给了谁（N-277），不改它在哪一步
             // pocket_by：谁把它放进口袋的（"引子"＝活动快到了替它挂上门的；门上按它判引子自己到点没，T073）
             for (const s of steps) if (s.item_id === m.id && s.status === 'offered') Object.assign(m, { held_by: s.by_name, held_pos: s.pos });
             else if (s.item_id === m.id && s.status === KEPT) m.kept_pos = s.pos;
-            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_by: null, held_by: null, held_pos: null, settled_pos: null, settled_by: null, early_why: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_by: s.by_name ?? null, early_why: s.by_name === '兴头' ? s.why ?? null : m.early_why } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_by: s.by_name ?? null } : {});
+            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_by: null, held_by: null, held_pos: null, settled_pos: null, settled_by: null, settled_day: null, early_why: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_by: s.by_name ?? null, early_why: s.by_name === '兴头' ? s.why ?? null : m.early_why } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_by: s.by_name ?? null, settled_day: s.story_day } : {});
             // offered_n（T077）：递出过几次——按不同消息位置去重（同一楼换人开口、左滑重来只算一次）；没递过的件不加这个字段
             // 退回 waiting 的那一步（/停 撤回、重新规划）把这件重新算起：撤掉的递送没成，不计
             const offeredAt = new Set();
@@ -1131,7 +1157,7 @@ export function openStore(file) {
         }
         // pending：交给某人那一格里的一步，等他那条回复（见 menuOf）；只有写了是谁的才等
         q('insert into menu_log(chat_key, item_id, status, story_day, pos, fp, by_name, pending, why, created_at, by_plan) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-            .run(chatKey, id, patch.status, patch.pocket_day ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now(), Number.isSafeInteger(patch.byPlan) && patch.byPlan > 0 ? patch.byPlan : null);
+            .run(chatKey, id, patch.status, patch.pocket_day ?? patch.basisDay ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now(), Number.isSafeInteger(patch.byPlan) && patch.byPlan > 0 ? patch.byPlan : null);
     }
 
     // ---------- 外援（API 没响应时交给桌面应用里的 AI 窗口做的活） ----------
@@ -1231,5 +1257,5 @@ export function openStore(file) {
         };
     }
 
-    return { planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    return { setConfirmedDayOf, basisLive, sourceLive, sourceReader, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

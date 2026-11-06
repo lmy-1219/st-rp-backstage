@@ -64,7 +64,7 @@ import { LORE_SYSTEM, lorePrompt, parseLore, LORE_VERSION, loreBatch, loreTried,
 import { createMaterials, createRelationsDrafts, LOOK_SYSTEM, lookPrompt, parseLook, RELATIONS_SYSTEM } from './materials.mjs';
 import { weekOf, rollLong, activeLong, LONG_SYSTEM, longPrompt, parseLong } from './drift.mjs';
 import { briefSection } from './setup.mjs';
-import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stateBlock, timelineFor, settledBy, CAMERA_NAME, scaleFor, paceFor, pastNodesOf, RECENT_NODES, sofarOf } from './slot.mjs';
+import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stateBlock, timelineFor, confirmedDayFor, settledBy, CAMERA_NAME, scaleFor, paceFor, pastNodesOf, RECENT_NODES, sofarOf } from './slot.mjs';
 import { paceCap } from './tempo.mjs';
 import { withTaste } from './taste.mjs';   // 模型口味层：规划、检查的通用底后面按型号补几句口味（用户 10/15）
 import { planSystem } from './planner.mjs';
@@ -105,6 +105,16 @@ if (freshHome) log('new data folder: wrote the recommended config');
 
 const store = openStore(path.join(home, 'rp.sqlite'));
 const records = openRecords(store.db);
+const dayVersion = store.db.prepare('select total_changes() n');
+let dayCacheVersion = -1, dayCache = new Map();
+const confirmedDays = chatKey => {
+    const ver = dayVersion.get().n;
+    if (ver !== dayCacheVersion) { dayCacheVersion = ver; dayCache = new Map(); }
+    if (!dayCache.has(chatKey)) dayCache.set(chatKey, confirmedDayFor(store, { ...records, visible: key => records.visible(key, { rawBasis: true, type: '时间' }) }, chatKey));
+    return pos => dayCache.get(chatKey)(pos + 0.5);
+};
+store.setConfirmedDayOf((chatKey, pos) => confirmedDays(chatKey)(pos), confirmedDays);
+records.setSourceLive(store.sourceLive, store.sourceReader);
 const situation = openSituation(store.db);
 // 配置每次用时现读：用户改了钥匙或预算不用重启后台。
 const getConfig = () => { const config = loadConfig(home); return { ...config, promptOptionsForChat: chatKey => promptOptionsFor(store, chatKey, config) }; };
@@ -886,23 +896,24 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
         records.logAssemble({ chatKey, speaker: '(结算)', model: s.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
         const got = parseSettle(r.text); if (!got) return { ok: false };
         const fp = last.fp;
+        const addSettle = data => records.addDerived({ ...data, known: [...(data.known ?? []), { basis: { pos: last.pos, fp, day: tl.today } }] });
         // 他按自己的打算办到哪：落成他自己的一条（照去办的落法），下次露面那一格里带着（slot 的主角团那一块）；
         // 这一格时间记一笔推过了——结算没写"打算"也算推过，别再花一回
         if (own) {
-            if (got.own) records.addDerived({ storyId: chat.story_id, fp, type: '做', text: pushText(who, ownEntry, got.own), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
-            store.setMeta(pushKey(chatKey, who), JSON.stringify({ day: tl.today, pos: last.pos, fp, plan: lastPlan?.id ?? null }));
+            if (got.own) addSettle({ storyId: chat.story_id, fp, type: '做', text: pushText(who, ownEntry, got.own), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+            store.setMeta(pushKey(chatKey, who), JSON.stringify({ day: tl.today, basisDay: tl.today, pos: last.pos, fp, plan: lastPlan?.id ?? null }));
         }
         for (const e of got.errands) {
             const item = errands.find(x => x.text === e.text); if (!item) continue;
-            records.addDerived({ storyId: chat.story_id, fp, type: '做', text: `${who}这段时间：${e.note}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+            addSettle({ storyId: chat.story_id, fp, type: '做', text: `${who}这段时间：${e.note}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
             for (const [key, p] of Object.entries(plans)) if (p?.who === who) p.errands = (p.errands ?? []).map(x => (x?.text ?? x) === e.text ? { text: e.text, done: e.result, note: e.note, settled: { pos: last.pos, fp } } : x);
         }
-        if (got.home && homeChanged(lifeSheet(records.visible(chatKey).filter(r => r.holder_name === who || (r.audience ?? []).includes(who)), { same: (a, b) => sameName(a, b, roster) }).people.find(p => sameName(p.name, who, roster))?.home ?? '', [leaving, ...errands.map(e => e.text)])) records.addDerived({ storyId: chat.story_id, fp, type: '改变', text: `${who}换了住处：${got.home}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who, life: { who, kind: '住处', now: got.home, gone: '' }, duration: '直到被改变' });
-        if (got.mind) records.addDerived({ storyId: chat.story_id, fp, type: '心里', text: `${who}这段时间心里：${got.mind}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+        if (got.home && homeChanged(lifeSheet(records.visible(chatKey).filter(r => r.holder_name === who || (r.audience ?? []).includes(who)), { same: (a, b) => sameName(a, b, roster) }).people.find(p => sameName(p.name, who, roster))?.home ?? '', [leaving, ...errands.map(e => e.text)])) addSettle({ storyId: chat.story_id, fp, type: '改变', text: `${who}换了住处：${got.home}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who, life: { who, kind: '住处', now: got.home, gone: '' }, duration: '直到被改变' });
+        if (got.mind) addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}这段时间心里：${got.mind}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
         for (const w of got.waits) {
             const item = waits.find(x => x.text === w.text); if (!item) continue;
-            records.addDerived({ storyId: chat.story_id, fp, type: '心里', text: `${who}等回音没等到：${w.note}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
-            if (w.result === '放下') records.addDerived({ storyId: chat.story_id, fp, type: '改变', duration: '几天', text: `${who}把这件事放下了：${w.note}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+            addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}等回音没等到：${w.note}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+            if (w.result === '放下') addSettle({ storyId: chat.story_id, fp, type: '改变', duration: '几天', text: `${who}把这件事放下了：${w.note}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
         }
         store.setMeta(`away_plan:${chatKey}`, JSON.stringify(Object.fromEntries(Object.entries(plans).filter(([, p]) => !p?.seed || p.who === who))));
         // 刚走没多久（同一格里，span 以"同一"开头）、不是没人接那种、他走时说的事还没到办的时候：结算说要联系也先按下——记成他心里的，不挂门上
@@ -913,9 +924,9 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
         const gate = bodyGate({ messages, userName });
         const herAliases = rel ? (p => (p ? [p.名, ...(p.又名 ?? [])].filter(Boolean) : []))(personOf(rel, userName, roster)) : [];
         const bodyHold = !unanswered && holdBodyContact({ contact: got.contact, gate, userName, aliases: herAliases });
-        if (got.contact?.way !== '不' && justLeft) records.addDerived({ storyId: chat.story_id, fp, type: '心里', text: `${who}想过要${got.contact.way === '上门' ? '过去一趟' : got.contact.way === '电话' ? '打个电话' : '发条消息'}（${String(got.contact.text ?? '').slice(0, 80)}），${neverHere ? '先按下了' : '想想刚分开没多久，先按下了'}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
-        else if (bodyHold) records.addDerived({ storyId: chat.story_id, fp, type: '心里', text: heldContactText({ who, way: got.contact.way, userName, gate }), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
-        else if (got.contact?.way !== '不') store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way: got.contact.way, text: got.contact.text, at: last.pos, fp, used: false }));
+        if (got.contact?.way !== '不' && justLeft) addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}想过要${got.contact.way === '上门' ? '过去一趟' : got.contact.way === '电话' ? '打个电话' : '发条消息'}（${String(got.contact.text ?? '').slice(0, 80)}），${neverHere ? '先按下了' : '想想刚分开没多久，先按下了'}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+        else if (bodyHold) addSettle({ storyId: chat.story_id, fp, type: '心里', text: heldContactText({ who, way: got.contact.way, userName, gate }), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+        else if (got.contact?.way !== '不') store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way: got.contact.way, text: got.contact.text, at: last.pos, fp, basisDay: tl.today, used: false }));
         // 没人接的那一回（waiting.mjs）：再找（发消息、打电话、找上门）→ 门上换成这一回的；放下 → 门上那一项收起（挂在这一条上，删回去就回来）
         if (unans.length) {
             const u = unans[0];
@@ -930,17 +941,17 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
                 let earlier = null;
                 if (src?.type === 'pocket') { const m = store.menuOf(chatKey).find(x => x.id === Number(src.id)); if (m) earlier = { way: u.how === '打来电话' ? '电话' : '消息', title: m.title ?? '', surface: m.surface ?? '', respond: m.respond ?? '' }; }
                 if (src?.type === 'contact') { try { earlier = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null')?.earlier ?? null; } catch {} }
-                store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way, text: (got.contact?.way !== '不' && got.contact?.text) || note, at: last.pos, fp, used: false, from: 'unanswered', ...(pull ? { pull } : {}), ...(earlier?.surface ? { earlier } : {}) }));
-                records.addDerived({ storyId: chat.story_id, fp, type: '心里', text: `${who}找过${userName}没人接，又${way === '上门' ? '找上门去' : way === '电话' ? '打了电话' : '发了一条'}：${note}`.slice(0, 200), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+                store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way, text: (got.contact?.way !== '不' && got.contact?.text) || note, at: last.pos, fp, basisDay: tl.today, used: false, from: 'unanswered', ...(pull ? { pull } : {}), ...(earlier?.surface ? { earlier } : {}) }));
+                addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}找过${userName}没人接，又${way === '上门' ? '找上门去' : way === '电话' ? '打了电话' : '发了一条'}：${note}`.slice(0, 200), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
             } else if (result === '放下') {
                 const src = unanswered.item?.source;
                 if (src?.type === 'pocket' && Number.isInteger(Number(src.id))) store.updateMenu(chatKey, Number(src.id), { status: 'sunk', at: { pos: last.pos, fp } });
                 if (src?.type === 'contact') { try { const c = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null'); if (c) store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ ...c, used: true, usedAt: { pos: last.pos, fp } })); } catch {} }
-                records.addDerived({ storyId: chat.story_id, fp, type: '改变', duration: '几天', text: `${who}找过${userName}没人接，先放下了：${note}`.slice(0, 200), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
+                addSettle({ storyId: chat.story_id, fp, type: '改变', duration: '几天', text: `${who}找过${userName}没人接，先放下了：${note}`.slice(0, 200), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
             }
             log(`settle ${chatKey} ${who} (没人接 #${u.n}): ${result}${got.pull ? `；顺带：${got.pull.promise.slice(0, 30)}` : ''}`);
         }
-        store.setMeta(`settled:${chatKey}:${who}`, JSON.stringify({ day: tl.today, part: tl.part, pos: last.pos, fp }));
+        store.setMeta(`settled:${chatKey}:${who}`, JSON.stringify({ day: tl.today, basisDay: tl.today, part: tl.part, pos: last.pos, fp }));
         return { ok: true, ...got };
     } catch (error) {
         records.logAssemble({ chatKey, speaker: '(结算)', model: s.model, status: 'failed', ms: Date.now() - started, error: error.message });
@@ -1748,9 +1759,11 @@ async function situationOnce({ chatKey, day, loud = null, skip = null }) {
         const r = await createModelClient({ baseUrl, apiKey, model, maxOutputTokens: 6000, extraBody: a.extraBody }).complete({ system: SITUATION_SYSTEM, user: m.prompt });
         const costUsd = ((r.usage?.input ?? 0) * a.priceInPerM + (r.usage?.output ?? 0) * a.priceOutPerM) / 1e6;
         const v = parseSituation(r.text, { ...m.check, day, seen: m.prompt });
-        situation.putTick({ storyId: m.storyId, chatKey, day, anchor: m.anchor, raw: r.text, moves: v.moves, spreads: v.spreads, outcomes: v.outcomes, reviews: v.reviews, lag: skip && !skip.lumped ? Math.max(0, skip.toDay - day) : 0 });
-        recordOutcomes(situation, v.outcomes, { anchor: m.anchor, storyId: m.storyId, addRecord: records.addDerived, errands: m.errands });
-        for (const x of v.reps ?? []) records.addDerived(repRecord(x, { storyId: m.storyId, anchor: m.anchor }));
+        const lag = skip && !skip.lumped ? Math.max(0, skip.toDay - day) : 0;
+        situation.putTick({ storyId: m.storyId, chatKey, day, anchor: m.anchor, raw: r.text, moves: v.moves, spreads: v.spreads, outcomes: v.outcomes, reviews: v.reviews, lag });
+        const addSituation = data => records.addDerived({ ...data, known: [...(data.known ?? []), { basis: { pos: m.anchor.pos, fp: m.anchor.fp, day: day + lag, exact: true } }] });
+        recordOutcomes(situation, v.outcomes, { anchor: m.anchor, storyId: m.storyId, addRecord: addSituation, errands: m.errands });
+        for (const x of v.reps ?? []) addSituation(repRecord(x, { storyId: m.storyId, anchor: m.anchor }));
         // 后续（N-268：事事有着落）：刚有了结果的事留下的后续，补进眼下这个节点（挂在推演那条消息上，删到它之前就撤回），由合适的人挑时候拿出来
         const plan = store.lastReadyPlan(chatKey);
         if (v.followups.length && plan) {

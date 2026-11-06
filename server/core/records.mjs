@@ -52,6 +52,9 @@ export function similar(a, b) {
 
 export function openRecords(db) {
     db.exec(SCHEMA);
+    let sourceLive = null, sourceReader = null;
+    const setSourceLive = (fn, reader = null) => { sourceLive = fn; sourceReader = reader; };
+    const liveSource = (known, chatKey, check) => !sourceLive || !known?.some(k => k?.basis && !(check ? check(k.basis) : sourceLive(chatKey, k.basis)));
     // 读缓存（10/16 提速，和 store.memo 一个道理）：同一连接上写过就清；visible 一轮里被叫几十次
     const changesQ = db.prepare('select total_changes() n');
     const memoStore = new Map();
@@ -227,16 +230,17 @@ export function openRecords(db) {
     // 窗口当前看得见的记录（消息还在序列里的）。带上出处位置。
     // 对账以后每条还带：closed_by（被看得见的"了结"或"回答"关上了：{id, pos}）、superseded_by（被看得见的"改掉"换掉了，以后不算数）。
     // 被改掉的默认不给（那一格、规划、账本都只拿活着的）；all=true 时连它们一起给（面板上划线显示）。
-    function visible(chatKey, { status = 'ok', type = null, all = false } = {}) { return memo('visible', `${chatKey}|${status}|${type ?? ''}|${all ? 1 : 0}`, () => readVisible(chatKey, { status, type, all }), a => [...a]); }
-    function readVisible(chatKey, { status = 'ok', type = null, all = false } = {}) {
+    function visible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false } = {}) { return memo('visible', `${chatKey}|${status}|${type ?? ''}|${all ? 1 : 0}|${rawBasis ? 1 : 0}`, () => readVisible(chatKey, { status, type, all, rawBasis }), a => [...a]); }
+    function readVisible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false } = {}) {
         const rows = q(`select r.*, min(s.pos) pos from records r
                         join chats c on c.key = ? and c.story_id = r.story_id
                         join chat_seq s on s.chat_key = c.key and s.fp = r.fp
                         where r.status = ?${type ? ' and r.type = ?' : ''}
                         group by r.id order by pos, r.id`).all(...[chatKey, status, ...(type ? [type] : [])]);
-        const out = rows.map(r => ({ ...r, quotes: JSON.parse(r.quotes), audience: JSON.parse(r.audience), keys: r.keys ? JSON.parse(r.keys) : [], money: r.money ? JSON.parse(r.money) : null, relation: r.relation ? JSON.parse(r.relation) : null, clock: r.clock ? JSON.parse(r.clock) : null, wide: r.wide ? JSON.parse(r.wide) : [], faction: r.faction ? JSON.parse(r.faction) : null, promise: r.promise ? JSON.parse(r.promise) : null, known: r.known ? JSON.parse(r.known) : [], lesson: r.lesson ? JSON.parse(r.lesson) : null, life: r.life ? JSON.parse(r.life) : null, rep: r.rep ? JSON.parse(r.rep) : null, matter: r.matter ? JSON.parse(r.matter) : null }));
+        const check = !rawBasis && sourceReader ? memo('sourceReader', chatKey, () => sourceReader(chatKey)) : null;
+        const out = rows.map(r => ({ ...r, quotes: JSON.parse(r.quotes), audience: JSON.parse(r.audience), keys: r.keys ? JSON.parse(r.keys) : [], money: r.money ? JSON.parse(r.money) : null, relation: r.relation ? JSON.parse(r.relation) : null, clock: r.clock ? JSON.parse(r.clock) : null, wide: r.wide ? JSON.parse(r.wide) : [], faction: r.faction ? JSON.parse(r.faction) : null, promise: r.promise ? JSON.parse(r.promise) : null, known: r.known ? JSON.parse(r.known) : [], lesson: r.lesson ? JSON.parse(r.lesson) : null, life: r.life ? JSON.parse(r.life) : null, rep: r.rep ? JSON.parse(r.rep) : null, matter: r.matter ? JSON.parse(r.matter) : null })).filter(r => rawBasis || liveSource(r.known, chatKey, check));
         if (status !== 'ok') return out;
-        const { closed, superseded, outgoing } = linksOf(chatKey);
+        const { closed, superseded, outgoing } = linksOf(chatKey, rawBasis);
         const byId = new Map(out.map(r => [r.id, r]));
         const targetOf = id => byId.get(id) ?? q('select id, text, holder_name from records where id = ?').get(id) ?? null;
         for (const r of out) {
@@ -255,16 +259,18 @@ export function openRecords(db) {
     }
 
     // 看得见的了结和链接：关上了谁（了结、回答）、换掉了谁（改掉）。只认发起那条记录还看得见的。
-    function linksOf(chatKey) { return memo('links', chatKey, () => readLinks(chatKey)); }
-    function readLinks(chatKey) {
+    function linksOf(chatKey, rawBasis = false) { return memo('links', `${chatKey}|${rawBasis ? 1 : 0}`, () => readLinks(chatKey, rawBasis)); }
+    function readLinks(chatKey, rawBasis = false) {
         const closed = new Map(), superseded = new Map(), outgoing = new Map();
-        const seen = q(`select r.id, r.type, r.idea_ref, l.to_id, l.kind, min(s.pos) pos from records r
+        const seen = q(`select r.id, r.type, r.idea_ref, r.known, l.to_id, l.kind, min(s.pos) pos from records r
                         join chats c on c.key = ? and c.story_id = r.story_id
                         join chat_seq s on s.chat_key = c.key and s.fp = r.fp
                         left join record_links l on l.from_id = r.id
                         where r.status = 'ok' and (r.type = '了结' or l.id is not null)
                         group by r.id, l.id order by pos, r.id`).all(chatKey);
+        const check = !rawBasis && sourceReader ? memo('sourceReader', chatKey, () => sourceReader(chatKey)) : null;
         for (const x of seen) {
+            if (!rawBasis && !liveSource(x.known ? JSON.parse(x.known) : [], chatKey, check)) continue;
             if (x.type === '了结' && x.idea_ref != null && !closed.has(x.idea_ref)) closed.set(x.idea_ref, { id: x.id, pos: x.pos });
             if ((x.kind === '回答' || x.kind === '证实') && !closed.has(x.to_id)) closed.set(x.to_id, { id: x.id, pos: x.pos, kind: x.kind });
             if ((x.kind === '改掉' || x.kind === '否定') && !superseded.has(x.to_id)) superseded.set(x.to_id, { id: x.id, pos: x.pos, kind: x.kind });
@@ -428,5 +434,5 @@ export function openRecords(db) {
         q('update chats set extract = ? where key = ?').run(on ? 1 : 0, chatKey);
     }
 
-    return { setPromise, correct, isDone, startJob, setServed, failJob, finishJob, replaceJobRecords, spentToday, spentTodayOn, logAssemble, assembleCalls, visible, openIdeas, openTodos, jobs, failures, recentFailures, skipped, unskip, skip, retireDerived, setKeys, setWide, setExtract, addDerived, seedsAt, retire, moveDerived };
+    return { setSourceLive, setPromise, correct, isDone, startJob, setServed, failJob, finishJob, replaceJobRecords, spentToday, spentTodayOn, logAssemble, assembleCalls, visible, openIdeas, openTodos, jobs, failures, recentFailures, skipped, unskip, skip, retireDerived, setKeys, setWide, setExtract, addDerived, seedsAt, retire, moveDerived };
 }
