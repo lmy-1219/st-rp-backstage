@@ -134,13 +134,13 @@ export function parseSituation(text, { known = [], main = [], ids = new Set(), a
         if (!ids.has(source) && !errands.has(source)) { dropped.push({ item: x, reason: `传开的那件不在这一天的记录里：${x?.['哪件']}` }); continue; }
         // 结果没交回来的托付，不许先传开（那等于替它定了结果）。
         if (errand && !settled.has(source)) { dropped.push({ item: x, reason: '传开的托付没有结果' }); continue; }
-        if (!target || !heard) { dropped.push({ item: x, reason: '传开缺传到谁或听到的样子' }); continue; }
+        if (!target || !heard || !channel) { dropped.push({ item: x, reason: '传开缺传到谁、渠道或听到的样子' }); continue; }
         const notice = !!principal && (target === principal || target === '主角');
         if (!notice && !isKnown(target)) { dropped.push({ item: x, reason: `不认得：${target}` }); continue; }
         if (!notice && aware(source).some(n => samePerson(n, target))) { dropped.push({ item: x, reason: `${target}当时就知道` }); continue; }
         if (!(after >= 0 && after <= 7)) { dropped.push({ item: x, reason: `几天后不对：${x?.['几天后']}` }); continue; }
         if (spreads.length >= 8) { dropped.push({ item: x, reason: '一天至多八条' }); continue; }
-        spreads.push({ source, target: notice ? principal : target, channel: channel || '传闻', due: day + after, heard });
+        spreads.push({ source, target: notice ? principal : target, channel, due: day + after, heard });
     }
     // 后续：哪件得是给过的结果；牵头的得认得（或者"世界"）；露面、应答都要有。
     for (const f of Array.isArray(obj?.['后续']) ? obj['后续'].slice(0, 5) : []) {
@@ -336,7 +336,5 @@ export function situationSlotLines(now, { name, today, records, dayOf, notices =
     const heard = now.delivered.filter(s => s.target !== principal && samePerson(s.target, name) && byId.has(s.record_id) && today - dayOf(byId.get(s.record_id).pos) <= 1).slice(-2);
     if (heard.length) lines.push(`${name}最近听说的（传到${personWord(name)}耳朵里的样子，不一定是实情；提不提、信不信由${name}）：`, ...heard.map(s => `· ${tidy(s.heard)}（${s.channel}）`));
     // 外面的动静：前一天、今天的，而且挂的那条离现在不到 MOVE_WINDOW 条（剧情日走得慢时，同一条不要挂几百条消息）
-    const seen = now.moves.filter(m => m.seen && today - m.day <= 1 && !(lastPos != null && Number.isFinite(m.pos) && lastPos - m.pos > MOVE_WINDOW)).slice(-2);
-    if (seen.length) lines.push('外面的动静（可用可不用：场面松的时候从街谈巷议、传来的消息、谁的一句话里冒出来；正说到要紧处就当没看见）：', ...seen.map(m => `· ${tidy(m.seen)}`));
     return lines;
 }

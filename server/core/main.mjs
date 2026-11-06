@@ -34,7 +34,7 @@ import { storyYear } from './world.mjs';
 import { turnWorth, planRetryDue } from './planner.mjs';   // 转向检查先程序初筛（10/16）；规划连不上自己再试（T074）
 import { NOW_MOTIF, PLAN_SYSTEM, withIntimate, API_PLAN_NOTE, placePrep, parsePlan, verifiedPlanSourceIds, NODE_CHECK_SYSTEM, nodeCheckPrompt, parseNodeCheck, TURN_CHECK_SYSTEM, turnCheckPrompt, parseTurnCheck, premiseWaiting, premiseVoids } from './planner.mjs';
 import { planRoster, normalizeRelations, personOf, leaderOf } from './relations.mjs';
-import { ARRIVAL_SYSTEM, arrivalPrompt, parseArrival, lastLeave, awaySpan, validAwayPlan, LEAVE_SYSTEM, leavePrompt, parseLeave, isRemote, metInPerson, justLeft, openNow } from './arrival.mjs';
+import { ARRIVAL_SYSTEM, arrivalPrompt, parseArrival, groundedArrivalReason, lastLeave, awaySpan, validAwayPlan, LEAVE_SYSTEM, leavePrompt, parseLeave, isRemote, metInPerson, justLeft, openNow } from './arrival.mjs';
 import { enteredSince, landSent } from './landing.mjs';
 import { intentRecord, closeIntents } from './matters.mjs';
 import { SETTLE_SYSTEM, settlePrompt, parseSettle } from './settle.mjs';
@@ -142,7 +142,7 @@ const advisorNote = id => (advisor.ready() ? [
 ].join('\n') : null);
 // strict：年份和年表对不上就退回让写的人改（窗口写的）；调 API 写的没人能改，照收并记一笔。
 const planOptions = chatKey => intimatePlanOptions(store, chatKey, planRoster(store, store.requireChat(chatKey).story_id, { chatKey }));
-const planSourceIds = (chatKey, brief) => verifiedPlanSourceIds(store, records, chatKey, brief);
+const planSourceIds = (chatKey, brief, through = null) => verifiedPlanSourceIds(store, records, chatKey, brief, through);
 const planSystemFor = (chatKey, model, config) => { const options = promptOptionsFor(store, chatKey, config); return renderPronouns(withIntimate(withTaste(paceCap(planSystem(options), paceFor(store, chatKey)), { ...options, kind: 'plan', model }), intimateSetup(store, chatKey), options), playerContext(store, chatKey)); };
 const requirePlanAttempt = id => { if (!store.ownsPlanAttempt(id)) throw Object.assign(new Error('plan_late：迟到作废'), { status: 409 }); };
 const observePlanAttempt = id => {
@@ -166,7 +166,7 @@ const applyPlan = (planId, text, { strict = true, strictFormat = false, attempt 
     requirePlanAttempt(attempt);
     store.updatePlanAttempt(attempt, { stage: '解析', outputChars: text.length });
     const chat = store.requireChat(plan.chat_key);
-    const parsed = parsePlan(text, { ...planOptions(plan.chat_key), strictFormat, sourceIds: planSourceIds(plan.chat_key, plan.brief) });
+    const parsed = parsePlan(text, { ...planOptions(plan.chat_key), strictFormat, sourceIds: planSourceIds(plan.chat_key, plan.brief, plan.anchor_pos) });
     if (!parsed.items.length) throw Object.assign(new Error(`规划里的事一件都没过：${parsed.dropped.map(d => d.reason).join('；')}`), { status: 400 });
     const anchors = packOf(plan.chat_key)?.anchors;
     const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(chat.story_id)?.data).map(yearFlagText) : [];
@@ -616,7 +616,7 @@ async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, t
     records.logAssemble({ chatKey, speaker: '(规划)', model: p.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
     requirePlanAttempt(attempt);
     store.updatePlanAttempt(attempt, { ...r.telemetry, stage: '解析', outputChars: r.text.length });
-    const parsed = parsePlan(r.text, { ...planOptions(chatKey), sourceIds: planSourceIds(chatKey, brief) });
+    const parsed = parsePlan(r.text, { ...planOptions(chatKey), sourceIds: planSourceIds(chatKey, brief, at?.pos ?? null) });
     // 到了那个地方补的、当天就用的：此刻就在那儿才用得上，不排在口袋里别的事后头（按"当下"放：到了就进口袋、不占份数，先递）——
     // 试玩 10/9：吧台那几件补进来以后，口袋被两件别处的事占满，一直进不来
     const items = parsed.items.slice(0, 4).map(m => ({ ...m, line: m.line || line, ...(reason === 'place' && !(m.afterDays > 0) ? { motif: NOW_MOTIF } : {}) }));
@@ -1123,7 +1123,8 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
         : knock ? [...knocksOf(store, chatKey)].reverse().find(k => k.at === at && k.fp === tip?.fp && k.who === who) : null;
     const basisDay = linked?.basisDay ?? store.confirmedDayAt?.(chatKey, tip?.pos) ?? storyContext(store, records, chatKey).today;
     const step = linked?.sourceStep ?? (offer?.source ? sourceStep(store, chatKey, { source: offer.source, who, at, fp: tip?.fp }) : null);
-    const arr = { who, avatar, at, fp: tip?.fp ?? null, basisDay, sourceStep: step, how: offeredHow || got?.how || '', why: got?.why || (offer?.from === 'settle' ? `他这回来是为了说：${offer?.why ?? ''}` : offer?.why || ''), saw: got?.saw ?? '', meanwhile: away && !fullySettled ? got?.meanwhile ?? '' : '', where: got?.where ?? '', from: offer?.from ?? 'user',
+    const groundedWhy = offer?.from === 'settle' && offer?.why ? `他这回来是为了说：${offer.why}` : offer?.why || offer?.sent?.surface || '';
+    const arr = { who, avatar, at, fp: tip?.fp ?? null, basisDay, sourceStep: step, how: offeredHow || got?.how || '', why: groundedArrivalReason(got, groundedWhy), saw: got?.saw ?? '', meanwhile: away && !fullySettled ? got?.meanwhile ?? '' : '', where: got?.where ?? '', from: offer?.from ?? 'user',
         // 他刚发过、打过的那条（场记章程 B1）：他头两回开口那一格带上（arrivedLines），接着这件说、不重发
         ...(offer?.sent?.surface ? { sent: { way: offer.sent.way, surface: offer.sent.surface, respond: offer.sent.respond ?? '' } } : {}),
         // 没人接又来找的：头一回那条（没递到玩家眼前，或者玩家没理）

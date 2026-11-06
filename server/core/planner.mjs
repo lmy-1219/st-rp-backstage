@@ -13,12 +13,14 @@ import { briefSection, activeIntimate, checkIntimate } from './setup.mjs';
 import { HOLD_KEYS, holdOf } from './held.mjs';
 import { briefSection as relationsSection } from './relations.mjs';
 import { repairQuotes } from './extract.mjs';
+import { recordKnownTo } from './recall.mjs';
 import { diceLines } from './dice.mjs';
 import { profileParts } from './profile.mjs';
 import { RETIRES_POCKET, hisReply } from './store.mjs';
 import { scaleOf, scaleNote, DAY } from './timescale.mjs';
 import { paceOf, paceNote, spreadLine } from './tempo.mjs';
 import { dateIn, dayNumber } from './timeline.mjs';
+import { sameName } from './setup.mjs';
 
 // 【怎么排才好看】（章程 J1；T076 收成九条：八条口味＋一条底线）。基调和类别是和玩家的约定。
 // 用户 10/12：开局单的基调写的是日常、喜剧、热血，规划却连着几份排伤病；开局单写好要来的主线在"往后"里推了六份没排进来。
@@ -41,7 +43,7 @@ export const PLAN_TASTE = [
 // 某处某天有一场活动，邀请只靠在场的人"挑时候"递，紧戏里一直没递；海报要她恰好路过——她不知道，就直接错过了。
 // 所以要她在场才有戏、又不是她自己会去的那种"到现场"，同一份里配一件找上门的引子，先让她知道在哪、哪天、什么事。
 // 送不到的程序兜底（eventlead.mjs），这里只给口味。测试拿它核对 PLAN_SYSTEM 里有它
-export const LEAD_NOTE = "引子——\"到现场\"的活动要〔玩家〕在场才有戏、又不是〔玩家〕自己会去的（谁去不是〔玩家〕）：要让〔玩家〕先有机会知道在哪、哪天、什么事——可以配一件\"找上门\"的引子排在活动前面：有人来约、来消息、电视或街头新闻、路人闲聊、传单海报，按这一局说得通的样子。活动那件写\"引子\"：引子那件的题（没有就空着）。";
+export const LEAD_NOTE = '引子——真需要先收到消息才会去的活动，配一件在眼下处境中送得到的邀请或可见迹象，写清谁为何来、怎样到眼前；活动的"引子"指向那件。本人本来就想去办事，用由头接上即可；尚无来路的相遇，留在现场等人走到。';
 
 // T012：用户指定原文，修改措辞须由用户确认；逐字回归锁定。
 // 亲密件的五格（T013）；旧件存的是名目、新在哪、走到哪、留下什么，照旧能读
@@ -85,7 +87,7 @@ export const PLAN_SYSTEM = [
     "  没有分寸之争的关系，\"界线\"空着，别给每一行都补。写了就写全，别只写\"不越界\"。",
     // 主角团这一段（章程 K1，方案"主角团规划"二.2）：各人自己想干的、会拉她做的、会为她做的、团里谁和谁之间会出什么，加一句感情线
     '- 主角团这一段：简报里【主角团】列了谁（没列就从基调、原则、意向里认，写出你认的是谁），除了玩家的角色，每人一条——想干：他自己这阵子想办成的事，按他的性子和处境；下一步：他接下来想做的事（找谁、去哪、弄什么），写成他的打算，不写成"遇到什么就怎么做"。',
-    "  拉〔玩家〕：会约〔玩家〕、求〔玩家〕、带〔玩家〕去做的事；为〔玩家〕：会为〔玩家〕做的事，顺手的、〔玩家〕有难时的都算——找人、找东西、挡事、陪着、替〔玩家〕出头，写具体的事，不写拦〔玩家〕、数落〔玩家〕、替〔玩家〕拿主意；",
+    "  拉〔玩家〕：会约〔玩家〕、求〔玩家〕、带〔玩家〕去做的事；为〔玩家〕：这一段愿意怎样帮〔玩家〕，给你排事参考；需要特定场景才会发生的帮助，落在相应事件里。眼前怎样关心、怎样出手，留给人物照当前处境发挥；",
     "  团里：这一段他和团里某人之间会出什么（争吵、误会、哥俩好、玩闹、较劲、惊喜、矛盾），各一句因为什么。想干的是他自己的事，不是绕着〔玩家〕转的任务。",
     '  下一步、打算、心思只用他眼下已经知道的：别人那边安排给他的、约他的、要派给他的活，他还没收到，就先排成一件事（谁、怎么把话递到他手上），递到了以后他才会去做——别直接写进他的下一步，他会编一个自己怎么知道的来圆。',
     // 心思（用户 10/12，数据约定第 2、3 条）：他背后的用意以前只在"来由"里，前台和他本人都拿不到，多拍的、本人心里有数的事装不下
@@ -111,14 +113,14 @@ export const PLAN_SYSTEM = [
     '  生人在露面、应答、知情里只用称呼，不写名字——城里没人知道每个陌生人叫什么，名字留在后台，主角那边问了、查了、看见名牌才用；街坊熟人可以直接叫名字；',
     '只为这一局编，别借原作或别的故事里的人；真不是哪个人牵头的——传闻、某个势力的动静、这个地方本身的变化——才写"世界"）；露面——一句可以被看见的事（它冒出来的样子，不写它怎么收场）；应答——玩家那边伸手、问起时它的内容（前台不会吊着给，但牵头的人怎么给、留不留一手由他）；',
     '沉底——一直没人理会会怎样，一句，不带责备；第几天后（从今天起算，0＝现在就行）；在哪件之后（写那件的题，上一份里还排着的旧件的题也行；没有就空着）；用在什么场面（玩家看得到的那一刻：在场的人在哪、在干什么时它冒出来；别写"或者某人回来说起"）、分量多大（一句/半轮/一整轮）；',
-    '进场——这件事怎么来到眼前，三选一：找上门（来电、敲门、楼下撞见、捎来的话，到了日子就能冒出来）；到现场（得有人去了那个地方才碰得上：看房碰上的中介、零件摊、包厢里等着的人）——再写"在哪"（几个字）、"谁去"（谁会去那儿）、"由头"（他为什么会去，一句，给他当自己惦记的事；不写会碰上什么）、"路标"（一句，玩家看得到：从玩家已经听说的由头出发，写去哪儿、为什么值得去，必须写到"在哪"；不写去了会碰上什么）；镜头外（玩家不在的时候发生在牵头的人身上，他一个人去办事撞上的——那就是他自己的经历，剧情时间真过去了才算发生，提不提、怎么提由他）。能当着玩家发生的，别写成镜头外。',
+    '进场——这件事怎么来到眼前，三选一：找上门（来电、敲门、楼下撞见、捎来的话，到了日子就能冒出来）；到现场（得有人去了那个地方才碰得上：看房碰上的中介、零件摊、包厢里等着的人）——再写"在哪"（几个字）、"谁去"（实际会去的人）、"由头"（这个人凭眼下知道的事，为什么想去；写本人需要，不预告现场的遭遇）、"路标"（玩家已经知道的去处和理由；还不知道就空着）。到场前需要递由头时，"入戏依据"写 {"本人打算":"姓名"}，或 {"记录":[本次材料中的编号]}；自己的打算只交给本人，已有消息保留是谁怎样知道的；镜头外（玩家不在的时候发生在牵头的人身上，他一个人去办事撞上的——那就是他自己的经历，剧情时间真过去了才算发生，提不提、怎么提由他）。能当着玩家发生的，别写成镜头外。',
     LEAD_NOTE,
     '每件事再说清它是干什么用的、什么时候冒出来、什么时候作废、靠什么还成立、接了不接各落下什么、最多走到哪就算完（用意、触发、时效、前提、接了会怎样、没接会怎样、收尾，写法看最后的样例）——用意只写主线／关系／意外／氛围四个词之一，别写句子；其余几格各一两句，写实在的，别复述露面和触发。',
 '收尾——这件事最多走到哪就算完、完了落下什么，一句（"看完就完了，落下一句下回还来"）；过程性的（看病、吃药、复查、办手续、赶路、修东西）收尾写"办完就完"，不排后续。变数——这一场的一个意外（让谁受伤或误判、引出后面的事、逼出一个选择、露出谁的性子、制造笑点），一句，写明它为了什么；要紧的戏默认要写，照直来更好看的才空着。',
     // 用户 10/12：以前这句把事一律往"发生在他身上"推，他自己想干的事写不出来；只管他真不在乎的事
     '照牵头的人的性子排：他真不在乎的事（按名册里他的做派、聊天习惯），别写成他的难题——写成世界怎么对他，他怎么接由前台；他在乎的事，他会自己出手（找人、去办、开口、准备），写成他自己的事；',
     '写到开局单、世界书、账里已经有的事，时间、数目、谁、什么东西照原文写，别换说法、别改数（"将近半年里陆续……"别写成"半年前……"）：你写的会一字不差递给前台，换一个说法前台就跟着换，再被记成新的事实。',
-    '知情——这件事拿出来的时候，牵头的人知道什么、眼里看到的是什么（只写他知道的、他看得到的）；来由——这件事背后是怎么回事：谁、为什么、从哪来（一两句；牵头的人看不到的那一截也写在这里——它不给前台，只在有人追查时才露一截，往后的规划和后续也照它，前后对得上）；母题——几个字，这件事是哪一类。',
+    '知情——牵头的人凭自己的经历、收到的话和眼前所见，能知道哪一截，连着来路写。到了现场才会知道的，留到现场；来由——幕后为什么会有这件事，写给后续规划保持一致，不当作人物已经知道；母题——几个字，这件事是哪一类。',
     '新编的大设定（某人的来历、某样东西的秘密）先写进"下次带上"当提议，别直接写进来由和知情。',
     '事情拿出来以后不会就这么完了：它会挂在知道的人心里，直到正文里有了着落（解决了、弄清了、放下了），或者过了一阵没人追，照"收尾"那句落地；有人问起、去查，就顺着来由往下。所以露面、应答只写这一拍，别替它收尾——它最多走到哪写在"收尾"里。',
     '一件事写一个拍子：露面、应答里别替场面收尾——谁什么时候走、一场戏什么时候散，看玩家和场面；别把离开、道别、"聊到后面"写进去。',
@@ -135,7 +137,7 @@ export const PLAN_SYSTEM = [
     '每一格（露面、应答、知情、来由、用在）单拿出来也得看得懂：前台一次只拿到这一格，看不到你写的别的格和前后文。谁（名字；生人写称呼）对谁、在哪（具体哪一处：谁家、哪条街、哪家店）、什么东西（谁的、从哪来的、是什么）都写出来；别写"那只箱子""那张脸""一个人来""电话这头""要人"这种只有你自己知道指什么的说法——写成"甲从乙那儿拿回来的那只箱子""别带甲来""要乙今晚独自来某处"。"外面""外头""楼下""这边"也是：写哪儿外头（"某楼外头""某店门口"）；东西现在在谁手上、是谁开来的、带来的写明（别写"甲的车停在外头"——写"乙开着甲那辆车来的，停在某店门口"），不然前台会当成眼前这地方、当成甲也来了。',
     '别写台词，别替玩家说、做、想、选；别用原作或设定里的冷门细节（拿不准就写"街角那家"、用新面孔，或者问参谋）；已经发生的事按账本来，别改。',
     '露面、应答、知情、来由里不写给后台或程序的话（"由系统推演""前台不用管""由骰子生成"、文件名、编号说明都不写）：这几格是故事里的事，迟早原样递到角色手上。',
-    '谁在什么时候能知道什么，按【人物关系表】和已经发生的事来：没人告诉过、没亲眼见过、他的门路打听不到的，他就不知道，露面和应答里也别让他知道；',
+    '人物从自己的处境出发：知道的有来路，想做的有自己的理由；没收到的话、还没去过的现场，仍是未知。来路接不上时，可以让事情换个合理方式来到眼前，也可以先留着。提议、猜想和已发生的事，沿用材料里的语气。',
     '有【势力账】时，各方的动向照它来：不知道实情的一方，照它以为的那样行事（被瞒着的照样信、照样合作，直到有人把事传到它那里）；没了结的约定两边都记着，谁违约、谁翻脸都要有缘由；',
     '一件事传开要有人传、要有时间。各人按自己的处境和本事办事；只跟着别人出现的人，和他跟着的人一起排，"谁"写被跟着的那个；',
     '写了"什么时候才会来"的，条件没到别排。',
@@ -149,7 +151,7 @@ export const PLAN_SYSTEM = [
     ' "新面孔": [{"名": "...", "是谁": "一句", "熟不熟": "街坊熟人|生人", "称呼": "没名字时怎么叫"}],',
     ' "旧件": [{"题": "上一份那件的题", "处理": "留|撤|换", "换成": "换的时候写接替它的那件的题"}],',
     ' "口子": [{"题": "那件的题", "处理": "收|续", "落地": "收的时候：它是怎么落地的，一句", "续成": "续的时候：这一份里接着它的那件事的题"}],',
-    ' "事件": [{"线": "...", "谁": "...", "题": "几个字", "露面": "...", "应答": "...", "沉底": "...", "知情": "...", "来由": "...", "第几天后": 0, "在哪件之后": "", "跟着约定": "", "用在": "...", "进场": "找上门|到现场|镜头外", "在哪": "", "谁去": "", "由头": "", "路标": "", "引子": "", "分量": "...", "母题": "...",',
+    ' "事件": [{"线": "...", "谁": "...", "题": "几个字", "露面": "...", "应答": "...", "沉底": "...", "知情": "...", "来由": "...", "第几天后": 0, "在哪件之后": "", "跟着约定": "", "用在": "...", "进场": "找上门|到现场|镜头外", "在哪": "", "谁去": "", "由头": "", "路标": "", "入戏依据": null, "引子": "", "分量": "...", "母题": "...",',
     '   "类别": "撑的是开局单类别里的哪一样", "用意": "主线|关系|意外|氛围", "触发": {"场景": "镜头在哪、谁在场", "目标": "哪件事办成／没办成（也写进在哪件之后）", "时间": "第几天、什么时段（也写进第几天后）"}（用得上的写，可叠加）,',
     '   "时效": {"只在那场戏": "跟着人：谁｜跟着地方：哪儿｜跟着时间：什么时候"} 或 "当天|三天内|一直", "前提": "这件事成立靠的什么还没变", "接了会怎样": "往后落下什么", "没接会怎样": "牵头的人心里记下什么、外头有什么动静",',
     '   "收尾": "这件事最多走到哪就算完、完了落下什么，一句", "变数": "这一场的一个意外和它为了什么；照直来更好看才空着"}]}',
@@ -242,7 +244,10 @@ export const NODE_CHECK_SYSTEM = [
     '只按记下的事判断，不猜；拿不准就算"还没"。只输出一个 JSON：{"结果": "算成|落空|还没", "依据": "一句，引记下的事", "没接上": ["续了还没接上的那几件的题"], "漏了": [{"事": "原事文", "谁知道了": "名字", "怎么": "谁说的或亲眼撞见", "依据": "引用聊天或账里的原话"}]}。没有漏了就空数组。',
 ].join('\n');
 
-const lineOf = r => `· [${r.id}] ${r.when} ${r.holder_name ?? r.holder}：${r.text}`;
+const knowersOf = r => [...new Set([r.holder_name, ...(r.audience ?? [])].filter(Boolean))].join('、');
+const knownNote = r => knowersOf(r) ? `（可知：${knowersOf(r)}）` : '';
+const personSituation = e => e?.status ? `；处境：${e.status === 'away' ? '外头' : e.status}${e.way ? `，${e.way}` : ''}${e.place ? `，确知在${e.place}` : ''}` : '';
+const lineOf = r => `· [${r.id}] ${r.when} ${r.holder_name ?? r.holder}：${r.text}${knownNote(r)}`;
 
 // 规划简报：本局此刻的账（只给已经确立的事实和候选状态，给规划者看的幕后材料）。
 // s.ts：这一局的时间尺度（章程 G2）；按年、按月走的局，开头先说一句"天"按什么读，"第几天"写成第几年。
@@ -293,7 +298,7 @@ export function buildBrief(s) {
     const likes = e => profileParts(e.interests)['兴趣和习惯'].join('；').slice(0, 220);
     const tales = e => profileParts(e.interests)['往事'].join('；').slice(0, 200);
     const rosterLine = e => `${e.name}：${e.role}，${e.level}${e.hook ? `；钩子：${e.hook}` : ''}${likes(e) ? `；兴趣和习惯：${likes(e)}` : ''}${tales(e) ? `；往事：${tales(e)}` : ''}`;
-    out.push('', '【名册】（档位、亲疏、钩子、兴趣和习惯、往事）', ...s.cast.map(e => `· ${rosterLine(e)}`),
+    out.push('', '【名册】（档位、亲疏、钩子、兴趣和习惯、往事）', ...s.cast.map(e => `· ${rosterLine(e) + personSituation(e)}`),
         // 简报压过时（章程 H4）：最近没露面的只列名字·档位
         ...(s.castQuiet?.length ? [`· 其余的人（${QUIET_NOTE}）：${s.castQuiet.map(e => `${e.name}·${e.role}`).join('、')}`] : []));
     // 这一局到现在：账本里的要事按剧情日排（做了什么、改变了什么、了结了什么、时间、钱），给规划者看清前情；不是原文，是记下的事。
@@ -301,7 +306,7 @@ export function buildBrief(s) {
     const story = dedupeStory(s.story ?? []);
     if (story.length) out.push('', s.storyLayer ? `【这一局到现在】（${s.storyLayer}）` : `【这一局到现在】（从账本里挑的要事，按剧情日排；〔一直〕＝到现在还算数的改变${s.storyCut ? `；更早的零碎事略去了 ${s.storyCut} 条` : ''}）`,
         ...story.flatMap(d => [`${dayName(d.day)}（${d.when}）`, ...d.items.map(r => (r.scene ? `· 〔一场〕${r.place ? `${r.place}：` : ''}${r.text}`
-            : `· [${r.id}] ${r.holder_name ?? r.holder}：${r.text}${r.type === '改变' && LASTING.includes(r.duration) ? '〔一直〕' : ''}`))]));
+            : `· [${r.id}] ${r.holder_name ?? r.holder}：${r.text}${r.type === '改变' && LASTING.includes(r.duration) ? '〔一直〕' : ''}${knownNote(r)}`))]));
     if (s.lasting?.length) out.push('', '【一直有效的改变】（到现在还算数的）', ...s.lasting.map(lineOf));
     if (s.away?.length) out.push('', ...s.away);
     // 看场面冒出来的兴头（D-109）：规划顺着角色真实的心气走——冒过什么、给没给到前台
@@ -316,7 +321,7 @@ export function buildBrief(s) {
     if (s.promises?.length) out.push('', '【说好的事】（角色和玩家自己定下的；编号、谁和谁、什么、约在哪天、眼下到哪一步；最近有了结果的也在这里）', ...s.promises);
     if (s.money.length) out.push('', '【钱上没了结的】', ...s.money);
     if (s.recent?.length) out.push('', '【最近的要紧变化】', ...s.recent.map(lineOf));
-    if (s.absent.length) out.push('', '【不在场、有事挂着的人】', ...s.absent.map(p => `· ${p.person}（${p.role}，${p.level}）上次露面${p.lastSeen}${p.hook ? `；钩子：${p.hook}` : ''}`));
+    if (s.absent.length) out.push('', '【不在场、有事挂着的人】', ...s.absent.map(p => `· ${p.person}（${p.role}，${p.level}，${p.status ?? '外头'}）上次露面${p.lastSeen}${p.hook ? `；钩子：${p.hook}` : ''}`));
     // 一条长线会跨好几个节点：更早的节点各一行（目标、结局），免得规划者只看得见上一个。
     // 简报压过时（章程 H4）：最近 5 个一行，更早的并成一段"开局到现在"的大意（pastSofar：{ text, count }）
     const sofar = s.pastSofar?.text ? s.pastSofar : null;
@@ -356,7 +361,7 @@ export function buildBrief(s) {
         const solo = crew.names.every(isPlayer);
         out.push('', solo ? `【主角团】这一局的主角是${crew.names.join('、')}（单主角）：焦点和大多数事从${playerWord({ setup: s.setup, name: s.userName })}身上长，"围着主角团排"那几条用在${playerWord({ setup: s.setup, name: s.userName })}身上`
             : '【主角团】（故事围着转的这几个人，玩家的角色也在里面；焦点和大多数事从他们身上长）',
-            ...(solo ? [] : crew.names.flatMap(n => [`· ${isPlayer(n) ? `${n}（玩家的角色）` : entry(n) ? rosterLine(entry(n)) : n}`,
+            ...(solo ? [] : crew.names.flatMap(n => [`· ${isPlayer(n) ? `${n}（玩家的角色）` : entry(n) ? rosterLine(entry(n)) + personSituation(entry(n)) : n}`,
                 ...(lastOf(n) && said(lastOf(n)) ? [`  上一份写的：${said(lastOf(n))}`] : [])])),
             ...(!solo && crew.ties?.length ? ['团里两两眼下的关系：', ...crew.ties.map(t => `· ${t.谁}对${t.对谁}：${clip(t.现在, 160)}`)] : []),
             ...(crew.romance ? [`上一份写的感情线（走到哪了照聊天和账本里发生的；这一段接着往下挪一步，别从头再来，也别原地再写一遍）：${clip(crew.romance, 300)}`] : []));
@@ -820,15 +825,15 @@ export function sourceIdsFromBrief(brief = '') {
         menuResults: new Set([...text.matchAll(/\[事([1-9]\d*)\]/g)].map(m => Number(m[1]))),
     };
 }
-export function verifiedPlanSourceIds(store, records, chatKey, brief) {
+export function verifiedPlanSourceIds(store, records, chatKey, brief, through = null) {
     const ids = sourceIdsFromBrief(brief);
-    const visible = records.visible(chatKey);
+    const visible = records.visible(chatKey).filter(r => through == null || r.pos <= through);
     const recordIds = new Set(visible.map(r => r.id));
     const matters = new Map(visible.filter(r => r.type === '做' && r.matter?.menu != null && !r.matter.kind).map(r => [r.id, r.matter.menu]));
     const results = new Set(visible.filter(r => r.type === '了结' && r.outcome && matters.has(r.idea_ref)).map(r => matters.get(r.idea_ref)));
     return { records: new Set([...ids.records].filter(id => recordIds.has(id))), menuResults: new Set([...ids.menuResults].filter(id => results.has(id))) };
 }
-export function parsePlan(text, { names = [], foreign = [], leaderOf = () => null, player = [], cells = false, afterCap = 60, maxEvents = MAX_EVENTS, unitCap = 3, strictFormat = false, categories = [], crew = [], intimate = null, intimateProgress = [], carded = null, pace = null, sourceIds = null } = {}) {
+export function parsePlan(text, { names = [], foreign = [], leaderOf = () => null, resolvePerson = n => names.find(x => sameName(x, n, names)) ?? null, player = [], cells = false, afterCap = 60, maxEvents = MAX_EVENTS, unitCap = 3, strictFormat = false, categories = [], crew = [], intimate = null, intimateProgress = [], carded = null, pace = null, sourceIds = null } = {}) {
     const s = String(text ?? '').replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '');
     const body = s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1);
     let raw;
@@ -851,6 +856,26 @@ export function parsePlan(text, { names = [], foreign = [], leaderOf = () => nul
         .slice(0, 12);
     const allowed = [...names, ...faces.map(f => f.name)];
     const events = Array.isArray(raw['事件']) ? raw['事件'] : Array.isArray(raw['菜单']) ? raw['菜单'] : [];
+    const basisOf = (rawBasis, goer, title) => {
+        if (rawBasis == null) return null;
+        const keys = rawBasis && typeof rawBasis === 'object' && !Array.isArray(rawBasis) ? Object.keys(rawBasis) : [];
+        const resolve = name => resolvePerson(name) ?? faces.find(f => f.name === name)?.name ?? player.find(n => n === name) ?? null;
+        const whole = resolve(String(goer ?? '').trim());
+        const goers = whole ? [whole] : String(goer ?? '').split(/[、,，和与及]/).map(x => resolve(x.trim())).filter(Boolean);
+        const fail = () => { warnings.push(`「${title}」入戏依据无效，到场前不投影`); return null; };
+        if (keys.length !== 1 || !goers.length) return fail();
+        if (keys[0] === '本人打算') {
+            const person = typeof rawBasis.本人打算 === 'string' ? resolve(rawBasis.本人打算.trim()) : null;
+            if (!person || person === WORLD || player.some(n => sameName(n, person, names)) || !goers.some(n => sameName(n, person, names))) return fail();
+            return { self: person };
+        }
+        if (keys[0] === '记录' && Array.isArray(rawBasis.记录) && rawBasis.记录.length) {
+            const ids = rawBasis.记录;
+            if (ids.some(id => !Number.isSafeInteger(id) || id <= 0 || !sourceIds?.records?.has(id))) return fail();
+            return { records: [...new Set(ids)] };
+        }
+        return fail();
+    };
     for (const m of events) {
         const rawCause = m?.['起因'];
         let cause = null;
@@ -878,7 +903,8 @@ export function parsePlan(text, { names = [], foreign = [], leaderOf = () => nul
             // 收尾（最多走到哪就算完、完了落下什么）、变数（打的戏会出的意外）：章程 K1
             closeText: clean(m['收尾']).slice(0, 200), twist: clean(m['变数']).slice(0, 200),
             // 引子（章程 L1）：有日子的现场活动配的那件找上门的题；没写就没有这一格
-            ...(str(m['引子'], 30) ? { lead: str(m['引子'], 30) } : {}) };
+            ...(str(m['引子'], 30) ? { lead: str(m['引子'], 30) } : {}),
+            ...(m['入戏依据'] != null ? { entryBasis: basisOf(m['入戏依据'], m['谁去'], str(m['题'], 30)) } : {}) };
         // 用意写成了归不出来的话：记成氛围，照收；收下了在 dropped 里记一句（kept：这件收下了）
         const guessed = !item.purpose && str(m['用意'], 40);
         if (guessed) item.purpose = '氛围';
@@ -1242,7 +1268,7 @@ export const NOW_MOTIF = '后续·当下';
 // timeScale：这一局的尺度——放几格沉底按它（天尺度 2 天、慢沉 5 天；年尺度 1 年、2 年）；按消息数沉的不变。
 // pace：这局的节奏（章程 H2，tempo.paceOf）——份数、沉底的格数和条数、氛围意外各几件、一场戏叠几件；不给就是中档（和以前一样）。
 // stacked：此刻这场戏里已经拿出来、还没下文的有几件（stackedHere）；到了这一档的上限，别的先不进口袋（镜头外的、局势排的"当下"、跟着约定的不算）。
-export function stepPocket(menu, { today, dayOf = null, at = 0, firm = null, hold = null, keep = () => false, gone = null, timeScale = DAY, pace = null, stacked = 0, contentTier = null }) {
+export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, firm = null, hold = null, keep = () => false, gone = null, timeScale = DAY, pace = null, stacked = 0, contentTier = null }) {
     const ts = scaleOf(timeScale);
     const basePace = paceOf(pace, ts);
     const intimateFirst = contentTier === '纯NSFW';
@@ -1270,7 +1296,7 @@ export function stepPocket(menu, { today, dayOf = null, at = 0, firm = null, hol
         if (agedByDay(m) && !(at && Number.isFinite(m.pocket_pos) && at - m.pocket_pos >= (slow(m) ? p.slowMsgs : p.sinkMsgs))) Object.defineProperty(change, 'basisDay', { value: sink.today });
         changes.push(change);
     }
-    const gate = pocketGate(menu, { today: sink.today, at, hold, pace: p, stacked, contentTier, timeScale, gone,
+    const gate = pocketGate(menu, { today: sink.today, part, at, hold, pace: p, stacked, contentTier, timeScale, gone,
         statusOf: m => changes.find(c => c.id === m.id)?.status ?? m.status });
     for (const m of gate.ready) {
         if (!gate.canEnter(m.id)) continue;
@@ -1284,13 +1310,13 @@ export function stepPocket(menu, { today, dayOf = null, at = 0, firm = null, hol
 
 // 普通入袋和兴头提前共用；唯一可免的是候选件的 ready_day。
 // statusOf 让普通步进看见本轮先过期／沉底的结果；提前按写入前的最新菜单重建。
-export function pocketGate(menu, { today, at = 0, hold = null, gone = null, pace = null, stacked = 0, contentTier = null, timeScale = DAY, statusOf = m => m.status } = {}) {
+export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone = null, pace = null, stacked = 0, contentTier = null, timeScale = DAY, statusOf = m => m.status } = {}) {
     const base = paceOf(pace, scaleOf(timeScale)), intimateFirst = contentTier === '纯NSFW';
     const p = intimateFirst ? { ...base, mix: { ...base.mix, 亲密: base.name === '慢' ? 1 : 2 } } : base;
     const now = m => m.motif === NOW_MOTIF;
     const blocked = m => afterBlocked(m, menu, statusOf);
     const valid = m => statusOf(m) === 'waiting' && !gone?.(m)?.status && !blocked(m);
-    const ready = menu.filter(m => valid(m) && today >= m.ready_day)
+    const ready = menu.filter(m => valid(m) && today >= m.ready_day && triggerTimeReady(m, part))
         .sort((a, b) => rankOf(a, intimateFirst) - rankOf(b, intimateFirst) || a.ready_day - b.ready_day || a.id - b.id);
     const stillIn = menu.filter(m => statusOf(m) === 'pocket');
     const budget = pocketBudget(menu, ready.length, p);
@@ -1300,7 +1326,7 @@ export function pocketGate(menu, { today, at = 0, hold = null, gone = null, pace
         ready,
         canEnter(id, { ignoreReadyDay = false } = {}) {
             const m = menu.find(m => m.id === id);
-            if (!m || !valid(m) || (!ignoreReadyDay && !(today >= m.ready_day))) return false;
+            if (!m || !valid(m) || !triggerTimeReady(m, part) || (!ignoreReadyDay && !(today >= m.ready_day))) return false;
             if (entryOf(m) === '镜头外') return true;
             if (hold && !hold.related(m) && !now(m)) return false;
             if (!now(m) && kinds.has(m.purpose) && kinds.get(m.purpose) >= p.mix[m.purpose]) return false;
@@ -1457,20 +1483,15 @@ export function entryOf(m) {
 const PLACE_STOP = /的时候|时候|出门|一起|那儿|那里|这里|路上|地方|去的|到了|之后|以后|回来|一趟|接上|第[一二三]站|[今明昨]天|[今明昨][早晚]|早上|上午|中午|下午|傍晚|晚上|夜里|深夜|凌晨|两人|那个|这个|一个/g;
 const PLACE_END = /[摊店铺厅馆所院室场楼房吧介厢街巷站市库仓]/;
 export function nearPlace(m, sceneText, names = []) {
-    // 旧口袋只拿"用在"的头一句比（后面多是"V在不在旁边都行"这类附带说明，撞上"旁边"就误认）
-    let place = String(m?.place || String(m?.fit ?? '').split(/[，,；;、]/)[0] || '');
-    for (const n of names) if (n && n.length >= 2) place = place.split(n).join(' ');
-    place = place.replace(PLACE_STOP, ' ');
-    const scene = String(sceneText ?? '');
-    const runs = place.match(/[一-鿿]{2,}/g) ?? [];
-    if (!runs.length) return true;   // 抽不出地方（旧口袋的"用在"只写了"第一站"一类）：认不出就不拦
-    if (!m?.place) return runs.some(w => [...w].slice(0, -1).some((_, i) => scene.includes(w.slice(i, i + 2))));
-    const keys = runs.flatMap(w => [w.slice(-2), ...(w.length >= 3 ? [w.slice(-3)] : []),
-        ...[...w].flatMap((c, i) => (i >= 1 && PLACE_END.test(c) ? [w.slice(i - 1, i + 1), ...(i >= 2 ? [w.slice(i - 2, i + 1)] : [])] : []))]);
-    return keys.some(k => scene.includes(k));
+    const place = String(m?.place ?? '').trim().replace(/^在/, '').replace(/[「」]/g, '');
+    return place.length >= 2 && String(sceneText ?? '').includes(place);
 }
 // 镜头外的那件：进口袋以后剧情时间真过去了没有（跨天、时段跳了两档以上）。partAt(pos)：那条的时段。
 const PART_ORDER = ['早上', '上午', '中午', '下午', '傍晚', '晚上', '深夜', '凌晨'];
+export const triggerTimeReady = (m, part) => {
+    const wanted = PART_ORDER.indexOf(partIn(m?.trigger?.time));
+    return wanted < 0 || (PART_ORDER.indexOf(part) >= wanted);
+};
 export function timePassed(m, { at, dayOf = null, partAt = () => null, away = false } = {}) {
     if (away) return true;
     if (!Number.isFinite(m?.pocket_pos) || !dayOf) return false;
@@ -1484,8 +1505,45 @@ export function offscreenLines(m, { userName = '玩家' } = {}) {
         `  （这是${m.who}自己的经历：提不提、什么时候提、怎么提、说几分，照${personWord(m.who)}的性子；要是这段时间${personWord(m.who)}一直守在${userName}身边、没离开过，就当没发生，别提）`];
 }
 export function errandLines(m, { goer }) {
-    const what = m.errand || fitShown(m.fit) || m.title;
-    return [`${goer}手上还有件要去办的事：${what}${m.place ? `（得去${m.place}）` : ''}——去不去、什么时候去，照${personWord(goer)}的性子和眼下的场面定，别为它硬把人拉走；没去之前，那边的人和事不会自己找上门。`];
+    const what = String(m.entryText ?? '').trim();
+    return what ? [`${goer}想去办的一件事：${what}——去不去、什么时候去，照${personWord(goer)}的性子和眼下的场面定。`] : [];
+}
+// 只取这次真正能见到的记录。记录型沿原话和提议语气；找不到整句就留待后面。
+function linkedProjection(first, m, visible, viewer, same, leadId = null, strictSentence = false) {
+    const sources = Array.isArray(first) ? first : [first];
+    const firstPos = Math.min(...sources.map(r => r.pos ?? -Infinity));
+    const rows = visible.filter(r => sources.some(s => (r.id === s.id || r.idea_ref === s.id) && (r.pos == null || s.pos == null || r.pos >= s.pos))
+        || ((r.matter?.menu === m.id || (leadId != null && r.matter?.menu === leadId)) && (r.pos == null || r.pos >= firstPos)))
+        .sort((a, b) => a.pos - b.pos || a.id - b.id);
+    if (rows.some(r => !recordKnownTo(r, viewer, same))) return null;
+    const parts = rows.map(r => ({ text: String(r.text ?? '').trim(), pos: r.pos }));
+    if (parts.some(p => !p.text || p.text.length > 180 || (strictSentence && /[^。！？!?；;]$/.test(p.text) && p.text.length > 120))
+        || parts.map(p => p.text).join('；').length > 400) return null;
+    return { text: parts.map(p => p.text).join('；'), mode: 'records', records: rows.map(r => r.id), parts };
+}
+export function entryProjection(m, { viewer, visible = [], same = (a, b) => a === b, player = false, menu = [] } = {}) {
+    const basis = m?.entryBasis;
+    if (!viewer) return null;
+    if (basis?.self) {
+        if (!player) return same(basis.self, viewer) && String(m.errand ?? '').trim()
+            ? { text: String(m.errand).trim(), mode: 'self', parts: [{ text: String(m.errand).trim(), day: m.said_day }] } : null;
+        const said = visible.filter(r => r.type === '说' && same(r.holder_name, basis.self)
+            && (r.matter?.menu === m.id || (m.cause?.type === 'record' && m.cause.id === r.id)) && recordKnownTo(r, viewer, same)).at(-1);
+        return said ? linkedProjection(said, m, visible, viewer, same) : null;
+    }
+    if (!basis) {
+        if (!player) return null;
+        const leads = menu.filter(x => x.plan_id === m.plan_id && x.title === m.lead && ['shown', 'used'].includes(x.status));
+        if (leads.length !== 1) return null;
+        const lead = leads[0];
+        const said = visible.filter(r => r.type === '说' && same(r.holder_name, lead.who) && recordKnownTo(r, viewer, same)
+            && (r.matter?.menu === lead.id || (r.pos === lead.settled_pos && String(r.text).trim() === String(lead.surface).trim()))).at(-1);
+        return said ? linkedProjection(said, m, visible, viewer, same, lead.id) : null;
+    }
+    if (!Array.isArray(basis.records) || !basis.records.length) return null;
+    const rows = basis.records.map(id => visible.find(r => r.id === id));
+    if (rows.some(r => !r)) return null;
+    return linkedProjection(rows, m, visible, viewer, same, null, true);
 }
 const fitShown = fit => String(fit ?? '').replace(/[，,；;]?\s*或者[^，,；;]*(?:说起|讲起|提起|回来说|回来讲)[^，,；;]*/g, '').trim();
 const OFFSCREEN_NOTE = "要是它在玩家不在的时候发生在〔当事人〕身上，那就是〔当事人〕自己的经历：提不提、什么时候提、怎么提、说给谁、说几分，照〔当事人〕自己的性子——不在乎的可能懒得提，也可能一句带过、当笑话讲、瞒着、改天再说；别为了交代它专门停下来讲一段";

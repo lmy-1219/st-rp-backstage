@@ -87,7 +87,6 @@ export function crewLines({ name, userName = null, entry = null, present = [], t
     // 心思跟在"这阵子自己想办成的事"后面（数据约定第 2、3 条）
     const mind = mindLine(entry.心思, { keep });
     if (mind) own.push(mind);
-    if (trouble && tidy(entry.为她)) own.push(`${her}这会儿有难处：${tidy(entry.为她)}——去做，别光说。`);
     if (pushed) own.push(`（${String(pushed).replace(/[。．.]+$/, '')}——这是${personWord(name)}自己办的事，见了面提不提、说几分由${personWord(name)}）`);
     const team = (Array.isArray(entry.团里) ? entry.团里 : [])
         .filter(x => x && tidy(x.跟谁) && tidy(x.什么) && !same(tidy(x.跟谁), name) && present.some(p => p && same(p, tidy(x.跟谁))))

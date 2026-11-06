@@ -28,7 +28,7 @@ export const SCENE_SYSTEM = [
     '按每个人的"节奏"挑（底子里写了的）：迁就对方状态的人，留下来聊、收拾、照顾，横着把这一刻过完；按自己节奏推的人，催过一回也得让，让完就干自己手边的事。两个人眼下的关系还在重新摸索、试探的（看"和玩家眼下"），"问你""冒一句"比别的更像。',
     '给了【刚到】时，玩家这边刚换了地方：这一回不用等空当（正紧张、正动手时照旧不插），看这里会有什么人、什么事，多半是"街头"（这地方的人和动静、有人凑过来），也可以是在场的人就地的反应。给了【这一局的几条线】时，冒的那件事对得上哪条，就照它的写法来（谁、怎么露、隔多久）；对不上别硬凑。',
     '别写成任务，别替玩家决定，别讲道理、别劝和；按各人自己的底子来，和【最近冒过的兴头】别重样。',
-    '「为什么」只给后台说明挑这件的判断；「本人可知」只写起头的人亲历、听到或眼前看见的已发生事实，作为这件事的触发依据。两句分开，不能把焦点、规划目的、别人不知道的内情写进「本人可知」；没有可靠依据就留空。',
+    '「为什么」说明你为何选这件；「本人可知」写这个人从哪件亲历、收到的话或眼前所见起意，照材料中的来路和语气，没有就空着。外来邀约在「怎么起」里接上实际可用的来往方式；来路不通，可以改成眼前能做的另一件。',
     '只输出一个 JSON：{"玩家眼下": "能动|累着|难受|闷着|正忙", "有": true 或 false, "为什么": "后台判断，一句", "本人可知": "起头的人知道的触发依据，一句或空", "种类": "念头|提前|邀约|街头|冒一句|问你|斗嘴|顺手|亲近", "手边": 顺手收拾【手边的事】时写它的编号，否则 null, "谁": "起头的人；街头写"世界"","对谁": "斗嘴、亲近时写，否则 null", "往事": 往事编号或 null, "什么": "一句", "怎么起": "一句：口气和由头（冒一句可以没有由头）", "编号": 提前时写袋编号，否则 null}',
 ].join('\n');
 
@@ -85,7 +85,7 @@ export function scenePrompt({ userName = '玩家', setup = null, lastScene = [],
         ...(setup?.基调 ? [`【基调】${setup.基调}`] : []),
         `【玩家】${userName}${passive ? `（这一阵最近几句都只回一两个字）` : ''}`,
         '【在场的人】', ...(present.length ? present.flatMap(person) : ['（只有玩家）']),
-        '【不在场的熟人】', ...(offstage.length ? offstage.map(p => `· ${p.name}（${p.role}，${p.level ?? '不明'}${p.lastSeen ? `，上次露面${p.lastSeen}` : ''}）：${joined(p.parts?.['兴趣和习惯'], 200) || clip(p.hook, 200) || '（兴趣不明）'}`) : ['（没有）']),
+        '【不在场的熟人】', ...(offstage.length ? offstage.map(p => `· ${p.name}（${p.role}，${p.level ?? '不明'}${p.lastSeen ? `，上次露面${p.lastSeen}` : ''}）：${joined(p.parts?.['兴趣和习惯'], 200) || clip(p.hook, 200) || '（兴趣不明）'}${p.route?.length ? `；已知来往方式：${Array.isArray(p.route) ? p.route.join('、') : p.route}` : ''}`) : ['（没有）']),
         ...looseLines,
         ...driveLines(drive, { focus, goal }),
         ...offstage.flatMap(p => driveLines(drive, { who: p.name })),
@@ -139,6 +139,9 @@ export function admitImpulse(v, { present = [], offstage = [], userName = '玩�
         to = !v.to || v.to === userName || v.to === '玩家' ? userName : known(present, v.to)?.name ?? null;
         if (!to || to === me.name) return null;
     }
+    const routes = Array.isArray(me?.route) ? me.route : [me?.route].filter(Boolean);
+    const route = routes.find(r => v.how?.includes(r));
+    if (v.kind === '邀约' && !route) return null;
     if (v.kind === '亲近') {
         if (to === userName && ['点头之交', '陌生'].includes(me.level)) return null;
         if (recent.some(x => x.kind === '亲近' && x.who === me.name && x.to === to && since(x) < closeGap)) return null;
@@ -151,7 +154,7 @@ export function admitImpulse(v, { present = [], offstage = [], userName = '玩�
     }
     // 顺手收拾手边的事：编号得是这次给过的
     const end = v.kind === '顺手' && v.loose ? loose.find(l => l.id === v.loose) ?? null : null;
-    return { ...v, who: me?.name ?? v.who, to, tale, loose: end ? { id: end.id, text: end.text } : null, at, used: false };
+    return { ...v, who: me?.name ?? v.who, ...(v.kind === '邀约' ? { route } : {}), to, tale, loose: end ? { id: end.id, text: end.text } : null, at, used: false };
 }
 
 // 交给开口的人的那几行（可以用，也可以不用）。
@@ -162,7 +165,7 @@ export function impulseLines(imp, { userName = '玩家', knownWhy = '' } = {}) {
     const because = knownWhy ? `因为${knownWhy}，` : '';
     const own = `当是${imp.who}自己想的，别写成有人安排；${userName}接不接由${userName}`;
     if (imp.kind === '念头') return [`（此刻的兴头，可以提、也可以不提：${imp.who}${because}${imp.what}${how}。提了就${own}。）`];
-    if (imp.kind === '邀约') return [`（这会儿不在场的${imp.who}可以来邀一下，用这个世界说得通的方式，可以用也可以不用：${imp.what}${how}；接不接由${userName}。）`];
+    if (imp.kind === '邀约') return imp.route && imp.how?.includes(imp.route) ? [`（这会儿不在场的${imp.who}可以按已写明的方式来邀一下，可以用也可以不用：${imp.what}${how}；接不接由${userName}。）`] : [];
     if (imp.kind === '街头') return [`（这会儿周围可以冒出一件事，场面对不上就当没看见：${imp.what}${how}。）`];
     if (imp.kind === '冒一句') return [`（这会儿${imp.who}可以没头没尾地冒一句，可以用也可以不用：${imp.what}${how}。不用由头，就是突然想起来、随口一说；${own}。）`];
     if (imp.kind === '问你') return [`（这会儿${imp.who}可以问${userName}一件事，可以用也可以不用：${because}${imp.what}${how}。${own}。）`];

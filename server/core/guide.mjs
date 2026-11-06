@@ -6,7 +6,7 @@
 //       不给知情、来由、应答、题（剧透、幕后标签）；再加"跳到下一件事"（只在天尺度、有往后排着的事时）。
 // "新事"＝口袋件拿出来或用上了、有人叩门或进场、换了地方（叙述里写着走进、来到……）、新规划落账。
 // 记号都挂在消息上（pos＋fp）：那条消息删了、改了，记号就不算（照 scene.stillThere 的规矩）。
-import { entryOf, afterBlocked } from './planner.mjs';
+import { entryOf, afterBlocked, entryProjection, nearPlace as exactPlace } from './planner.mjs';
 import { leadReady, focusLine } from './eventlead.mjs';
 import { stillThere, movedTo } from './scene.mjs';
 import { occasionOf, heartToHeart, closeCountsByMessage, tenseStrongCount } from './occasion.mjs';
@@ -90,25 +90,25 @@ const goes = (m, { players, present, names }) => {
 // 括号包着由这里加。不碰知情、来由、应答、题。
 export const SIGN_TEMPLATE = place => `去${place}看看`;
 export function signLine(m, { nearPlace = null, names = [] } = {}) {
-    const place = placeText(m);
-    let line = tidy(m.signpost ?? m.sign_post);
-    if (!line) line = SIGN_TEMPLATE(place);
-    else if (nearPlace && !nearPlace({ ...m, place: m.place }, line, names)) line = `${line}，去${place}`;
-    return line;
+    const line = tidy(m.signpost ?? m.sign_post);
+    return line && exactPlace(m, line) ? line : '';
 }
 
 // menu：menuDays 套过日子的菜单；today：今天是第几天
-export function signposts({ menu = [], today, node = null, players = [], present = [], names = [], max = GUIDE.max.default, nearPlace = null } = {}) {
+export function signposts({ menu = [], today, node = null, players = [], present = [], names = [], visible = [], max = GUIDE.max.default, nearPlace = null, render = t => t } = {}) {
     if (!Number.isFinite(today)) return [];
     const picked = [], seen = new Set();
     const ok = menu.filter(m => LIVE.has(m.status) && entryOf(m) === '到现场' && placeText(m)
-        && leadReady(m, menu, today) && goes(m, { players, present, names }))
+        && !(Number.isFinite(m.ready_day) && today < m.ready_day) && !afterBlocked(m, menu) && goes(m, { players, present, names }))
         .sort((a, b) => rank(a, node) - rank(b, node) || a.id - b.id);
     for (const m of ok) {
         const key = placeText(m);
         if (seen.has(key)) continue;   // 同一个地方只出一条
+        const known = players.map(viewer => entryProjection(m, { viewer, visible, same: (a, b) => sameName(a, b, names), player: true, menu })).find(Boolean);
+        if (!known || known.mode !== 'records' || !exactPlace(m, known.text)) continue;
         seen.add(key);
-        const text = signLine(m, { nearPlace, names });
+        const reason = (known.parts ?? [{ text: known.text, day: m.said_day }]).map(p => render(p.text, m, p, today)).join('；');
+        const text = reason;
         picked.push({ id: m.id, kind: 'sign', place: key, text, fill: `（${text}）` });
         if (picked.length >= max) break;
     }
@@ -135,7 +135,7 @@ export function skipLine({ menu = [], today, timeScale = DAY } = {}) {
 export function guideAt(input = {}) {
     const cfg = guideConfig(input.cfg), messages = input.messages ?? [];
     const st = stuckAt({ messages, events: input.events ?? [], shown: input.shown ?? null, quiet: cfg.quiet, scene: cfg.scene, same: input.same });
-    const items = signposts({ menu: input.menu, today: input.today, node: input.node, players: input.players, present: input.present, names: input.names, max: cfg.max, nearPlace: input.nearPlace });
+    const items = signposts({ menu: input.menu, today: input.today, node: input.node, players: input.players, present: input.present, names: input.names, visible: input.visible, max: cfg.max, nearPlace: input.nearPlace, render: input.render });
     const skip = skipLine({ menu: input.menu, today: input.today, timeScale: input.timeScale });
     const scene = immersive(messages);
     const hasChoice = items.length > 0 || !!skip;
@@ -153,7 +153,7 @@ export function guideAt(input = {}) {
 // ── 接 store ──────────────────────────────────────────
 // slot：{ timelineFor, menuDays, scaleFor }——由 server 传进来（config.mjs 要读这里的数值，这里不能反过来 import slot.mjs，免得循环引用）
 export function guideFor(store, records, chatKey, { present = [], config = null, nearPlace = null, slot } = {}) {
-    const { timelineFor, menuDays, scaleFor } = slot;
+    const { timelineFor, menuDays, scaleFor, renderEntry = t => t } = slot;
     const chat = store.requireChat(chatKey);
     const messages = store.currentMessages(chatKey);
     const timeline = timelineFor(store, records, chatKey, messages);
@@ -162,10 +162,13 @@ export function guideFor(store, records, chatKey, { present = [], config = null,
     let node = null; try { node = last?.node ? JSON.parse(last.node) : null; } catch {}
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? null;
     const players = [userName, ...(store.playerNames?.(chat.story_id) ?? [])].filter(Boolean);
-    const names = (store.getCast?.(chat.story_id) ?? []).map(e => e.name);
+    const roster = store.getCast?.(chat.story_id) ?? [];
+    const names = roster.map(e => e.name);
     const same = (a, b) => store.sameMessage?.(a, b) ?? false;
     const events = eventsOf({ messages, menu, arrivals: read(store, `arrivals:${chatKey}`, []), plans: store.readyPlans?.(chatKey) ?? [], same });
-    const out = guideAt({ cfg: config, messages, events, shown: read(store, SHOWN_KEY(chatKey), null), same, menu, today: timeline.today, node, players, present, names, timeScale: scaleFor(store, chatKey), nearPlace });
+    const visible = (records.visible?.(chatKey) ?? []).filter(r => r.pos <= (messages.at(-1)?.pos ?? -1));
+    const render = (text, m, part, today) => renderEntry(text, m, { sourceDay: part.pos != null ? timeline.dayOf(part.pos) : part.day ?? m.said_day, today, timeScale: scaleFor(store, chatKey), roster, messages });
+    const out = guideAt({ cfg: config, messages, events, shown: read(store, SHOWN_KEY(chatKey), null), same, menu, today: timeline.today, node, players, present, names, visible, timeScale: scaleFor(store, chatKey), nearPlace, render });
     return { ...out, last, lastMessage: messages.at(-1) ?? null };
 }
 

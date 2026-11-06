@@ -3,7 +3,7 @@ import { secretCandidates } from './held.mjs';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, menuDays, scaleFor, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
+import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, menuDays, scaleFor, renderEntry, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
 import { labelsOf, sinceWord, dateIn, dayNumber, timelineLabel } from './timeline.mjs';
 import { validMark, planFailure } from './store.mjs';
 import { digests } from './digest.mjs';
@@ -382,7 +382,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const chatKey = str(b.chatKey, 'chatKey');
             store.requireChat(chatKey);
             const present = strings(b.present, 60, 200), manual = b.manual === true;
-            const g = guideFor(store, records, chatKey, { present, config: settings().guide ?? null, nearPlace, slot: { timelineFor, menuDays, scaleFor } });
+            const g = guideFor(store, records, chatKey, { present, config: settings().guide ?? null, nearPlace, slot: { timelineFor, menuDays, scaleFor, renderEntry } });
             if (!manual && g.show) markShown(store, chatKey, g.lastMessage);
             // 该弹却除了"自己写"什么都给不出：按 node_empty 叫一次规划，同一份规划只叫一次
             let refilled = false;
@@ -830,7 +830,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             try {
             store.updatePlanAttempt(attempt, { stage: '解析', outputChars: typeof b.text === 'string' ? b.text.length : 0 });
             const chat = store.requireChat(plan.chat_key);
-            const parsed = parsePlan(str(b.text, 'text', { max: 100000 }), { ...intimatePlanOptions(store, plan.chat_key, planRoster(store, chat.story_id, { chatKey: plan.chat_key })), sourceIds: records ? verifiedPlanSourceIds(store, records, plan.chat_key, plan.brief) : { records: new Set(), menuResults: new Set() } });
+            const parsed = parsePlan(str(b.text, 'text', { max: 100000 }), { ...intimatePlanOptions(store, plan.chat_key, planRoster(store, chat.story_id, { chatKey: plan.chat_key })), sourceIds: records ? verifiedPlanSourceIds(store, records, plan.chat_key, plan.brief, plan.anchor_pos) : { records: new Set(), menuResults: new Set() } });
             if (!parsed.items.length) bad(`菜单一条都没过：${parsed.dropped.map(d => d.reason).join('；')}`);
             const anchors = withPack(plan.chat_key).world.anchors;
             const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(chat.story_id)?.data).map(yearFlagText) : [];

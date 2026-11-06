@@ -12,14 +12,34 @@
 //       再排一件很轻的找上门的回音（他自己提起、有人带话、发来照片视频），内容用活动的"没接会怎样"，没有就用题拼一句。
 // 记的几笔都挂在消息上（删回那条之前就当没发生，下次折再算）：event_lead（升级过的）、event_moves（改期）、event_echo（回音排过的）。
 // 题材无关：地方、日子、谁、题都来自规划。
-import { entryOf, WORLD, ifSunkOf, afterBlocked } from './planner.mjs';
+import { entryOf, WORLD, ifSunkOf, afterBlocked, triggerTimeReady } from './planner.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
 import { hasCard } from './arrival.mjs';
 import { sameName } from './setup.mjs';
+import { visOf, wayOf } from './visibility.mjs';
+import { arrivalLive } from './landing.mjs';
 
 const DONE = new Set(['shown', 'used']);
 const LIVE = new Set(['waiting', 'pocket']);
 const tidy = t => String(t ?? '').trim();
+// 只从仍在当前窗口的结构化进场、通信和结算联系取方式。
+export function availableWays(store, chatKey, who, userName, messages = store.currentMessages?.(chatKey) ?? [], names = []) {
+    const same = (a, b) => !!a && !!b && sameName(a, b, names);
+    const live = x => messages.some(m => m.pos === Number(x?.at) && m.fp === x?.fp);
+    const ways = new Set();
+    const add = way => { const v = wayOf(way); if (['消息', '电话', '上门'].includes(v)) ways.add(v); };
+    for (const m of messages) {
+        const v = visOf(m);
+        if (v && same(v.from, who) && (!v.to || same(v.to, userName))) add(v.way);
+    }
+    let arrivals = [];
+    try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]'); } catch {}
+    let anchors = null;
+    try { anchors = JSON.parse(store.requireChat?.(chatKey)?.anchors ?? 'null'); } catch {}
+    for (const a of Array.isArray(arrivals) ? arrivals : []) if (same(a.who, who) && store.knockLive?.(chatKey, a) !== false && arrivalLive(a, messages, arrivals, anchors)) add(a.way ?? a.how);
+    try { const c = JSON.parse(store.getMeta?.(`settled_contact:${chatKey}:${who}`) ?? 'null'); if (c && live(c)) add(c.way); } catch {}
+    return [...ways];
+}
 const bare = t => { const s = tidy(t); return s.match(/「([^」]+)」/)?.[1].trim() || s; };
 const read = (store, key, fallback) => { try { return JSON.parse(store.getMeta?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
 const liveAt = (at, messages = [], store = null, chatKey = null, basisDay = null) => !!at && messages.some(m => m.pos === at.pos && m.fp === at.fp) && (store?.basisLive?.(chatKey, at.pos, basisDay) !== false);
@@ -41,19 +61,9 @@ export const datedEvent = (m, { node = null } = {}) => !!m && entryOf(m) === '�
 // 引子那件：同一份规划里题对得上的，没有就看别的份
 export function leadOf(m, menu = []) {
     const t = bare(m?.lead);
-    if (!t) return sameSpotLead(m, menu);
-    const hits = menu.filter(x => x.id !== m.id && bare(x.title) === t);
-    return hits.find(x => x.plan_id === m.plan_id) ?? hits.at(-1) ?? null;
-}
-// 没写引子的（老规划、规划者漏了）：找一件找上门的、露面或应答里点到同一处的、日子不晚于活动的，当它的引子
-// （试玩 10/12：翻唱夜那几件没写引子，同一份里明明有一件"有人托话约她去那家店"的邀请——程序却自己拼了一句风声，还把规划的题当活动名写了进去）
-const spotOf = m => { const p = tidy(m?.place); return p.match(/「([^」]{2,})」/)?.[1] ?? (p.length >= 4 ? p : ''); };
-function sameSpotLead(m, menu = []) {
-    const spot = spotOf(m);
-    if (!spot) return null;
-    const hits = menu.filter(x => x.id !== m.id && x.status !== 'void' && entryOf(x) === '找上门' && [x.surface, x.respond, x.fit].join(' ').includes(spot)
-        && !(Number.isFinite(x.ready_day) && Number.isFinite(m.ready_day) && x.ready_day > m.ready_day));
-    return hits.find(x => x.plan_id === m.plan_id) ?? hits.at(-1) ?? null;
+    if (!t) return null;
+    const hits = menu.filter(x => x.id !== m.id && x.plan_id === m.plan_id && bare(x.title) === t);
+    return hits.length === 1 ? hits[0] : null;
 }
 const moveOf = (m, moves = []) => m?.moved ?? moves.filter(x => x.id === m?.id).at(-1) ?? null;
 // 升级过的那一笔；改期以前记的不算（改了期，引子也算没送到）
@@ -63,10 +73,12 @@ export const leadOut = (lead, move = null) => !!lead && DONE.has(lead.status) &&
 // 引子自己到点了没（用户 10/25：没到时间点的东西不递给前台）：自己的日子到了（没写日子的当到了），"在哪件之后"那件也了结了（判法同 stepPocket）。
 // 活动快到了不等于引子能先拿出来：没到点的不挂门，预告只给模糊风声
 export const leadReady = (lead, menu = [], today) => !!lead && !(Number.isFinite(lead.ready_day) && Number.isFinite(today) && today < lead.ready_day) && !afterBlocked(lead, menu);
+const leadCandidateReady = (lead, menu, today, move = null) => leadReady(lead, menu, today) && entryOf(lead) === '找上门'
+    && (LIVE.has(lead.status) || (DONE.has(lead.status) && move && Number.isFinite(lead.settled_pos) && lead.settled_pos < move.at?.pos));
 
 // 该升级的那几件（折一次时）：活动还排着、在口袋里，到了它那一格的前一格（只有当格的就当格），引子还没拿出来，也还没升级过。
 // canDoor(引子)：挂得上门（找上门、牵头的人有卡又不在场）。返回 [{ event, lead, how: 'door'|'line' }]
-export function leadSteps(menu = [], { today, node = null, done = {}, moves = [], canDoor = () => false } = {}) {
+export function leadSteps(menu = [], { today, part = null, node = null, done = {}, moves = [], canDoor = () => false } = {}) {
     const out = [], leads = new Set();
     if (!Number.isFinite(today)) return out;
     for (const m of menu) {
@@ -74,10 +86,11 @@ export function leadSteps(menu = [], { today, node = null, done = {}, moves = []
         if (today < m.ready_day - 1 || today > m.ready_day) continue;
         if (entryFor(m, done, moves)) continue;
         const lead = leadOf(m, menu);
+        if (!leadCandidateReady(lead, menu, today, moveOf(m, moves)) || !triggerTimeReady(lead, part)) continue;
         if (leadOut(lead, moveOf(m, moves))) continue;
         if (lead && leads.has(lead.id)) { out.push({ event: m, lead, how: 'shared' }); continue; }   // 几件活动共用一个引子：只送一回，后面几件跟着记成升级过
         if (lead) leads.add(lead.id);
-        out.push({ event: m, lead, how: lead && canDoor(lead) && leadReady(lead, menu, today) ? 'door' : 'line' });
+        out.push({ event: m, lead, how: canDoor(lead) ? 'door' : 'line' });
     }
     return out;
 }
@@ -88,7 +101,7 @@ export function missedEvents(menu = [], { today, node = null, done = {}, moves =
     return menu.filter(m => {
         if (!datedEvent(m, { node }) || DONE.has(m.status) || m.status === 'void' || echoed?.[m.id] || !(m.ready_day < today)) return false;
         const lead = leadOf(m, menu), e = entryFor(m, done, moves);
-        return leadOut(lead, moveOf(m, moves)) || (e?.how === 'door' && !!lead && DONE.has(lead.status)) || (e?.how === 'line' && !!e.given);
+        return leadOut(lead, moveOf(m, moves)) || (e?.how === 'door' && !!lead && DONE.has(lead.status));
     });
 }
 
@@ -104,9 +117,7 @@ export function whenText(day, today, timeScale = DAY, time = '') {
 export const rumorText = (m, when) => `听说${when}${tidy(m?.place) ? `${tidy(m.place)}那边` : '有个地方'}有场热闹`;   // 不写规划的题：题是幕后的标签，写出来像个怪名字，还会把后面的戏说破
 // 下一次开口那一格最前面的一句
 export function noticeLines(rows = [], { userName = '玩家' } = {}) {
-    if (!rows.length) return [];
-    return [`${rows.length > 1 ? '这几件事' : '这件事'}这一轮得让${userName}知道——一两句带过就行，不用展开；按这一局说得通的样子带出来（捎来的话、来消息、新闻、路人闲聊、传单都行），去不去由${userName}：`,
-        ...[...new Map(rows.map(r => [`${r.text}|${r.when}|${r.place ?? ''}`, r])).values()].map(r => `· ${r.text}（${r.when}${r.place ? `，在${r.place}` : ''}${r.moved ? '；原定的日子临时改了期，挪到了这时候' : ''}）`)];
+    return [...new Set(rows.map(r => tidy(r.text)).filter(Boolean))];
 }
 
 // 回音落在谁身上：活动牵头的人；"世界"或她自己牵头的，看谁去；都不是就没有人（回音由"世界"带）
@@ -116,17 +127,18 @@ export function echoHolder(m, player = []) {
     return null;
 }
 // 没去的回音：他自己那一条经历、一件很轻的找上门（内容用"没接会怎样"，没有就用题拼一句）
-export function echoParts(m, { userName = '玩家', player = [] } = {}) {
+export function echoParts(m, { userName = '玩家', player = [], ways = [] } = {}) {
     const holder = echoHolder(m, player);
     const title = tidy(m?.title), place = tidy(m?.place);
     const what = tidy(ifSunkOf(m)).replace(/[。．.]+$/, '') || `${userName}没去的那回「${title}」，照样办完了`;
+    const channel = ways.find(w => ['消息', '电话', '上门'].includes(w)) ?? '';
     return {
         holder,
         record: holder ? `${holder}这段时间照常去了「${title}」${place ? `（在${place}）` : ''}，${userName}没到场，那边照样办完了` : null,
-        item: { who: holder ?? WORLD, title: `${title}·回音`.slice(0, 30), surface: holder ? `${holder}提起那回的「${title}」：${what}` : `外头有人说起那回的「${title}」：${what}`, respond: what, sink: null,
-            fit: holder ? `${holder}下回露面、来消息时顺口提起，或者托人带句话、发来照片视频；一两句就够` : '有人说起、捎来一句话、照片传开，按这个世界说得通的样子；一两句就够',
+        item: channel ? { who: holder ?? WORLD, title: `${title}·回音`.slice(0, 30), surface: `${holder ?? '外面的人'}按${channel}提起那回的「${title}」：${what}`, respond: what, sink: null,
+            fit: `照已写明的${channel}递到眼前；一两句就够`,
             weight: '一句', know: null, origin: null, line: tidy(m?.line) || '后续', after: null, motif: '后续', promiseRef: null, offscreen: false, afterDays: 0,
-            entry: '找上门', place: null, goer: null, errand: null, purpose: '关系', trigger: null, ttl: { kind: '三天内' }, premise: `${userName}没去「${title}」`, ifTaken: null, ifSunk: null },
+            entry: channel === '消息' ? '消息' : channel === '电话' ? '电话' : '找上门', place: null, goer: null, errand: null, purpose: '关系', trigger: null, ttl: { kind: '三天内' }, premise: `${userName}没去「${title}」`, ifTaken: null, ifSunk: null } : null,
     };
 }
 
@@ -147,11 +159,12 @@ const holderOf = (roster, who) => roster.find(e => hasCard(e) && sameName(e.name
 
 // 他在镜头外照常办了：他那一条经历＋一件回音；活动本身收掉（过期），别再进口袋
 export function echoEvent(store, records, chatKey, m, { at, day, roster = [], userName = null, player = [], storyId = null, why = '' } = {}) {
-    const { holder, record, item } = echoParts(m, { userName: userName ?? '玩家', player });
+    const ways = availableWays(store, chatKey, echoHolder(m, player), userName, store.currentMessages?.(chatKey) ?? [], roster.map(r => r.name));
+    const { holder, record, item } = echoParts(m, { userName: userName ?? '玩家', player, ways });
     if (holder && record && records?.addDerived && storyId) records.addDerived({ storyId, fp: at.fp, type: '做', text: record.slice(0, 240), holder: holderOf(roster, holder), holderName: holder, audience: [holder], about: holder,
         keys: [m.title, m.place].map(tidy).filter(x => x.length >= 2), known: [{ basis: { pos: at.pos, fp: at.fp, day, menu: m.id, menuStatus: 'expired' } }], matter: { menu: m.id, title: m.title ?? '', entry: '镜头外', who: holder } });
     const plan = store.lastReadyPlan?.(chatKey);
-    if (plan && store.appendMenu) store.appendMenu(plan.id, [item], { storyDay: day, at, source: { pos: at.pos, fp: at.fp, day, menu: m.id, menuStatus: 'expired' } });
+    if (item && plan && store.appendMenu) store.appendMenu(plan.id, [item], { storyDay: day, at, source: { pos: at.pos, fp: at.fp, day, menu: m.id, menuStatus: 'expired' } });
     if (LIVE.has(m.status)) store.updateMenu(chatKey, m.id, { status: 'expired', by: '程序', why: why || `${userName ?? '玩家'}没去：${holder ?? '那边'}照常办了`, basisDay: day, at });
     store.logEvent?.(chatKey, 'event_echo', { id: m.id, title: m.title, holder, why });
     return { holder, item };
@@ -171,7 +184,7 @@ export function moveEvent(store, records, chatKey, m, { to, at, roster = [], pla
 
 // 折一次时（slot.advanceWorld，口袋走完之后）：该升级的升级，知道了却没去的给回音。menu＝套过日子（menuDays）的菜单；
 // 引子到点与回音都只按已确认的日子；挂到门上的入袋也会落库。
-export function eventStep(store, records, chatKey, { menu = [], messages = [], today, firmToday = today, here = [], roster = [], userName = null, player = [], node = null } = {}) {
+export function eventStep(store, records, chatKey, { menu = [], messages = [], today, firmToday = today, part = null, here = [], roster = [], userName = null, player = [], node = null } = {}) {
     const last = messages.at(-1);
     if (!last || !menu.length) return { steps: [], echoes: [] };
     const names = roster.map(e => e.name);
@@ -181,7 +194,7 @@ export function eventStep(store, records, chatKey, { menu = [], messages = [], t
     const done = liveMap(read(store, LEADS_KEY(chatKey), {}), messages, store, chatKey);
     const canDoor = lead => entryOf(lead) === '找上门' && !!tidy(lead.who) && lead.who !== WORLD && !herName(lead.who, player)
         && roster.some(e => hasCard(e) && same(e.name, lead.who)) && !here.some(n => same(n, lead.who));
-    const steps = leadSteps(menu, { today: firmToday, node, done, moves, canDoor });
+    const steps = leadSteps(menu, { today: firmToday, part, node, done, moves, canDoor });
     for (const s of steps) {
         if (s.how === 'door' && s.lead.status !== 'pocket') store.updateMenu(chatKey, s.lead.id, { status: 'pocket', pocket_day: firmToday, by: '引子', why: '有日子的活动快到了，引子还没送到：挂到门上', at });
         done[s.event.id] = { how: s.how, lead: s.lead?.id ?? null, at, basisDay: firmToday };
@@ -208,22 +221,28 @@ export function markEchoed(store, chatKey, ids = [], at, basisDay = null) {
 
 // 组那一格时（slot.extrasFor）：升级成"下一句"、还没给出去的那几件，放在这一格最前面；给了记在被回的那条上（左滑重来照给，删了那条重给）。
 // 活动已经过去了、撤了，或者引子在升级以后拿出来了：不再给。retime(文字, 写的那一格)：规划写的"明晚"按今天换说法
-export function leadNotice(store, chatKey, { menu = [], messages = [], anchorMsg = null, today, timeScale = DAY, userName = '玩家', record = true, retime = t => t } = {}) {
+export function leadNotice(store, chatKey, { menu = [], messages = [], anchorMsg = null, today, part = null, retime = t => t } = {}) {
     const all = read(store, LEADS_KEY(chatKey), {});
     const rows = [];
-    let changed = false;
+    const seen = new Set();
     for (const [id, e] of Object.entries(all && typeof all === 'object' ? all : {})) {
         if (e?.how !== 'line' || !liveAt(e.at, messages, store, chatKey, e.basisDay)) continue;
-        if (e.given && liveAt(e.given, messages) && e.given.pos !== anchorMsg?.pos) continue;
+        if (e.given && liveAt(e.given, messages, store, chatKey, e.basisDay) && e.given.pos !== anchorMsg?.pos) continue;
         const m = menu.find(x => String(x.id) === id);
         if (!m || !LIVE.has(m.status) || (Number.isFinite(today) && m.ready_day < today)) continue;
         const lead = e.lead != null ? menu.find(x => x.id === e.lead) : null;
-        if (lead && DONE.has(lead.status) && Number.isFinite(lead.settled_pos) && lead.settled_pos >= e.at.pos) continue;
-        const when = whenText(m.ready_day, today, timeScale, m.trigger?.time);
-        // 引子自己没到点（日子没到、前置那件没了结）：只给模糊风声，不把引子原文（具体日子、地点、谁写的信）提前递出去
-        rows.push({ text: (lead && leadReady(lead, menu, today) ? tidy(retime(lead.surface, lead.said_day)) : '') || rumorText(m, when), when, place: tidy(m.place), title: tidy(m.title), moved: !!m.moved });
-        if (record && anchorMsg && !(e.given && e.given.pos === anchorMsg.pos && e.given.fp === anchorMsg.fp)) { all[id] = { ...e, given: { pos: anchorMsg.pos, fp: anchorMsg.fp } }; changed = true; }
+        if (!lead || leadOf(m, menu)?.id !== lead.id || !leadCandidateReady(lead, menu, today, m.moved) || !triggerTimeReady(lead, part) || seen.has(lead.id)) continue;
+        seen.add(lead.id);
+        rows.push({ event: m, lead, text: tidy(retime(lead.surface, lead.said_day)) });
+    }
+    return rows;
+}
+export function markLeadGiven(store, chatKey, leadId, at, messages = []) {
+    if (!at) return;
+    const all = read(store, LEADS_KEY(chatKey), {});
+    let changed = false;
+    for (const [id, e] of Object.entries(all)) if (e?.lead === leadId && e.how === 'line' && liveAt(e.at, messages, store, chatKey, e.basisDay)) {
+        all[id] = { ...e, given: { pos: at.pos, fp: at.fp } }; changed = true;
     }
     if (changed) store.setMeta?.(LEADS_KEY(chatKey), JSON.stringify(all));
-    return noticeLines(rows, { userName });
 }

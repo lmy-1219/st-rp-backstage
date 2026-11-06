@@ -78,19 +78,21 @@ export function pickContact({ people, dayOf, lastPos, offers = [], minGap = 16 }
     return people.find(p => (p.lastPos < 0 ? today >= 1 : today - dayOf(p.lastPos) >= 1) && rested(p)) ?? null;
 }
 
-export function contactLines(pick, { when, lastSeen, knower = null, same = (a, b) => a === b }) {
+export function contactLines(pick, { when, lastSeen, knower = null, same = (a, b) => a === b, way = '' }) {
     const p = pick.person;
+    if (!way) return [];
     if (pick.lastPos < 0) return [
         '此刻可以有这件事（用不用、怎么用由你定）：',
         `· ${p}还没在这个故事里出现过。${pick.hook}`,
-        `· 要写的话，写成${p}捎来话、来信或者找上门（用这个世界里说得通的方式）；${p}只知道外面传开的消息和自己的经历，这个故事里之前发生的事${p}都不在场。`,
+        `· ${p}这次按已写明的方式${way}来到眼前；${p}只知道自己的经历和确实收到的消息。`,
     ];
     const known = r => !knower || r?.holder_name && same(r.holder_name, knower) || (r?.audience ?? []).some(n => same(n, knower));
     const reason = known(pick.reason) ? pick.reason : null;
+    if (!reason && !pick.hook) return [];
     return [
         '此刻可以有这件事（用不用、怎么用由你定）：',
-        `· ${p}有一阵没露面了（上次是${lastSeen}）。${reason ? `${p}这回惦记着${when(reason)}那件事：${reason.text}` : !knower && pick.hook ? `${p}这回来联系有个由头：${pick.hook}` : `${p}有事想来联系`}`,
+        `· ${p}有一阵没露面了（上次是${lastSeen}）。${reason ? `${p}这回惦记着${when(reason)}那件事：${reason.text}` : `${p}这回来联系有个由头：${pick.hook}`}`,
         ...pick.threads.filter(r => r.id !== reason?.id && known(r)).map(r => `  · ${p}另外还记得${when(r)}的事：${r.text}；提不提由${p}。`),
-        `· 要写的话，写成${p}捎来话、来信或者找上门（用这个世界里说得通的方式）；${p}只知道自己经历过、听说过的事。`,
+        `· ${p}这次按已写明的方式${way}联系；${p}只知道自己经历过、确实收到的事。`,
     ];
 }

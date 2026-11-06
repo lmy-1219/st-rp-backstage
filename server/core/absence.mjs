@@ -77,9 +77,10 @@ export function returnLines({ name, userName = '对方', absence, open = [], att
     // 空白在旁人眼里是什么样（出去了没回来、一直睡着没醒）顺着最后那一幕，不预设是出走。
     if (opening && !reasoned) lines.push(`（这一轮由你先开口：写${name}此刻在干什么、在想什么，和${userName}重新露面那一刻的第一反应——这段空白在身边的人眼里是什么样，顺着最后那一幕来；这些天${userName}到底怎么了、为什么，留给${userName}接着说，别替${userName}写。）`);
     // 由他先开口时这几天找过来的不在这一轮给（实测开场就挨个念一遍），从他下一次开口起由余波递上（phoneCarry）。
-    if (first && attempts.length && !opening) {
-        lines.push(`这几天找过${userName}的（怎么找的——留言、捎话、上门——用这个世界里说得通的方式；可以让${userName}或在场的人看到，不必一次全拿出来，问起、翻到了再说；内容只按找来的人自己知道的事写，和各自上回说过的对得上）：`);
-        for (const a of attempts) lines.push(`· ${a.person}（第 ${a.day} 天起）：${a.how}${a.about ? `——跟这件事有关：${a.about}` : ''}${a.last ? `；上回挂着的：${a.last}` : ''}`);
+    const delivered = attempts.filter(a => String(a.how ?? '').trim());
+    if (first && delivered.length && !opening) {
+        lines.push(`这几天找过${userName}的（只照下面已经写明的方式；可以让${userName}或在场的人看到，不必一次全拿出来，问起、翻到了再说）：`);
+        for (const a of delivered) lines.push(`· ${a.person}（第 ${a.day} 天起）：${a.how}${a.about ? `——跟这件事有关：${a.about}` : ''}${a.last ? `；上回挂着的：${a.last}` : ''}`);
     }
     return lines;
 }
@@ -92,9 +93,10 @@ export function returnCarry({ name, userName = '对方', absence, level = null }
 }
 
 export function phoneCarry({ userName = '对方', absence, attempts = [] }) {
+    attempts = attempts.filter(a => String(a.how ?? '').trim());
     if (!attempts.length) return [];
     return [{ key: `phone:${absence.id ?? absence.from_fp ?? 0}`, keep: 'next',
-        text: `这几天找过${userName}的（怎么找的用这个世界里说得通的方式；${userName}翻到、问起再说；内容只按找来的人自己知道的事写）：${attempts.map(a => `${a.person}（第 ${a.day} 天起）${a.how}${a.about ? `，为的是：${a.about}` : ''}`).join('；')}` }];
+        text: `这几天找过${userName}的（只照已写明的方式；${userName}翻到、问起再说）：${attempts.map(a => `${a.person}（第 ${a.day} 天起）${a.how}${a.about ? `，为的是：${a.about}` : ''}`).join('；')}` }];
 }
 
 // 这一段有没有到该给的时候：回来后的第一轮里，这个角色还没拿过。
