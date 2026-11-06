@@ -790,10 +790,10 @@ export function openStore(file) {
         return q("select * from plans where status = 'requested' order by id").all().filter(stillWanted)
             .map(({ id, chat_key, reason, story_day, provider, created_at }) => ({ id, chat_key, reason, story_day, provider, created_at }));
     }
-    function requestPlan({ chatKey, storyDay, reason, provider, brief, basis = null, rerollOf = null }) {
+    function requestPlan({ chatKey, storyDay, reason, provider, brief, basis = null, anchor = null, rerollOf = null }) {
         const h = historyOf(chatKey);
         const id = Number(q("insert into plans(chat_key, status, reason, story_day, provider, brief, anchor_pos, anchor_fp, created_at) values (?, 'requested', ?, ?, ?, ?, ?, ?, ?)")
-            .run(chatKey, reason, storyDay, provider, brief, h.last, h.lastFp, now()).lastInsertRowid);
+            .run(chatKey, reason, storyDay, provider, brief, anchor?.pos ?? h.last, anchor?.fp ?? h.lastFp, now()).lastInsertRowid);
         if (basis && Number.isInteger(basis.pos) && basis.fp) setMeta(`plan_basis:${id}`, JSON.stringify({ pos: basis.pos, fp: basis.fp }));
         if (rerollOf != null) setMeta(`replan_of:${id}`, String(rerollOf));
         return id;

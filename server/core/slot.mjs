@@ -1565,6 +1565,9 @@ export async function advance(store, records, chatKey, deps = {}, { present = []
     return { advanced: true, pos: last.pos, fp: last.fp };
 }
 
+const PLAN_UNSTABLE_MESSAGES = 2;
+export const stablePlanEdge = messages => messages.at(-PLAN_UNSTABLE_MESSAGES - 1) ?? null;
+
 function advanceWorld(store, records, chatKey, { planner = null, situation = null, absence = null, settle = null, leave = null, offstage = null } = {}, { present = [] } = {}) {
     const messages = store.currentMessages(chatKey);
     const last = messages.at(-1);
@@ -1784,17 +1787,26 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
     }
     if (store.requestPlan && planner?.provider && planner?.record !== false) {
         try {
+            const stable = stablePlanEdge(messages);
+            const stablePos = stable?.pos ?? -1;
+            const stableView = stable ? planningView(store, records, chatKey, stablePos) : null;
+            const stableStore = stableView && Object.assign(Object.create(stableView.store), {
+                stateNotesOf: key => (store.stateNotesOf?.(key) ?? []).filter(n => key !== chatKey || n.pos <= stablePos),
+            });
+            const stableToday = stable ? confirmedDayFor(stableStore, stableView.records, chatKey)(stablePos + 0.5) : null;
             const notes = store.notesOf?.(chatKey) ?? [];
             const openIdeaIds = new Set(records.openIdeas(chatKey).map(r => r.id));
             const last = store.lastPlan(chatKey);
             const active = store.menuOf(chatKey).filter(m => m.status === 'waiting' || m.status === 'pocket').length;
             const newNotes = notes.some(n => n.kind === '聊' && n.used_in_plan == null);
-            const verdict = last?.status === 'ready' ? verdictOf(store, chatKey, last.id) : null;
+            const checked = last?.status === 'ready' ? verdictOf(store, chatKey, last.id) : null;
+            const verdict = checked?.at && checked.at.pos <= stablePos ? checked : null;
             let reason = needsPlan({ lastPlan: last, activeItems: active, newNotes, nodeOver: verdict?.result });
+            const judged = verdict && ['node_done', 'node_failed', 'turn', 'broken', 'shift'].includes(reason);
             // 第一份规划等开局单确认生效、或者玩家说了第一句再排（用户 10/22：一接入就排，角色还没拉完、开局单还没填，钱就花出去了）
             if (reason === 'first' && !store.setupOf?.(storyId) && !messages.some(m => m.is_user)) reason = null;
             // 判定挂在哪条消息上，新规划也跟着挂上：那条删了、改了，新规划就不算，退回原来那份（用户 10/4）
-            if (reason) requestPlanNow(store, records, chatKey, planner, { reason, present: here, verdict: verdict?.why, thread: verdict?.thread, basis: verdict?.at ?? null });
+            if (reason) requestPlanNow(store, records, chatKey, planner, { reason, present: here, verdict: judged ? verdict.why : null, thread: judged ? verdict.thread : null, basis: judged ? stable : null, anchor: judged ? stable : null });
             else if (last?.status === 'ready' && backFrom(store, chatKey, last)) {
                 // 离开好些天刚回来、这些天推好了：接住这些天留下的事，重新规划（一次离开只叫一次）。
                 const back = backFrom(store, chatKey, last);
@@ -1802,31 +1814,37 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
                 requestPlanNow(store, records, chatKey, planner, { reason: 'back', present: here });
             } else if (last?.status === 'ready') {
                 // 换了剧情日看一次；一个剧情日里聊得很长（试玩第 5 天一百多条）时，每 NODE_EVERY 条也看一次
-                const dayDue = today > last.story_day && store.getMeta?.(`node_checked:${last.id}`) !== String(today);
-                const posDue = lastPos - Number(store.getMeta?.(`node_checked_pos:${last.id}`) ?? last.anchor_pos ?? 0) >= NODE_EVERY;
+                const dayDue = stable && stableToday > last.story_day && store.getMeta?.(`node_checked:${last.id}`) !== String(stableToday);
+                const posDue = stable && stablePos - Number(store.getMeta?.(`node_checked_pos:${last.id}`) ?? last.anchor_pos ?? 0) >= NODE_EVERY;
                 if (last.node && planner.checkNode && (dayDue || posDue)) {
-                    store.setMeta(`node_checked:${last.id}`, String(today));
-                    store.setMeta(`node_checked_pos:${last.id}`, String(lastPos));
-                    planner.checkNode({ chatKey, planId: last.id }).catch(() => {});
+                    store.setMeta(`node_checked:${last.id}`, String(stableToday));
+                    store.setMeta(`node_checked_pos:${last.id}`, String(stablePos));
+                    planner.checkNode({ chatKey, planId: last.id, at: stable }).catch(() => {});
                 }
                 // 玩家的角色在这份规划之后新提的想法（记账记下来的）：看一眼是不是认真要长期去做的新方向（N-72：当引力，不当轨道）。
-                if (planner.checkTurn && userName) {
+                if (planner.checkTurn && userName && stable) {
                     const turnCheckKey = `turn_checked:${chatKey}`;
+                    const outsideKey = `plan_outside_wait:${chatKey}`;
+                    let pendingOutside = [];
+                    try { pendingOutside = JSON.parse(store.getMeta?.(outsideKey) ?? '[]'); } catch {}
+                    if (!Array.isArray(pendingOutside)) pendingOutside = [];
+                    const dueOutside = pendingOutside.filter(x => x.planId === last.id && x.at?.pos <= stablePos && messages.some(m => m.pos === x.at.pos && m.fp === x.at.fp));
                     // 想法之外也看玩家说的话：拒绝、放弃多半记成"说"（B 段实测："那一单我不接了"记成了说，规划照旧等着那单交货）。
-                    const ideas = visible.filter(r => (r.type === '想法' || r.type === '说') && r.holder_name === userName && r.pos > (last.anchor_pos ?? -1));
+                    const ideas = visible.filter(r => (r.type === '想法' || r.type === '说') && r.holder_name === userName && r.pos > (last.anchor_pos ?? -1) && r.pos <= stablePos);
                     // 别的角色起的新念头（D-107）：同一次顺带看，分量够就给眼下这个节点补几件
-                    const others = visible.filter(r => r.type === '想法' && r.holder_name && r.holder_name !== userName && openIdeaIds.has(r.id) && r.pos > (last.anchor_pos ?? -1));
+                    const others = visible.filter(r => r.type === '想法' && r.holder_name && r.holder_name !== userName && openIdeaIds.has(r.id) && r.pos > (last.anchor_pos ?? -1) && r.pos <= stablePos);
                     // 关系变了、一直算数的改变（谁的都算，用户 10/4：两人当场在一起了）：看规划设想的局面还成不成立
-                    const changes = visible.filter(r => (r.type === '关系' || (r.type === '改变' && LASTING_CHANGE.has(r.duration))) && r.pos > (last.anchor_pos ?? -1));
+                    const changes = visible.filter(r => (r.type === '关系' || (r.type === '改变' && LASTING_CHANGE.has(r.duration))) && r.pos > (last.anchor_pos ?? -1) && r.pos <= stablePos);
                     // 这一轮各人做了什么、说了什么（D-170，用户 10/6：闹出的动静该在外头发酵）：同一次顺带看会不会传开、引来反应
                     const counted = new Set([...ideas, ...others, ...changes].map(r => r.id));
-                    const acts = visible.filter(r => ACTS.has(r.type) && !counted.has(r.id) && r.pos > (last.anchor_pos ?? -1));
+                    const acts = visible.filter(r => ACTS.has(r.type) && !counted.has(r.id) && r.pos > (last.anchor_pos ?? -1) && r.pos <= stablePos);
                     const seen = Number(store.getMeta?.(turnCheckKey) ?? -1);
                     const fresh = ideas.filter(r => r.id > seen), freshOthers = others.filter(r => r.id > seen), freshChanges = changes.filter(r => r.id > seen), freshActs = acts.filter(r => r.id > seen).slice(-12);
-                    if (fresh.length || freshOthers.length || freshChanges.length || freshActs.length) {
-                        store.setMeta(turnCheckKey, String(Math.max(...[...fresh, ...freshOthers, ...freshChanges, ...freshActs].map(r => r.id))));
-                        planner.checkTurn({ chatKey, planId: last.id, ideas: fresh, others: freshOthers, changes: freshChanges, acts: freshActs }).catch(() => {});
+                    if (fresh.length || freshOthers.length || freshChanges.length || freshActs.length || dueOutside.length) {
+                        if (fresh.length || freshOthers.length || freshChanges.length || freshActs.length) store.setMeta(turnCheckKey, String(Math.max(...[...fresh, ...freshOthers, ...freshChanges, ...freshActs].map(r => r.id))));
+                        planner.checkTurn({ chatKey, planId: last.id, ideas: fresh, others: freshOthers, changes: freshChanges, acts: freshActs, outside: dueOutside.flatMap(x => x.outside), at: stable }).catch(() => {});
                     }
+                    if (pendingOutside.length) store.setMeta(outsideKey, JSON.stringify(pendingOutside.filter(x => x.planId === last.id && x.at?.pos > stablePos)));
                 }
                 // 剧情走到了开局单里某条储备线写明的地方（N-293，用户 10/6：一个人去了某个酒吧，开局单里一条储备线的条件写着"在那儿"，规划里却一件都没有）：
                 // 展开那条线，给眼下这个节点补几件此刻就能用上的（规划那档模型，一次七八毛、几分钟，后台跑不等）。同一条线一个剧情日至多一回；
@@ -2683,7 +2701,21 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
 }
 
 // 这个窗口此刻的剧情状况（剧情日、谁在场、名册与亲疏、不在场的人）：规划、查账、笔记都用。
-export function storyContext(store, records, chatKey, { present = null } = {}) {
+// 规划材料共用一个截止视图；其余库状态仍按当前值读取。
+export function planningView(store, records, chatKey, through = null) {
+    if (through == null) return { store, records };
+    const within = row => row.pos <= through;
+    return {
+        store: Object.assign(Object.create(store), { currentMessages: key => store.currentMessages(key).filter(m => key !== chatKey || within(m)) }),
+        records: Object.assign(Object.create(records), {
+            visible: (key, opts) => records.visible(key, opts).filter(r => key !== chatKey || within(r)),
+            openIdeas: key => records.openIdeas(key).filter(r => key !== chatKey || within(r)),
+        }),
+    };
+}
+
+export function storyContext(store, records, chatKey, { present = null, through = null } = {}) {
+    ({ store, records } = planningView(store, records, chatKey, through));
     const chat = store.requireChat(chatKey);
     const visible = records.visible(chatKey);
     const messages = store.currentMessages(chatKey);
@@ -2764,18 +2796,19 @@ export function confirmPlanPersona(store, chatKey, expected = null) {
     return wait && store.planById(wait.id)?.status === 'requested' ? wait : null;
 }
 
-export function requestPlanNow(store, records, chatKey, planner, { reason = 'user', present = null, verdict = null, thread = null, basis = null, force = null, entry = 'auto', source = null } = {}) {
+export function requestPlanNow(store, records, chatKey, planner, { reason = 'user', present = null, verdict = null, thread = null, basis = null, anchor = null, force = null, entry = 'auto', source = null } = {}) {
     const stopped = playStop(store, chatKey); if (stopped) return stopped;
     const factionNet = planner.factionNet?.(chatKey) ?? null, sit = planner.situation ?? null, prices = planner.prices?.(chatKey) ?? null, facts = planner.facts?.(chatKey) ?? null;
     const last = store.lastPlan(chatKey);
     const reroll = reason === 'reroll', previous = reroll ? store.lastReadyPlan?.(chatKey) : null;
     if (last?.status === 'requested' && (!reroll || store.activePlanAttempt?.(chatKey, last.id))) return last.id;
     if (previous && store.activePlanAttempt?.(chatKey, previous.id)) return previous.id;
-    const s = storyContext(store, records, chatKey, { present });
-    const opts = { seeds: planner.seeds?.(chatKey) ?? [], present, reason, verdict, thread, factionNet, sit, prices, facts, rerollOf: previous?.id ?? null, ...(planner.briefChars ? { budget: planner.briefChars } : {}) };
-    const brief = planBrief(store, records, chatKey, opts);
     const retry = last?.status === 'requested';
-    const id = retry ? last.id : store.requestPlan({ chatKey, storyDay: s.today, reason, provider: planner.provider, brief, basis, rerollOf: previous?.id ?? null });
+    const through = retry ? last.anchor_pos : anchor?.pos ?? store.currentMessages(chatKey).at(-1)?.pos ?? null;
+    const s = storyContext(store, records, chatKey, { present, through });
+    const opts = { seeds: planner.seeds?.(chatKey) ?? [], present, reason, verdict, thread, factionNet, sit, prices, facts, rerollOf: previous?.id ?? null, through, ...(planner.briefChars ? { budget: planner.briefChars } : {}) };
+    const brief = planBrief(store, records, chatKey, opts);
+    const id = retry ? last.id : store.requestPlan({ chatKey, storyDay: s.today, reason, provider: planner.provider, brief, basis, anchor, rerollOf: previous?.id ?? null });
     store.setPlanSource?.(id, source ?? (reroll ? 'button' : entry));
     if (retry) { store.setPlanBrief(id, brief); if (previous) store.setMeta(`replan_of:${id}`, String(previous.id)); }
     // rebrief：备料、参谋备忘回来以后带上它们按同样的参数重攒（备料也算进预算，章程 H4）
@@ -2798,7 +2831,8 @@ function rhythmFor(store, chatKey, planId) {
 // 这一局此刻的规划简报（要规划时攒一次；"再试一次"、重启补包时按此刻的账重攒，别拿要规划那会儿的旧简报）。
 // prep：规划前备料、参谋备忘（各一段文字），放在设定之后、局面之前
 // budget：简报至多多少字（章程 H4，planner.briefChars）；超了按远近压（squeezeBrief），没超一个字不动
-export function planBrief(store, records, chatKey, { present = null, reason = null, rerollOf = null, verdict = null, thread = null, factionNet = null, sit = null, prices = null, facts = null, prep = [], budget = BRIEF_CHARS, seeds = [] } = {}) {
+export function planBrief(store, records, chatKey, { present = null, reason = null, rerollOf = null, verdict = null, thread = null, factionNet = null, sit = null, prices = null, facts = null, prep = [], budget = BRIEF_CHARS, seeds = [], through = null } = {}) {
+    ({ store, records } = planningView(store, records, chatKey, through));
     const s = storyContext(store, records, chatKey, { present });
     const replaced = new Set(), ready = store.readyPlans?.(chatKey) ?? [];
     let previous = rerollOf ?? (reason === 'reroll' ? store.lastReadyPlan?.(chatKey)?.id : null);
@@ -2982,8 +3016,8 @@ function squeezeBrief(store, chatKey, s, base, { budget, last, lastNode, menu })
 }
 
 // 节点检查那一问的材料：规划之后记下的事（至多 60 条，太长的截断）。
-export function nodeCheckLines(store, records, chatKey, planId) {
-    const s = storyContext(store, records, chatKey);
+export function nodeCheckLines(store, records, chatKey, planId, through = null) {
+    const s = storyContext(store, records, chatKey, { through });
     const plan = store.planById(planId);
     const since = plan?.anchor_pos ?? -1;
     return s.visible.filter(r => r.pos > since && r.type !== '时间').slice(-60).map(r => `· ${s.when(r)} ${r.holder_name ?? r.holder}：${String(r.text).slice(0, 200)}`);
@@ -3007,7 +3041,8 @@ export function nodeCheckTaken(store, records, chatKey, planId) {
 
 // 离开期间推演（away.mjs）要的材料：这一局此刻的账，外加最后那一幕的原文、程序按亲疏算的"谁找过用户"。
 // 规划前备料的材料（prep.mjs）：整张卡（主要、常联系、新面孔在前）、关系表、开局单、账本（新的在前）、最近 40 条原文、素材资料、兴头。
-export function prepMaterial(store, records, chatKey, { library = [] } = {}) {
+export function prepMaterial(store, records, chatKey, { library = [], through = null } = {}) {
+    ({ store, records } = planningView(store, records, chatKey, through));
     const s = storyContext(store, records, chatKey);
     const order = { 主要: 0, 常联系: 1, 新面孔: 2, 可能登场: 3, 路过: 4 };
     const seen = new Set();

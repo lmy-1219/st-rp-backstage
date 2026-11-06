@@ -49,7 +49,7 @@ import { unansweredLine, promisesFor, pullOf, placeNow } from './waiting.mjs';
 import { doorFor } from './door.mjs';
 import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFor, autoLeave, markLeft, waitingKnock, pendingKnock, recentLapsed, leaveDoubts, answerLeaves, takePendingLeft, acknowledgeLeaves, KNOCK_JUDGE_SYSTEM, knockJudgePrompt, parseKnockJudge } from './auto.mjs';   // 自动进离场与调度（D-201）
 import { pendingFor } from './pending.mjs';
-import { planBrief, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimateSetup, intimatePlanOptions } from './slot.mjs';
+import { planBrief, planningView, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimateSetup, intimatePlanOptions } from './slot.mjs';
 import { AWAY_SYSTEM, AWAY_REVISE_SYSTEM, parseAway, awayPrompt, revisePrompt, pinNames, actualDaysOf } from './away.mjs';
 import { FRESH_SYSTEM, freshPrompt, staleSpans, applyFresh, freshAnswerValid, voiceOf, PREVIOUS } from './fresh.mjs';
 import { STAY_SYSTEM, stayPrompt, parseStay, applyStay } from './stay.mjs';
@@ -64,7 +64,7 @@ import { LORE_SYSTEM, lorePrompt, parseLore, LORE_VERSION, loreBatch, loreTried,
 import { createMaterials, createRelationsDrafts, LOOK_SYSTEM, lookPrompt, parseLook, RELATIONS_SYSTEM } from './materials.mjs';
 import { weekOf, rollLong, activeLong, LONG_SYSTEM, longPrompt, parseLong } from './drift.mjs';
 import { briefSection } from './setup.mjs';
-import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stateBlock, timelineFor, confirmedDayFor, settledBy, CAMERA_NAME, scaleFor, paceFor, pastNodesOf, RECENT_NODES, sofarOf } from './slot.mjs';
+import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stablePlanEdge, stateBlock, timelineFor, confirmedDayFor, settledBy, CAMERA_NAME, scaleFor, paceFor, pastNodesOf, RECENT_NODES, sofarOf } from './slot.mjs';
 import { paceCap } from './tempo.mjs';
 import { withTaste } from './taste.mjs';   // 模型口味层：规划、检查的通用底后面按型号补几句口味（用户 10/15）
 import { planSystem } from './planner.mjs';
@@ -200,7 +200,7 @@ const freshBrief = planId => {
         const v = JSON.parse(store.getMeta(`plan_verdict:${planId}`) ?? 'null');   // 转向那一次的依据、参谋备忘，重攒时带上
         const memo = store.getMeta(`plan_memo:${planId}`), prep = store.getMeta(`plan_prep:${planId}`);
         // 备料、参谋备忘放在设定之后、局面之前（三家对比：接在末尾离输出最近，被原样搬进规划）
-        const brief = planBrief(store, records, plan.chat_key, { reason: plan.reason, rerollOf: Number(store.getMeta(`replan_of:${planId}`)) || null, verdict: v?.verdict ?? null, thread: v?.thread ?? null, factionNet: packOf(plan.chat_key)?.factions ?? null, seeds: packOf(plan.chat_key)?.seeds ?? [], sit: getConfig().situation.enabled ? situation : null, prices: packOf(plan.chat_key)?.table ?? null, facts: packOf(plan.chat_key)?.facts ?? null, prep: [prep, memo], budget: getConfig().planner.briefChars });
+        const brief = planBrief(store, records, plan.chat_key, { reason: plan.reason, rerollOf: Number(store.getMeta(`replan_of:${planId}`)) || null, verdict: v?.verdict ?? null, thread: v?.thread ?? null, factionNet: packOf(plan.chat_key)?.factions ?? null, seeds: packOf(plan.chat_key)?.seeds ?? [], sit: getConfig().situation.enabled ? situation : null, prices: packOf(plan.chat_key)?.table ?? null, facts: packOf(plan.chat_key)?.facts ?? null, prep: [prep, memo], budget: getConfig().planner.briefChars, through: plan.anchor_pos });
         store.setPlanBrief(plan.id, brief);
         return brief;
     } catch (error) { log(`plan ${planId} rebrief failed: ${error.message}`); return plan.brief; }
@@ -456,7 +456,7 @@ const onRequest = ({ id, chatKey, brief, reason, verdict = null, thread = null, 
     };
     (async () => {
         // 规划前备料（D-109 第 3 步）：Gemini 读整张卡、账本、原文、资料，挑出候选插进简报（设定之后、局面之前）——写规划的模型读不了那么多。
-        const prep = await prepMemo({ chatKey }).catch(error => { log(`plan ${id} prep failed: ${error.message}`); return null; });
+        const prep = await prepMemo({ chatKey, planId: id }).catch(error => { log(`plan ${id} prep failed: ${error.message}`); return null; });
         if (prep) store.setMeta(`plan_prep:${id}`, prep);
         let memo = null;
         // 玩家转了新方向：再让参谋从原作／世界层面查一遍（势力、情报链、突破口、边角人物）——
@@ -475,16 +475,17 @@ const onRequest = ({ id, chatKey, brief, reason, verdict = null, thread = null, 
 };
 
 // 规划前备料：用"备料"那一环节（默认跟着参谋），读得多、便宜；这一局选了素材包就按最近的原文挑一叠资料一起给。
-async function prepMemo({ chatKey }) {
+async function prepMemo({ chatKey, planId }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), s = cfg.stages.prep;
     if (!s?.baseUrl || !s.apiKey || !s.model || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return null;
     const pack = packOf(chatKey);
-    const recentText = store.currentMessages(chatKey).slice(-12).map(m => m.text).join('\n');
+    const through = store.planById(planId)?.anchor_pos ?? null;
+    const recentText = planningView(store, records, chatKey, through).store.currentMessages(chatKey).slice(-12).map(m => m.text).join('\n');
     const library = pack ? pickChunks(loadLibrary(pack.dir), recentText, { budget: PREP_BUDGET.library }) : [];
     const started = Date.now();
     try {
-        const r = await createModelClient({ ...s, maxOutputTokens: 8000, timeoutMs: 300000, stream: true }).complete({ system: PREP_SYSTEM, user: prepPrompt(prepMaterial(store, records, chatKey, { library })) });
+        const r = await createModelClient({ ...s, maxOutputTokens: 8000, timeoutMs: 300000, stream: true }).complete({ system: PREP_SYSTEM, user: prepPrompt(prepMaterial(store, records, chatKey, { library, through })) });
         const costUsd = ((r.usage?.input ?? 0) * s.priceInPerM + (r.usage?.output ?? 0) * s.priceOutPerM) / 1e6;
         records.logAssemble({ chatKey, speaker: '(备料)', model: s.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
         log(`plan prep for ${chatKey}: ${r.usage?.input ?? '?'} in, $${costUsd.toFixed(3)}`);
@@ -517,14 +518,14 @@ async function turnMemo({ chatKey, verdict, thread }) {
 // 玩家的角色提了新想法（记账记下来的）：便宜模型看一眼是不是认真要长期去做的新方向、对不对得上哪条储备线。是就记下判定，
 // 下一次开口时重新规划（needsPlan → 'turn'）。不排外援：调不通就算了，下一个想法再看；/聊 和面板也能手动要。
 // changes：这份规划之后新记下的关系变化、一直算数的改变（谁的都算）——看规划设想的局面还成不成立（用户 10/4）。
-async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [], acts = [], outside = [] }) {
+async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [], acts = [], outside = [], at = null }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), a = cfg.stages.judge, p = cfg.planner;
     if (!p.judge || !a.baseUrl || !a.apiKey || !p.judgeModel || !(ideas.length || others.length || changes.length || acts.length || outside.length)) return;
     if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) return;
     // 程序初筛（planner.turnWorth；面板能关）：筛掉的这一轮不问，记录照样算看过（slot 那边已经记了）
     if (p.turnScreen) {
-        const lastPos = store.currentMessages(chatKey).at(-1)?.pos ?? 0;
+        const lastPos = at?.pos ?? store.currentMessages(chatKey).at(-1)?.pos ?? 0;
         const w = turnWorth({ ideas, others, changes, acts, outside, lastPos, actsAt: store.getMeta(`turn_acts_at:${chatKey}`) });
         if (!w.worth) { log(`plan ${planId} turn check skipped: ${w.why}`); return; }
         if (w.actsOnly) store.setMeta(`turn_acts_at:${chatKey}`, String(lastPos));
@@ -535,8 +536,8 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
     const started = Date.now();
     // 还等着的事连前提（章程 F1）：本来就要跑这一问，顺带看前提还在不在；不另加调用
     const waiting = premiseWaiting(store.menuOf(chatKey));
-    const checkedAt = store.currentMessages(chatKey).at(-1);
-    const completed = nodeCheckLines(store, records, chatKey, planId);
+    const checkedAt = at ?? store.currentMessages(chatKey).at(-1);
+    const completed = nodeCheckLines(store, records, chatKey, planId, checkedAt?.pos);
     try {
         const r = await createModelClient({ ...a, maxOutputTokens: 400 })
             .complete({ system: withTaste(TURN_CHECK_SYSTEM, { kind: 'judge', model: a.model ?? p.judgeModel, config: cfg }), user: turnCheckPrompt({ node, reserve: setup?.储备线 ?? [], main: setup?.主线 ?? [], ideas, others, changes, acts, outside, waiting, completed }) });
@@ -598,7 +599,7 @@ async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, t
     try {
     store.setMeta(key, String(done + 1));
     const chat = store.requireChat(chatKey);
-    const brief = planBrief(store, records, chatKey, { reason, verdict, thread, seeds: packOf(chatKey)?.seeds ?? [], sit: cfg.situation?.enabled ? situation : null, prices: packOf(chatKey)?.table ?? null, facts: packOf(chatKey)?.facts ?? null, budget: p.briefChars });
+    const brief = planBrief(store, records, chatKey, { reason, verdict, thread, seeds: packOf(chatKey)?.seeds ?? [], sit: cfg.situation?.enabled ? situation : null, prices: packOf(chatKey)?.table ?? null, facts: packOf(chatKey)?.facts ?? null, budget: p.briefChars, through: at?.pos ?? null });
     store.updatePlanAttempt(attempt, { briefChars: brief.length });
     const started = Date.now();
     // 调不通（中转掐断、没回话）：记一笔失败、这一回不算数，抛给叫它的那边（储备线到了地方那一路会过几条再试）——
@@ -620,7 +621,7 @@ async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, t
     // 试玩 10/9：吧台那几件补进来以后，口袋被两件别处的事占满，一直进不来
     const items = parsed.items.slice(0, 4).map(m => ({ ...m, line: m.line || line, ...(reason === 'place' && !(m.afterDays > 0) ? { motif: NOW_MOTIF } : {}) }));
     if (!items.length) { store.finishPlanAttempt(attempt, { status: 'failed', failure: 'bad_answer' }); log(`plan ${planId} supplement ${label}: nothing passed (${parsed.dropped.map(d => d.reason).join('；')})`); return; }
-    const today = storyContext(store, records, chatKey).today;
+    const today = storyContext(store, records, chatKey, { through: at?.pos ?? null }).today;
     requirePlanAttempt(attempt);
     store.updatePlanAttempt(attempt, { stage: '落账' });
     store.appendMenu(planId, items, { storyDay: today, at, intimateProgress: parsed.intimateProgress });
@@ -1692,7 +1693,7 @@ async function extendSofar(chatKey) {
 
 // 节点检查（每个剧情日一次，便宜模型）：这个节点算成或明显落空了没有。判定记进 meta，下一次开口时据此叫规划者（N-88）。
 // 不排外援：调不通就算了，第二天再看；面板上也能手动要下一份规划。
-async function checkNode({ chatKey, planId }) {
+async function checkNode({ chatKey, planId, at = null }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), a = cfg.stages.judge, p = cfg.planner;
     if (!p.judge || !a.baseUrl || !a.apiKey || !p.judgeModel) return;
@@ -1700,8 +1701,8 @@ async function checkNode({ chatKey, planId }) {
     const plan = store.planById(planId);
     const node = plan?.node ? JSON.parse(plan.node) : null;
     if (!node?.目标) return;
-    const checkedAt = store.currentMessages(chatKey).at(-1);
-    const lines = nodeCheckLines(store, records, chatKey, planId);
+    const checkedAt = at ?? store.currentMessages(chatKey).at(-1);
+    const lines = nodeCheckLines(store, records, chatKey, planId, checkedAt?.pos);
     if (!lines.length) return;
     const started = Date.now();
     try {
@@ -1782,7 +1783,15 @@ async function situationOnce({ chatKey, day, loud = null, skip = null }) {
         // 镜头外有了动静（D-171，用户 10/6："发酵有了但整体规划反而落后"）：让每轮那次检查看一眼，规划设想的局面还成不成立；不成立就照常重新规划
         if (plan && (v.moves.length || v.spreads.length) && cfg.planner.provider !== 'off') {
             const outside = [...v.moves.map(x => `${x.who}：${x.what}${x.seen ? `（外面看得到：${x.seen}）` : ''}`), ...v.spreads.map(x => `${x.heard}（传到${x.target}，${x.channel}）`)];
-            checkTurn({ chatKey, planId: plan.id, outside }).catch(error => log(`plan ${plan.id} outside check failed: ${error.message}`));
+            const at = stablePlanEdge(store.currentMessages(chatKey));
+            if (at && m.anchor?.pos <= at.pos) checkTurn({ chatKey, planId: plan.id, outside, at }).catch(error => log(`plan ${plan.id} outside check failed: ${error.message}`));
+            else if (m.anchor?.fp) {
+                const key = `plan_outside_wait:${chatKey}`;
+                let pending = [];
+                try { pending = JSON.parse(store.getMeta(key) ?? '[]'); } catch {}
+                if (!Array.isArray(pending)) pending = [];
+                store.setMeta(key, JSON.stringify([...pending, { planId: plan.id, at: m.anchor, outside }].slice(-4)));
+            }
         }
         records.logAssemble({ chatKey, speaker: '(局势)', model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, lines: v.moves.length + v.spreads.length + v.outcomes.length + v.followups.length, dropped: v.dropped.length, raw: r.text });
         log(`situation ${chatKey} day ${day}${loud ? ' (loud)' : ''}${skip ? ` (skip ${skip.nth}/${skip.of})` : ''}: ${v.moves.length} move(s), ${v.spreads.length} spread(s), ${v.followups.length} follow-up(s), ${v.reps?.length ?? 0} name(s), ${v.reviews?.length ?? 0} old move review(s)${v.dropped.length ? `, dropped ${v.dropped.map(d => d.reason).join('; ')}` : ''}`);
