@@ -425,7 +425,14 @@ export function openStore(file) {
             for (let k = 0; k < Math.min(oldRows.length, seq.length); k++) if (oldRows[k].fp !== seq[k].f && sameMessage(seq[k].f, oldRows[k].fp)) renamed.push([oldRows[k].fp, seq[k].f]);
             if (renamed.length) {
                 const rows = q('select key, value from meta where key in (?, ?, ?) or key like ? or key like ?').all(`arrived:${chatKey}`, `arrivals:${chatKey}`, `away_plan:${chatKey}`, `settled_contact:${chatKey}:%`, `settled:${chatKey}:%`);
-                for (const { key, value } of rows) { let v = String(value ?? ''); for (const [a, b] of renamed) v = v.split(a).join(b); if (v !== value) setMeta(key, v); }
+                const relink = (value, source = false) => typeof value === 'string' ? source ? value : renamed.reduce((s, [a, b]) => s.split(a).join(b), value)
+                    : Array.isArray(value) ? value.map(v => relink(v, source)) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, relink(v, source || k === 'sourceStep')])) : value;
+                for (const { key, value } of rows) {
+                    let v = String(value ?? '');
+                    if (/^(arrived|arrivals):/.test(key)) { try { v = JSON.stringify(relink(JSON.parse(v))); } catch {} }
+                    else for (const [a, b] of renamed) v = v.split(a).join(b);
+                    if (v !== value) setMeta(key, v);
+                }
             }
             // 最后一条角色回复左滑换了一版（不是改、不是删）：挂在它上面的规划、规划落账时撤掉和留下旧件的那几步，跟到新的这一版——
             // 试玩 10/14：第 18 号规划落账后玩家左滑了 #725，规划连同那几步都挂在旧那版上，一起没了，面板和场记退回第 17 号。
@@ -654,8 +661,35 @@ export function openStore(file) {
         if (at - act.last >= GAP_MIN_MS) setMeta(`gap:${chatKey}`, JSON.stringify({ from: act.last, to: at, fromFp }));
         setMeta(`act:${chatKey}`, JSON.stringify({ last: at }));
     }
+    const getRawMeta = key => memo('meta', key, () => q('select value from meta where key = ?').get(key)?.value ?? null);
+    function knockLive(chatKey, entry) {
+        if (!entry) return false;
+        if (!basisLive(chatKey, Number(entry.at) - 1, entry.basisDay)) return false;
+        const source = entry.sourceStep;
+        if (!source) return true; // 旧记录没有来源依据
+        if (!Number.isInteger(source.pos) || !source.fp) return false;
+        if (!sourceLive(chatKey, { pos: source.pos, fp: source.fp, day: source.day })) return false;
+        if (source.kind === 'contact') {
+            let current = null;
+            try { current = JSON.parse(getMeta(`settled_contact:${chatKey}:${entry.who}`) ?? 'null'); } catch {}
+            return !!current && current.at === source.pos && sameMessage(current.fp, source.fp) && (current.basisDay ?? source.day) === source.day && (source.step == null || current.step === source.step);
+        }
+        if (source.kind === 'pocket') {
+            const item = menuOf(chatKey, { all: true }).find(m => m.id === source.id);
+            return !!item && ((item.pocket_pos === source.pos && (source.step == null || source.step === item.pocket_step)) || (item.settled_pos === source.pos && (source.step == null || source.step === item.settled_step)));
+        }
+        return true;
+    }
     function getMeta(key) {
-        const value = memo('meta', key, () => q('select value from meta where key = ?').get(key)?.value ?? null);
+        const value = getRawMeta(key);
+        const knock = /^(arrived|arrivals|knocks|knock_pending):(.+)$/.exec(key);
+        if (knock && value) {
+            try {
+                const data = JSON.parse(value);
+                const filtered = Array.isArray(data) ? data.filter(e => knockLive(knock[2], e)) : knockLive(knock[2], data) ? data : null;
+                return JSON.stringify(filtered);
+            } catch { return value; }
+        }
         const match = /^(settled|settled_contact|crew_pushed):([^:]+):/.exec(key);
         if (!match || !value) return value;
         try { const v = JSON.parse(value); return v && !basisLive(match[2], v.pos ?? v.at, v.basisDay) ? null : value; } catch { return value; }
@@ -1104,13 +1138,13 @@ export function openStore(file) {
             readCells(m);
             m.cause = causeFor(chatKey, fromJson(m.cause_ref)) ? fromJson(m.cause_ref) : null;
             if (all) { const stopped = steps.filter(s => s.item_id === m.id && s.why?.startsWith('/停：')).at(-1); if (stopped) m.intimate_stop = { pos: stopped.pos, fp: stopped.fp }; }
-            Object.assign(m, { status: 'waiting', pocket_day: null, pocket_pos: null, pocket_by: null, settled_pos: null, settled_by: null, settled_day: null, held_by: null, held_pos: null, why: null, early_why: null });
+            Object.assign(m, { status: 'waiting', pocket_day: null, pocket_pos: null, pocket_step: null, pocket_by: null, settled_pos: null, settled_step: null, settled_by: null, settled_day: null, held_by: null, held_pos: null, why: null, early_why: null });
             // settled_pos：有了结果（拿出来了、用上了、沉了、撤了）的那一步在哪条消息上——局势推演按它找"刚有了结果的事"
             // offered：这一件递给了谁（N-277），不改它在哪一步
             // pocket_by：谁把它放进口袋的（"引子"＝活动快到了替它挂上门的；门上按它判引子自己到点没，T073）
             for (const s of steps) if (s.item_id === m.id && s.status === 'offered') Object.assign(m, { held_by: s.by_name, held_pos: s.pos });
             else if (s.item_id === m.id && s.status === KEPT) m.kept_pos = s.pos;
-            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_by: null, held_by: null, held_pos: null, settled_pos: null, settled_by: null, settled_day: null, early_why: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_by: s.by_name ?? null, early_why: s.by_name === '兴头' ? s.why ?? null : m.early_why } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_by: s.by_name ?? null, settled_day: s.story_day } : {});
+            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_step: null, pocket_by: null, held_by: null, held_pos: null, settled_step: null, settled_pos: null, settled_by: null, settled_day: null, early_why: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_step: s.id, pocket_by: s.by_name ?? null, early_why: s.by_name === '兴头' ? s.why ?? null : m.early_why } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_step: s.id, settled_by: s.by_name ?? null, settled_day: s.story_day } : {});
             // offered_n（T077）：递出过几次——按不同消息位置去重（同一楼换人开口、左滑重来只算一次）；没递过的件不加这个字段
             // 退回 waiting 的那一步（/停 撤回、重新规划）把这件重新算起：撤掉的递送没成，不计
             const offeredAt = new Set();
@@ -1257,5 +1291,5 @@ export function openStore(file) {
         };
     }
 
-    return { setConfirmedDayOf, basisLive, sourceLive, sourceReader, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    return { setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

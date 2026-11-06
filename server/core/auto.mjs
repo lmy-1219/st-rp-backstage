@@ -27,6 +27,7 @@ export const LEFT = chatKey => `auto_left:${chatKey}`;
 const KEEP = 40;
 
 const read = (store, key, fallback) => { try { return JSON.parse(store.getMeta?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
+const readRaw = (store, key, fallback) => { try { return JSON.parse((store.getRawMeta ?? store.getMeta)?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
 const write = (store, key, value) => store.setMeta?.(key, value == null ? null : JSON.stringify(value));
 const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
 const isHis = (m, k) => !!m && !m.is_user && (m.name === k.who || (!!k.avatar && m.speaker === k.avatar));
@@ -37,7 +38,33 @@ const rowsOf = tl => pos => (tl.firmRows ?? tl.rows).filter(r => r.pos <= pos).a
 export const knocksOf = (store, chatKey) => read(store, KNOCKS(chatKey), []).filter(k => k && k.who && num(k.at) != null);
 const blockedKnock = (store, chatKey, k) => playModeOf(store, chatKey) === 'memory' && ['pocket','contact','reach'].includes(k?.source?.type);
 export const pendingKnock = (store, chatKey) => { const k=read(store,PENDING(chatKey),null); return blockedKnock(store,chatKey,k) ? null : k; };
-export const writeKnocks = (store, chatKey, knocks) => write(store, KNOCKS(chatKey), knocks.slice(-KEEP));
+export const writeKnocks = (store, chatKey, knocks) => {
+    const hidden = readRaw(store, KNOCKS(chatKey), []).filter(k => !store.knockLive?.(chatKey, k));
+    write(store, KNOCKS(chatKey), [...hidden, ...knocks].slice(-KEEP));
+};
+
+export function sourceStep(store, chatKey, k) {
+    const source = k.source;
+    if (!source) return null;
+    let pos = k.sourceAt?.pos ?? source.pos ?? k.at - 1, fp = k.sourceAt?.fp ?? source.fp ?? k.fp, day = store.confirmedDayAt?.(chatKey, pos) ?? null, step = null;
+    if (source.type === 'contact') {
+        const current = read(store, `settled_contact:${chatKey}:${k.who}`, null);
+        if (!current) return null;
+        pos = current.at; fp = current.fp; day = current.basisDay ?? day; step = current.step ?? null;
+    } else if (source.type === 'pocket') {
+        const item = store.menuOf?.(chatKey, { all: true }).find(m => m.id === source.id);
+        if (!item) return null;
+        pos = item.status === 'shown' ? item.settled_pos : item.pocket_pos;
+        day = item.status === 'shown' ? item.settled_day : item.pocket_day;
+        step = item.status === 'shown' ? item.settled_step : item.pocket_step;
+        fp = store.currentMessages(chatKey).find(m => m.pos === pos)?.fp ?? null;
+    } else if (source.type === 'named' && Number.isInteger(source.id)) {
+        pos = source.id;
+        fp = store.currentMessages(chatKey).find(m => m.pos === pos)?.fp ?? null;
+        day = store.confirmedDayAt?.(chatKey, pos) ?? day;
+    }
+    return { kind: source.type, id: source.id, pos, fp, day, ...(step != null ? { step } : {}) };
+}
 
 // 门上那一项他怎么来：说好了消息、电话的照说的；约好的、结算写的"他过来"、玩家叫的上门；在外头办事的照他去向里说的回法；其余发消息（最不扰人）
 export function wayFor(item, plan = null) {
@@ -83,7 +110,9 @@ export function knockCandidate(store, records, chatKey, { present = [], timeline
     let plan = null;
     try { plan = ctx.board().people.find(p => sameName(p.name, item.who, names))?.plan ?? null; } catch {}
     const way = wayFor(item, plan);
-    return { who: item.who, avatar: item.avatar ?? null, way, mode: modeOf(way), source: item.source ?? null, label: item.label ?? '' };
+    const origin = ['promise', 'reach'].includes(item.source?.type) ? records?.visible?.(chatKey)?.find(r => r.id === item.source.id) : null;
+    const sourceAt = origin ? { pos: origin.pos, fp: origin.fp } : item.source?.type === 'errand' && plan?.fp ? { pos: messages.find(m => m.fp === plan.fp)?.pos, fp: plan.fp } : null;
+    return { who: item.who, avatar: item.avatar ?? null, way, mode: modeOf(way), source: item.source ?? null, sourceAt, label: item.label ?? '' };
 }
 
 export function knockNow(store, records, chatKey, { present = [], timeline = null, config = null } = {}) {
@@ -100,14 +129,14 @@ export function knockNow(store, records, chatKey, { present = [], timeline = nul
     if (!timing.ok) return { ok: false, why: timing.why };
     const c = knockCandidate(store, records, chatKey, { present, timeline: tl });
     if (!c?.who) return { ok: false, why: c?.why ?? '门上没人到时候' };
-    return { ok: true, ...c, at: last.pos + 1, fp: last.fp };
+    return { ok: true, ...c, at: last.pos + 1, fp: last.fp, basisDay: tl.firmToday ?? tl.today };
 }
 
 // 叩门时已经按叩门那条接了进场（main.autoTurn：进场那份理好了就先记，他那条写出来时记录已经在）
 const knockEntry = (store, chatKey, k) => read(store, `arrivals:${chatKey}`, []).find(e => e?.knock && (e.who === k.who || (!!k.avatar && e.avatar === k.avatar)) && num(e.at) === num(k.at) && e.fp === k.fp) ?? null;
 // 候着的那条没写出来（挂的那条没了、那儿换成了别人在说）：叩门时记的那次进场撤掉
 function dropKnockArrival(store, chatKey, k) {
-    const list = read(store, `arrivals:${chatKey}`, []);
+    const list = readRaw(store, `arrivals:${chatKey}`, []);
     const kept = list.filter(e => !(e?.knock && (e.who === k.who || (!!k.avatar && e.avatar === k.avatar)) && num(e.at) === num(k.at) && e.fp === k.fp));
     if (kept.length !== list.length) write(store, `arrivals:${chatKey}`, kept);
     const arrived = read(store, `arrived:${chatKey}`, null);
@@ -123,7 +152,8 @@ export function recentLapsed(store, chatKey, { within = 4 } = {}) {
 
 // 记下候着的一条（扩展接着叫他写）；进场那份由叫这个的人去先理（main.arrive prepare）
 export function beginKnock(store, chatKey, k) {
-    const pending = { who: k.who, avatar: k.avatar ?? null, way: k.way, mode: k.mode ?? modeOf(k.way), at: k.at, fp: k.fp, source: k.source ?? null, label: k.label ?? '', since: Date.now() };
+    const basisDay = k.basisDay ?? store.confirmedDayAt?.(chatKey, k.at - 1) ?? timelineFor(store, null, chatKey).firmToday;
+    const pending = { who: k.who, avatar: k.avatar ?? null, way: k.way, mode: k.mode ?? modeOf(k.way), at: k.at, fp: k.fp, basisDay, source: k.source ?? null, sourceStep: sourceStep(store, chatKey, k), label: k.label ?? '', since: Date.now() };
     write(store, PENDING(chatKey), pending);
     return pending;
 }
@@ -177,7 +207,7 @@ function lapseKnock(store, records, chatKey, k, { chat, messages, names, userNam
 export async function knockAdvance(store, records, chatKey, { arrive = null, judge = null, config = null, present = [] } = {}) {
     const auto = config?.auto ?? {};
     const out = { finalized: null, entered: [], lapsed: [], gone: [] };
-    const rawPending=read(store,PENDING(chatKey),null);
+    const rawPending=readRaw(store,PENDING(chatKey),null);
     if (blockedKnock(store,chatKey,rawPending)) { write(store,PENDING(chatKey),null); dropKnockArrival(store,chatKey,rawPending); }
     const ctx = context(store, records, chatKey, { present });
     const { chat, messages, tl, rowAt, roster, relations, names, userName } = ctx;
@@ -189,7 +219,7 @@ export async function knockAdvance(store, records, chatKey, { arrive = null, jud
         const his = isHis(messages[pending.at], pending);
         if (!anchored || (messages.length > pending.at && !his)) { write(store, PENDING(chatKey), null); dropKnockArrival(store, chatKey, pending); }
         else if (his) {
-            const k = { who: pending.who, avatar: pending.avatar ?? null, way: pending.way, at: pending.at, fp: pending.fp, source: pending.source ?? null, verdicts: {} };
+            const k = { who: pending.who, avatar: pending.avatar ?? null, way: pending.way, at: pending.at, fp: pending.fp, basisDay: pending.basisDay, source: pending.source ?? null, sourceStep: pending.sourceStep ?? null, verdicts: {} };
             knocks = [...knocks, k];
             writeKnocks(store, chatKey, knocks);
             write(store, PENDING(chatKey), null);

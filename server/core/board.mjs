@@ -137,7 +137,7 @@ export function boardAt(input = {}) {
     // 叩门作废了的（他发来消息、到了门口，玩家没理，knock.mjs）：那次进场不算——他没进过场，开的区间也不算在场（方案 自动进离场与调度）
     const lapsedKnocks = new Set(values(input.knocks).filter(k => k?.lapsed && k.who).map(k => `${k.who}|${number(k.at)}`));
     // 进场挂在他进场后那条回复上（landing.arrivalLive）：他那条删了、后面换成了别人在说，这次进场就不算
-    const liveEntry = e => !(e?.knock && lapsedKnocks.has(`${e.who}|${number(e.at)}`)) && arrivalLive(e, messages, entries, input.anchors);
+    const liveEntry = e => input.knockLive?.(e) !== false && !(e?.knock && lapsedKnocks.has(`${e.who}|${number(e.at)}`)) && arrivalLive(e, messages, entries, input.anchors);
     const liveSegment = (segment, person) => {
         if (!segment) return null;
         const mine = entries.filter(e => e && (e.avatar === person.avatar || e.who === person.name));
@@ -274,7 +274,7 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
     let anchors = null, arrived = null, arrivals = [], knocks = [];
     try { anchors = chat.anchors ? JSON.parse(chat.anchors) : null; } catch {}
     try { arrived = JSON.parse(store.getMeta?.(`arrived:${chatKey}`) ?? 'null'); } catch {}
-    try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
+    try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
     try { knocks = JSON.parse(store.getMeta?.(`knocks:${chatKey}`) ?? '[]') ?? []; } catch {}
     const awayPlans = awayPlansOf(store, chatKey, { messages: all });
     const visible = records?.visible?.(chatKey) ?? records ?? [];
@@ -286,7 +286,7 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
         const messages = uptoAnchor(all, anchor);
         const key = `${messages.length}|${messages.at(-1)?.fp ?? ''}`;
         if (done.has(key)) return done.get(key);
-        const value = boardAt({ messages, marks: messages.map(m => m.boardMark), stateNotes, anchors, roster, arrived, arrivals, knocks, awayPlans, present: present ?? [], recentUser, timeline: timeline ?? {}, homes });
+        const value = boardAt({ messages, marks: messages.map(m => m.boardMark), stateNotes, anchors, roster, arrived, arrivals, knocks, knockLive: e => store.knockLive?.(chatKey, e), awayPlans, present: present ?? [], recentUser, timeline: timeline ?? {}, homes });
         done.set(key, value);
         return value;
     };

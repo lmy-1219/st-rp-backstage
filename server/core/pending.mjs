@@ -177,11 +177,11 @@ function matterItems(records) {
 
 // 时间结算替在外头的人写下的"要联系"（D-174 第 4 步乙）：排着等旁白递；他接上了（或被"先不"了两回）就用掉；结算那条消息删了就没这回事
 // 写下以后他自己进了场（landing.enteredSince：隔离区间、进场记录）也算用掉：anchors、arrivals 不给就只认点了门
-function contactItems(contacts, messages, { anchors = null, arrivals = [] } = {}) {
+function contactItems(contacts, messages, { anchors = null, arrivals = [], knockLive = null } = {}) {
     const out = [];
     for (const c of arr(contacts)) {
         // 用掉那一下挂在哪条上（landing.contactUsed）：那条删了、进场后他那条回复没了，这条联系回来
-        if (!c || contactUsed(c, messages, arrivals, { anchors }) || !c.fp || !messages.some(m => m.fp === c.fp)) continue;
+        if (!c || contactUsed(c, messages, arrivals, { anchors, knockLive }) || !c.fp || !messages.some(m => m.fp === c.fp)) continue;
         const way = c.way;
         if (!['消息', '电话', '上门'].includes(way) || !c.who) continue;
         out.push(base({ id: `contact:${c.who}:${c.fp}`, kind: '联系', text: c.text, who: [c.who], owner: c.who,
@@ -194,7 +194,7 @@ function contactItems(contacts, messages, { anchors = null, arrivals = [] } = {}
 export function foldPending(input = {}) {
     const same = input.same ?? ((a, b) => a === b);
     const records = [...(input.records ?? [])].sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
-    const items = [...promiseItems(records, input.timeline ?? {}, same), ...todoItems(records, input.messages ?? [], input.board ?? {}, input.timeline ?? {}, input.userName, same, input.boardAt ?? null, input.rosterNames ?? []), ...ruleItems(records, input.timeline ?? {}), ...moneyItems(records, input.named ?? []), ...menuItems(input.menu), ...errandItems(input.awayPlans, input.board), ...contactItems(input.contacts, input.messages ?? [], { anchors: input.anchors ?? null, arrivals: input.arrivals ?? [] }), ...matterItems(records)];
+    const items = [...promiseItems(records, input.timeline ?? {}, same), ...todoItems(records, input.messages ?? [], input.board ?? {}, input.timeline ?? {}, input.userName, same, input.boardAt ?? null, input.rosterNames ?? []), ...ruleItems(records, input.timeline ?? {}), ...moneyItems(records, input.named ?? []), ...menuItems(input.menu), ...errandItems(input.awayPlans, input.board), ...contactItems(input.contacts, input.messages ?? [], { anchors: input.anchors ?? null, arrivals: input.arrivals ?? [], knockLive: input.knockLive }), ...matterItems(records)];
     const byId = new Map(items.map(item => [item.id, item]));
     // 同一件几处来源：口袋和约定对得上（规划者写明了跟着哪件，或题目、露面、用在和约定说的是一回事），两边互相记着对方的编号
     for (const p of items.filter(x => x.kind === '约定')) for (const row of arr(input.menu)) {
@@ -225,7 +225,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
         contacts: JSON.stringify((store.getCast?.(chat.story_id) ?? []).map(c => [c.name, store.getMeta?.(`settled_contact:${chatKey}:${c.name}`) ?? ''])),
         // 他后来自己进了场，结算写的联系就作废（landing.enteredSince）：隔离区间、进场记录变了都要重算
         anchors: chat.anchors ?? '',
-        arrivals: store.getMeta?.(`arrivals:${chatKey}`) ?? '',
+        arrivals: (store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '',
     };
     // 版本里带上口袋各件的状态（进口袋、用上了是菜单日志变的，条数不变）
     const seqHash = createHash('sha1').update(messages.map(m => `${m.pos}:${m.fp}:${m.boardMark ?? ''}`).join('|')).digest('hex').slice(0, 16);
@@ -266,7 +266,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     let anchors = null, arrivals = [];
     try { anchors = meta.anchors ? JSON.parse(meta.anchors) : null; } catch {}
     try { arrivals = JSON.parse(meta.arrivals || '[]') ?? []; } catch {}
-    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, named: namedParties(store.getCast?.(chat.story_id) ?? [], userName), same, homes: lifeSheet(visible).homes });
+    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, knockLive: e => store.knockLive?.(chatKey, e), board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, named: namedParties(store.getCast?.(chat.story_id) ?? [], userName), same, homes: lifeSheet(visible).homes });
     pendingCache.set(key, value);
     while (pendingCache.size > 32) pendingCache.delete(pendingCache.keys().next().value);
     return value;

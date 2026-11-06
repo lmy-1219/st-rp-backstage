@@ -89,7 +89,7 @@ export function doorAt(input = {}) {
         // 拿出来那条以后他自己进了场（landing.enteredSince）：这件门上不再挂——他来过了，后半截他在场时自己说（slot.menuFor 照旧给他）
         const pocketAt = m => (m.status === 'shown' ? m.settled_pos ?? m.pocket_pos : m.pocket_pos);
         const pockets = (memory ? [] : menu).filter(m => same(m.who, who) && (m.status === 'pocket' || m.status === 'shown') && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
-            && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivals ?? [] }));
+            && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivalHistory ?? input.arrivals ?? [], knockLive: input.knockLive }));
         const reached = !memory && reach && same(reach.person ?? reach.who, who);
         const called = callsFor(narrationOf(recentUser), [who, ...(rel ? personOf(rel, who, names)?.又名 ?? [] : [])]);
         const requested = request && same(request.who, who) && last >= request.at && last - request.at <= 8;
@@ -215,7 +215,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const isDone = typeof records?.isDone === 'function' ? fp => records.isDone(chat.story_id, fp) : null;
     const menu = awaitingPockets(earlyLeads(store, store.menuOf?.(chatKey) ?? [], timeline), { messages, isDone, record: planner?.record !== false, same: sameWho });
     const holds = read(store, `arrival_hold:${chatKey}`, []);
-    const arrivals = read(store, `arrivals:${chatKey}`, []);
+    const arrivals = read(store, `arrivals:${chatKey}`, []), arrivalHistory = read({ getMeta: store.getRawMeta ?? store.getMeta }, `arrivals:${chatKey}`, []);
     const knocks = read(store, `knocks:${chatKey}`, []);
     let anchors = null, members = [];
     try { anchors = chat.anchors ? JSON.parse(chat.anchors) : null; } catch {}
@@ -238,7 +238,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const justBack = store.absences?.(chatKey)?.at(-1)?.from_pos;
     const reach = contacts?.enabled === false || !recentUser || (justBack != null && lastPos - justBack <= 8) ? null
         : already ? reachable.find(p => p.person === already.person) : pickContact({ people: reachable, dayOf, lastPos, offers, minGap: contacts?.minGap ?? 16 });
-    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, knocks, members, pace: paceFor(store, chatKey) };
+    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, arrivalHistory, knockLive: e => store.knockLive?.(chatKey, e), knocks, members, pace: paceFor(store, chatKey) };
     const key = `${chatKey}:${createHash('sha1').update(JSON.stringify(input)).digest('hex')}`;
     let cache = caches.get(store);
     if (!cache) caches.set(store, cache = new Map());

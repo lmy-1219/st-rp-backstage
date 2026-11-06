@@ -228,7 +228,7 @@ export function openSituation(db) {
 //   或者之后有他自己的"说""做"、当时在场的人里有主角。
 // 另可带 window（条数）和 lastPos：动向挂的那条离最新一条超过这么多条，也算过了（角色那一格用；规划简报不用）。
 // 回头看改过的 move.pos 是新那次推演挂的那条。
-export function moveLive(move, { records = [], messages = [], arrivals = [], anchors = null, principal = null, avatarOf = null, lastPos = null, window = null } = {}) {
+export function moveLive(move, { records = [], messages = [], arrivals = [], anchors = null, knockLive = null, principal = null, avatarOf = null, lastPos = null, window = null } = {}) {
     if (!move || move.stopped) return false;
     if (window != null && lastPos != null && Number.isFinite(move.pos) && lastPos - move.pos > window) return false;
     const byId = new Map(records.map(r => [r.id, r]));
@@ -241,7 +241,7 @@ export function moveLive(move, { records = [], messages = [], arrivals = [], anc
         if (principal && !samePerson(move.who, principal)) {
             const list = Array.isArray(arrivals) ? arrivals : Object.values(arrivals ?? {});
             const avatar = avatarOf?.(move.who) ?? list.find(e => e && (e.who === move.who) && e.avatar)?.avatar ?? null;
-            if (enteredSince(pos, { who: move.who, avatar, messages, anchors, arrivals: list })) return false;
+            if (enteredSince(pos, { who: move.who, avatar, messages, anchors, arrivals: list, knockLive })) return false;
             if (records.some(r => r.pos > pos && ['说', '做'].includes(r.type) && samePerson(r.holder_name, move.who) && (r.audience ?? []).some(a => samePerson(a, principal)))) return false;
         }
     }

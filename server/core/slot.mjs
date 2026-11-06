@@ -931,6 +931,19 @@ function awayDue(store, chatKey, { speaker, name, userName = null, camera = fals
     return { due, fresh, opening, away: awayLines(fresh.story, { name, userName: userName ?? '对方', same, opening }) };
 }
 
+function arrivalForSlot(store, chatKey, arrived, name, names) {
+    if (arrived && sameName(arrived.who, name, names)) return arrived;
+    try {
+        const entries = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? [];
+        const own = entries.findLast(e => e?.brief && sameName(e.who, name, names));
+        if (!own) return arrived;
+        const away = Object.values(JSON.parse(store.getMeta?.(`away_plan:${chatKey}`) ?? '{}') ?? {}).find(p => p?.who && sameName(p.who, name, names) && !p.dropped && Number(p.at) >= Number(own?.at));
+        const anchors = JSON.parse(store.requireChat(chatKey).anchors ?? 'null');
+        const segment = (anchors?.[own.avatar]?.segments ?? []).findLast(s => Number(s.from) === Number(own.at));
+        return !away && (segment?.to == null) ? { ...own, ...own.brief } : arrived;
+    } catch { return arrived; }
+}
+
 // 旧事之外的几块，都是程序算的：聊到钱时的行情与他知道的账；用户离开后回来的第一轮；
 // 平时轮到这一轮第一个开口的人时，看要不要递一个"不在场的人来联系"。
 // camera（N-276）：镜头开口——name 是玩家（照玩家的眼睛看），不给"回来那一段"、关系、追问这些属于某个人的
@@ -1033,6 +1046,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 他刚进场的那一份（进场、发消息打电话来的）：生活现状和下面的进场那几行都要看
     let arr = null;
     try { arr = JSON.parse(store.getMeta?.(`arrived:${chatKey}`) ?? 'null'); } catch {}
+    arr = arrivalForSlot(store, chatKey, arr, name, rosterNames);
     // D-169（试玩 10/6）：理进场那份比他开口慢、旧的那份按条号对上了，他用了已经删掉的那一回——现在认那条的指纹
     const arrLive = !!(arr?.who && sameName(arr.who, name, rosterNames) && (arr.fp == null || (m => !!m && (m.fp === arr.fp || !!store.sameMessage?.(m.fp, arr.fp)))(messages.find(m => m.pos === arr.at - 1))));
     // 远程：进场那份写的是消息、电话，而且还没当面碰上（场面表认，metInPerson）
@@ -1928,8 +1942,8 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             const door = doorFor(store, records, chatKey, { present, timeline: time }).items;
             let anchors = null, arrivals = [];
             try { anchors = JSON.parse(store.requireChat(chatKey).anchors ?? 'null'); } catch {}
-            try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
-            const entered = (who, pos, item) => enteredSince(pos, { who, avatar: item?.avatar ?? null, messages, anchors, arrivals });
+            try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
+            const entered = (who, pos, item) => enteredSince(pos, { who, avatar: item?.avatar ?? null, messages, anchors, arrivals, knockLive: e => store.knockLive?.(chatKey, e) });
             const { next, due } = stepWaits({ prev, door, messages, rowAt, entered, parts: time.parts });
             if (JSON.stringify(next) !== JSON.stringify(prev)) store.setMeta?.(`door_wait:${chatKey}`, JSON.stringify(next));
             for (const d of due) {
@@ -1990,8 +2004,8 @@ function settleGaps(store, records, chatKey, { storyId, messages, last }) {
 function moveLiveCtx(store, chatKey, { records, principal }) {
     let anchors = null, arrivals = [];
     try { anchors = JSON.parse(store.requireChat(chatKey).anchors ?? 'null'); } catch {}
-    try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
-    return { records, principal, anchors, arrivals };
+    try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
+    return { records, principal, anchors, arrivals, knockLive: e => store.knockLive?.(chatKey, e) };
 }
 
 // 局势推演要的材料（main.mjs runSituation）：势力账、上次推演之后记下的事（第一次只看前一天起的）、托出去还没了结的事、
@@ -2474,13 +2488,13 @@ export function pocketGone(store, records, chatKey, { messages, roster = [], ros
     };
     let anchors = null, arrivals = [];
     try { anchors = JSON.parse(store.requireChat(chatKey).anchors ?? 'null'); } catch {}
-    try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
+    try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
     const avatarOf = n => roster.find(e => sameName(e.name, n, rosterNames))?.avatar ?? null;
     const sinceOf = m => (m.anchor_pos != null ? m.anchor_pos : store.planById?.(m.plan_id)?.anchor_pos ?? null);
     const ctx = { today, dayOf, at: messages.at(-1)?.pos ?? 0, partAt, placeAt: pos => boardAt(pos)?.camera?.place ?? null, placeNow: board?.camera?.place ?? null,
         presentAt: pos => presentOn(boardAt(pos)), presentNow: here, same: (a, b) => sameName(a, b, rosterNames) };
     const names = rosterNames.filter(n => n && n !== CAMERA_NAME);
-    return m => premiseGone(m, { names, since: sinceOf, entered: (who, pos) => enteredSince(pos, { who, avatar: avatarOf(who), messages, anchors, arrivals }) }) ?? expiredPocket(m, ctx);
+    return m => premiseGone(m, { names, since: sinceOf, entered: (who, pos) => enteredSince(pos, { who, avatar: avatarOf(who), messages, anchors, arrivals, knockLive: e => store.knockLive?.(chatKey, e) }) }) ?? expiredPocket(m, ctx);
 }
 
 // 一场戏里已经叠了几件（章程 H2，给 stepPocket 的 stacked）：拿出来还没下文的那几件，拿出来那条上的场面（镜头在哪、谁在场）
@@ -3349,7 +3363,16 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     const shape = (text, parts) => ({ text: text ? wrap(text) : '', rule: !text ? '' : split && parts ? SPLIT_RULE : READING_RULE, ...(text && split && parts ? { parts, depths } : {}) });
     const versionNow = () => {
         const leaks = activeLeaks(store, records, chatKey);
-        return intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '');
+        let tracked = false;
+        try {
+            const raw = store.getRawMeta ?? store.getMeta;
+            const arrived = JSON.parse(raw?.(`arrived:${chatKey}`) ?? 'null');
+            const arrivals = JSON.parse(raw?.(`arrivals:${chatKey}`) ?? '[]');
+            tracked = [arrived, ...(Array.isArray(arrivals) ? arrivals : [])].some(e => e && (Number.isFinite(e.basisDay) || e.sourceStep));
+        } catch {}
+        // 旧格的版本照旧；新进场供料的有效集合变了才重组。
+        const arrivalsVersion = tracked ? `:arrival:${createHash('sha1').update(JSON.stringify([store.getMeta?.(`arrived:${chatKey}`), store.getMeta?.(`arrivals:${chatKey}`)])).digest('hex').slice(0, 16)}` : '';
+        return intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion;
     };
     const version = versionNow();
     const pinned = store.getSlot({ chatKey, speaker, anchor, ver: version });

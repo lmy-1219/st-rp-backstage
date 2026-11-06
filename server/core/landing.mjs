@@ -36,7 +36,7 @@ export const GONE = 'gone:';
 export function relinkArrivals(store, records, chatKey) {
     if (!records?.moveDerived && !store.moveMenu) return 0;
     let entries = [];
-    try { entries = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch { return 0; }
+    try { entries = JSON.parse((store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch { return 0; }
     if (!Array.isArray(entries) || !entries.some(e => e?.recs?.length || e?.menus?.length)) return 0;
     const messages = store.currentMessages(chatKey);
     const chat = store.requireChat(chatKey), storyId = chat.story_id;
@@ -47,7 +47,7 @@ export function relinkArrivals(store, records, chatKey) {
         const at = num(e.at);
         // 同一条上又进了一次场（他那条删了重来）：前一次替他记的不再算，只留最后一次的
         const again = entries.slice(i + 1).some(x => x && isSame(x, e) && num(x.at) === at && x.fp === e.fp);
-        const anchored = !again && at != null && messages[at - 1]?.fp === e.fp;
+        const anchored = !again && store.knockLive?.(chatKey, e) !== false && at != null && messages[at - 1]?.fp === e.fp;
         const reply = anchored ? replyOf(e, messages, entries) : null;
         const target = reply?.fp ?? (anchored && messages.length <= at && !leftSilent(e, anchors) ? e.fp : `${GONE}${e.fp}`);
         if (e.recs?.length) moved += records.moveDerived({ storyId, ids: e.recs, fp: target });
@@ -99,13 +99,13 @@ export function liveAnchors(anchors, dates = []) {
 //   （和场面表 board.liveSegment 一样：起点上记过他进场、那几次全不算数了，这段就不算）；
 // - 或者进场记录里有他一次 at 在 pos 以后、而且这次进场还算数（arrivalLive）。
 // 远程（电话、消息）进来的也算：他已经亲自出面说过话了，后台替他挂的那一下就过时了
-export function enteredSince(pos, { who = null, avatar = null, messages = [], anchors = null, arrivals = [] } = {}) {
+export function enteredSince(pos, { who = null, avatar = null, messages = [], anchors = null, arrivals = [], knockLive = null } = {}) {
     const p = num(pos);
     if (p == null || (!who && !avatar)) return false;
     const entries = Array.isArray(arrivals) ? arrivals.filter(Boolean) : [];
     const me = { who, avatar };
     const mine = entries.filter(e => isSame(e, me));
-    const live = e => arrivalLive(e, messages, entries, anchors);
+    const live = e => knockLive?.(e) !== false && arrivalLive(e, messages, entries, anchors);
     const segs = avatar ? anchors?.[avatar]?.segments : null;
     const segLive = s => { const atStart = mine.filter(e => num(e.at) === s.from); return !atStart.length || atStart.some(live); };
     if (Array.isArray(segs) && segs.some(s => Number.isFinite(s?.from) && s.from > p && s.from <= messages.length && !emptySegment(s) && segLive(s))) return true;
@@ -130,7 +130,7 @@ export function landSent(store, records, { chatKey, storyId, who, avatar = null,
 export function contactUsed(c, messages, entries = [], opts = {}) {
     if (!c) return false;
     const who = opts.who ?? c.who ?? null, avatar = opts.avatar ?? c.avatar ?? null;
-    if (c.at != null && enteredSince(c.at, { who, avatar, messages, anchors: opts.anchors ?? null, arrivals: entries })) return true;
+    if (c.at != null && enteredSince(c.at, { who, avatar, messages, anchors: opts.anchors ?? null, arrivals: entries, knockLive: opts.knockLive })) return true;
     if (!c.usedAt) return !!c.used;
     const u = c.usedAt;
     if (messages[u.pos]?.fp !== u.fp) return false;

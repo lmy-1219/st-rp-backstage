@@ -47,7 +47,7 @@ import { boardFor } from './board.mjs';
 import { awayPlansOf } from './opening.mjs';
 import { unansweredLine, promisesFor, pullOf, placeNow } from './waiting.mjs';
 import { doorFor } from './door.mjs';
-import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFor, autoLeave, markLeft, waitingKnock, pendingKnock, recentLapsed, leaveDoubts, answerLeaves, takePendingLeft, acknowledgeLeaves, KNOCK_JUDGE_SYSTEM, knockJudgePrompt, parseKnockJudge } from './auto.mjs';   // 自动进离场与调度（D-201）
+import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFor, autoLeave, markLeft, waitingKnock, pendingKnock, knocksOf, sourceStep, recentLapsed, leaveDoubts, answerLeaves, takePendingLeft, acknowledgeLeaves, KNOCK_JUDGE_SYSTEM, knockJudgePrompt, parseKnockJudge } from './auto.mjs';   // 自动进离场与调度（D-201）
 import { pendingFor } from './pending.mjs';
 import { planBrief, planningView, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimateSetup, intimatePlanOptions } from './slot.mjs';
 import { AWAY_SYSTEM, AWAY_REVISE_SYSTEM, parseAway, awayPrompt, revisePrompt, pinNames, actualDaysOf } from './away.mjs';
@@ -832,8 +832,8 @@ async function settleAway({ chatKey, who, avatar = null, reason = '换时段', u
     if (unanswered?.since) {
         let anchors = null, arrivals = [];
         try { anchors = JSON.parse(chat.anchors ?? 'null'); } catch {}
-        try { arrivals = JSON.parse(store.getMeta(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
-        if (enteredSince(unanswered.since.pos, { who, avatar, messages, anchors, arrivals })) return { ok: true, skipped: true, entered: true };
+        try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
+        if (enteredSince(unanswered.since.pos, { who, avatar, messages, anchors, arrivals, knockLive: e => store.knockLive?.(chatKey, e) })) return { ok: true, skipped: true, entered: true };
     }
     const tl = timelineFor(store, records, chatKey, messages);
     const firm = { ...tl, today: tl.firmToday, part: tl.firmPart, rows: tl.firmRows, dayOf: tl.firmDayOf };
@@ -925,9 +925,12 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
         const gate = bodyGate({ messages, userName });
         const herAliases = rel ? (p => (p ? [p.名, ...(p.又名 ?? [])].filter(Boolean) : []))(personOf(rel, userName, roster)) : [];
         const bodyHold = !unanswered && holdBodyContact({ contact: got.contact, gate, userName, aliases: herAliases });
+        let contactStep = 0;
+        try { contactStep = Number(JSON.parse(store.getRawMeta(`settled_contact:${chatKey}:${who}`) ?? 'null')?.step) || 0; } catch {}
+        const nextContactStep = () => ++contactStep;
         if (got.contact?.way !== '不' && justLeft) addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}想过要${got.contact.way === '上门' ? '过去一趟' : got.contact.way === '电话' ? '打个电话' : '发条消息'}（${String(got.contact.text ?? '').slice(0, 80)}），${neverHere ? '先按下了' : '想想刚分开没多久，先按下了'}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
         else if (bodyHold) addSettle({ storyId: chat.story_id, fp, type: '心里', text: heldContactText({ who, way: got.contact.way, userName, gate }), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
-        else if (got.contact?.way !== '不') store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way: got.contact.way, text: got.contact.text, at: last.pos, fp, basisDay: tl.today, used: false }));
+        else if (got.contact?.way !== '不') store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way: got.contact.way, text: got.contact.text, at: last.pos, fp, basisDay: tl.today, step: nextContactStep(), used: false }));
         // 没人接的那一回（waiting.mjs）：再找（发消息、打电话、找上门）→ 门上换成这一回的；放下 → 门上那一项收起（挂在这一条上，删回去就回来）
         if (unans.length) {
             const u = unans[0];
@@ -942,7 +945,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
                 let earlier = null;
                 if (src?.type === 'pocket') { const m = store.menuOf(chatKey).find(x => x.id === Number(src.id)); if (m) earlier = { way: u.how === '打来电话' ? '电话' : '消息', title: m.title ?? '', surface: m.surface ?? '', respond: m.respond ?? '' }; }
                 if (src?.type === 'contact') { try { earlier = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null')?.earlier ?? null; } catch {} }
-                store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way, text: (got.contact?.way !== '不' && got.contact?.text) || note, at: last.pos, fp, basisDay: tl.today, used: false, from: 'unanswered', ...(pull ? { pull } : {}), ...(earlier?.surface ? { earlier } : {}) }));
+                store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way, text: (got.contact?.way !== '不' && got.contact?.text) || note, at: last.pos, fp, basisDay: tl.today, step: nextContactStep(), used: false, from: 'unanswered', ...(pull ? { pull } : {}), ...(earlier?.surface ? { earlier } : {}) }));
                 addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}找过${userName}没人接，又${way === '上门' ? '找上门去' : way === '电话' ? '打了电话' : '发了一条'}：${note}`.slice(0, 200), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
             } else if (result === '放下') {
                 const src = unanswered.item?.source;
@@ -1043,7 +1046,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
         try {
             const item = doorFor(store, records, chatKey, { present: [], recentUser: '', timeline: timelineFor(store, records, chatKey, msgs) }).items.find(i => sameName(i.who, who, (store.getCast(chat.story_id) ?? []).map(e => e.name)));
             // sent：旁白替他递过的那条消息、来电（场记章程 B1），进场那份接着这条说
-            if (item) offer = { who: item.who, avatar: item.avatar, why: item.reason ?? '', way: '', from: item.source?.type === 'contact' ? 'settle' : item.source?.type ?? 'user', lines: item.lines ?? [], sent: item.sent ?? null, earlier: item.earlier ?? null };
+            if (item) offer = { who: item.who, avatar: item.avatar, why: item.reason ?? '', way: '', from: item.source?.type === 'contact' ? 'settle' : item.source?.type ?? 'user', source: item.source ?? null, lines: item.lines ?? [], sent: item.sent ?? null, earlier: item.earlier ?? null };
         } catch {}
     }
     if (playModeOf(store,chatKey,getConfig()) === 'memory' && ['pocket','settle','reach'].includes(offer?.from)) offer=null;
@@ -1080,7 +1083,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
             // span 是给模型看的一句话（"同一天，早上走的，现在下午"），不是场面表的 stage；stage 另带着
             let contact = null; try { contact = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null'); } catch {}
             // 写下这条以后他已经自己进过场（landing.enteredSince 认隔离区间、进场记录）：过时了，不当"他想说的"给
-            try { if (contact?.at != null && enteredSince(contact.at, { who, avatar, messages: msgs, anchors: JSON.parse(chat.anchors ?? 'null'), arrivals: JSON.parse(store.getMeta(`arrivals:${chatKey}`) ?? '[]') ?? [] })) contact = null; } catch {}
+            try { if (contact?.at != null && enteredSince(contact.at, { who, avatar, messages: msgs, anchors: JSON.parse(chat.anchors ?? 'null'), arrivals: JSON.parse((store.getRawMeta ?? store.getMeta)(`arrivals:${chatKey}`) ?? '[]') ?? [], knockLive: e => store.knockLive?.(chatKey, e) })) contact = null; } catch {}
             // 结算替他记下的（住处、心里、放下了什么）当事实给；去办的那几件 away.plan 上已经带着结果，不重复
             const settled = visible.filter(r => r.holder_name === who && ['改变', '心里'].includes(r.type) && r.pos >= left).map(r => r.text).filter(Boolean).slice(-6);
             away = { from: left, span: awaySpan(rows.get(left - 1) ?? rows.get(left), rows.get(msgs.at(-1)?.pos), tlNow.scale), stage: boardPerson?.stage ?? null, home, plan, contact, settled,
@@ -1115,7 +1118,12 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     const at = (msgs.at(-1)?.pos ?? -1) + 1;   // 他从下一条起在场（叩门的：就是他那条）
     // 递的时候说好了是发消息、打电话来的（结算定的、玩家点名叫的），模型答"上门"也不算：旁白写的是终端响了，他不能这一条就走进屋（D 副本假模型 10/7 撞到）
     const offeredHow = /电话/.test(offer?.way ?? '') ? '电话' : /消息/.test(offer?.way ?? '') ? '消息' : '';
-    const arr = { who, avatar, at, fp: tip?.fp ?? null, how: offeredHow || got?.how || '', why: got?.why || (offer?.from === 'settle' ? `他这回来是为了说：${offer?.why ?? ''}` : offer?.why || ''), saw: got?.saw ?? '', meanwhile: away && !fullySettled ? got?.meanwhile ?? '' : '', where: got?.where ?? '', from: offer?.from ?? 'user',
+    const pending = knock ? pendingKnock(store, chatKey) : null;
+    const linked = pending?.who === who && pending.at === at && pending.fp === tip?.fp ? pending
+        : knock ? [...knocksOf(store, chatKey)].reverse().find(k => k.at === at && k.fp === tip?.fp && k.who === who) : null;
+    const basisDay = linked?.basisDay ?? store.confirmedDayAt?.(chatKey, tip?.pos) ?? storyContext(store, records, chatKey).today;
+    const step = linked?.sourceStep ?? (offer?.source ? sourceStep(store, chatKey, { source: offer.source, who, at, fp: tip?.fp }) : null);
+    const arr = { who, avatar, at, fp: tip?.fp ?? null, basisDay, sourceStep: step, how: offeredHow || got?.how || '', why: got?.why || (offer?.from === 'settle' ? `他这回来是为了说：${offer?.why ?? ''}` : offer?.why || ''), saw: got?.saw ?? '', meanwhile: away && !fullySettled ? got?.meanwhile ?? '' : '', where: got?.where ?? '', from: offer?.from ?? 'user',
         // 他刚发过、打过的那条（场记章程 B1）：他头两回开口那一格带上（arrivedLines），接着这件说、不重发
         ...(offer?.sent?.surface ? { sent: { way: offer.sent.way, surface: offer.sent.surface, respond: offer.sent.respond ?? '' } } : {}),
         // 没人接又来找的：头一回那条（没递到玩家眼前，或者玩家没理）
@@ -1129,8 +1137,8 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     store.setMeta(`arrived:${chatKey}`, JSON.stringify(arr));
     // 每次进场挂在哪条后面（at、那条的指纹）：删回去重来以后，隔离扩展还开着的区间对不上哪次还算数的进场，场面表就不认它
     // 带上怎么来的、在哪：场面表按各人自己最近一次进场认远程（"刚进场的"只有一份，后来的人一进场就盖掉了前一个打电话的）
-    const entry = { who, avatar, at, fp: tip?.fp ?? null, how: arr.how || '', ...(arr.where ? { where: arr.where } : {}), ...(knock ? { knock: true } : {}) };
-    try { const list = JSON.parse(store.getMeta(`arrivals:${chatKey}`) ?? '[]') ?? []; store.setMeta(`arrivals:${chatKey}`, JSON.stringify([...list, entry].slice(-40))); } catch {}
+    const entry = { who, avatar, at, fp: tip?.fp ?? null, basisDay, sourceStep: step, how: arr.how || '', ...(arr.where ? { where: arr.where } : {}), brief: { why: arr.why, saw: arr.saw, meanwhile: arr.meanwhile, sent: arr.sent, earlier: arr.earlier }, ...(knock ? { knock: true } : {}) };
+    try { const list = JSON.parse(store.getRawMeta(`arrivals:${chatKey}`) ?? '[]') ?? []; store.setMeta(`arrivals:${chatKey}`, JSON.stringify([...list, entry].slice(-40))); } catch {}
     store.setMeta(`arrival_offer:${chatKey}`, null);
     store.setMeta(`arrival_request:${chatKey}`, null);
     store.setMeta(`arrival_brief:${chatKey}`, null);
@@ -1166,7 +1174,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
         }
     } catch (error) { log(`arrive ${chatKey} ${who}: pull failed ${error.message}`); }
     // 这几笔（和提前的那件）挂到他那条回复上（landing.relinkArrivals，每次同步跑）：回复删了、换了，它们跟着看不见
-    if (recs.length || menus.length) try { const list = JSON.parse(store.getMeta(`arrivals:${chatKey}`) ?? '[]') ?? []; const mine = list.findLast(e => e.who === entry.who && e.at === entry.at && e.fp === entry.fp); if (mine) { if (recs.length) mine.recs = recs; if (menus.length) mine.menus = menus; store.setMeta(`arrivals:${chatKey}`, JSON.stringify(list)); } } catch {}
+    if (recs.length || menus.length) try { const list = JSON.parse(store.getRawMeta(`arrivals:${chatKey}`) ?? '[]') ?? []; const mine = list.findLast(e => e.who === entry.who && e.at === entry.at && e.fp === entry.fp); if (mine) { if (recs.length) mine.recs = recs; if (menus.length) mine.menus = menus; store.setMeta(`arrivals:${chatKey}`, JSON.stringify(list)); } } catch {}
     log(`arrive ${chatKey} ${who}: ${arr.how || '-'} (点的：${({ go: '你去找他', come: '让他过来', remote: way ? `他${/电话/.test(way) ? '打电话' : '发消息'}` : '他发消息' })[mode] ?? mode}) ${got ? 'brief' : 'no brief'}`);
     return { ok: true, ...arr };
 }
