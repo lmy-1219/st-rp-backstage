@@ -20,7 +20,7 @@ import { impulseLines, IN_PLACE, looseEnds, STAY_STATES, stillThere } from './sc
 import { profileParts } from './profile.mjs';
 import { senseScores, textKey } from './vectors.mjs';
 import { onwardLine, absentAskLine, takenLine, moldOf, varyLine, lastEchoes, scopeLine, bodyHarping, choreLoop, restHarping, choreLine } from './pace.mjs';
-import { bodyGate, bodyGuard, herTrouble } from './body.mjs';
+import { bodyGate, bodyGuard } from './body.mjs';
 import { crewOf, crewEntry, latestNode, crewLines, pushedText, crewPushDue, pushedMeta, keyPersonEntry, mindLine } from './crew.mjs';
 import { warmWords } from './tone.mjs';
 import { keepWay, wayOnly } from './fresh.mjs';
@@ -541,7 +541,7 @@ export async function composeSlot(store, records, args, opts = {}) {
     if (opts.pace?.enabled !== false && !camera) {
         const names = (store.getCast?.(chat.story_id) ?? []).map(e => e.name);
         const upto = uptoAnchor(messages, args.anchor);
-        for (const line of [onwardLine({ messages, speaker, name, userName: userName ?? '对方', soft: args.soft !== false }), absentAskLine({ messages, speaker, name, names, present: args.present ?? [] }), takenLine({ messages: upto, speaker, name, userName: userName ?? '对方', remote: stance?.status === 'remote' })]) say(line);
+        for (const line of [onwardLine({ messages, speaker, name, userName: userName ?? '对方' }), absentAskLine({ messages, speaker, name, names, present: args.present ?? [] }), takenLine({ messages: upto, speaker, name, userName: userName ?? '对方', remote: stance?.status === 'remote' })]) say(line);
     }
     // 这一条的范围（用户 10/2，横向生长）：只写眼前这几分钟，停在对方能接的地方；对方没动，场面不挪、时间不跳。放在最末。
     if (opts.pace?.scope !== false && opts.pace?.lateral !== false && !camera) say(scopeLine({ userName: userName ?? '对方' }));
@@ -624,7 +624,7 @@ export function crowdLines({ messages = [], present = [], name, userName = null,
     const seen = names(messages.slice(-CROWD_WINDOW).map(m => m.text).join('\n')).filter(n => !here.some(h => same(h, n))).slice(0, CROWD_MAX);
     if (seen.length < CROWD_MIN) return [];
     const who = seen.join('、'), cut = (t, k) => (String(t ?? '').length > k ? `${String(t).slice(0, k)}…` : String(t ?? ''));
-    return [`最近几条里还写到了${who}（他们不在这个群里）：他们要是就在这儿，写群像时也带他们一笔——在干什么、什么神情、偶尔插一句；不用每个都写，别抢了眼前的戏，也别替${userName ?? '玩家'}说话。人不在这儿就当没看见。`,
+    return [`最近几条还提到了${who}（他们不在这个群里）；是否就在眼前照当前场面，未在场的只有已有资料。群像的分量照眼前的戏，不替${userName ?? '玩家'}说话。`,
         ...seen.map(n => {
             // 外人眼里的样子（写了的照它；没写的多半是街面上的人，"现在"就是谁都看得见的那面）；关系照开口的人自己那一侧。
             // 试玩 10/13：给开口的人的是另一个人那格"现在"的实情，那是只有两三个人知道的事
@@ -1231,7 +1231,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
 
     // 主角团的打算（用户 10/12，N-363／N-365："角色是活的，有问题自己找办法……角色没有自己想干的事、没有驱动，和没后台的时候一样"）：
     // 轮到主角团里的人开口（不是玩家、不是旁白），带上最新一份规划给他写的想办成什么（具体步骤不给，到点办过了才由镜头外那句带来，T073）；
-    // 她眼下有难处时多一句"会为她做什么——去做，别光说"；团里两人这一段之间的事，对方此刻在场才给；镜头外他按打算办到哪也带着（crew.mjs）。
+    // 团里两人这一段之间的关系材料，对方此刻在场才给；镜头外他按打算办到哪也带着（crew.mjs）。
     // 放在"他这阵子心里、手上还挂着的"那一层（back），长度算进那一格；他自己的打算不让位（让掉了就又是没有驱动），团里那句跟他牵头的事同一档
     if (drama && !camera && userName && !sameName(name, userName, rosterNames)) {
         try {
@@ -1244,11 +1244,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             const keyMind = key ? mindLine(key.心思, { keep: l => guard.lines([l]).length > 0 }) : null;
             if (keyMind) add(0, [keyMind], 'back', 'person');
             if (inCrew) {
-                const herP = rel ? personOf(rel, userName, rosterNames) : null;
-                const upto = anchor ? (uptoAnchor(messages, anchor).at(-1)?.pos ?? lastPos) : lastPos;
-                const notes = foldState((store.stateNotesOf?.(chatKey) ?? []).filter(n => n.pos <= upto), sameP, { lastPos: upto });
-                const trouble = herTrouble({ gate: { mode: guard.mode }, notes, userName, aliases: herP ? [herP.名, ...(herP.又名 ?? [])].filter(Boolean) : [], same: sameP });
-                const { own, team } = crewLines({ name, userName, entry, present, trouble, same: sameP, keep: l => guard.lines([l]).length > 0,
+                const { own, team } = crewLines({ name, userName, entry, present, same: sameP, keep: l => guard.lines([l]).length > 0,
                     pushed: pushedText(visible, { name, same: sameP, since: plan?.anchor_pos ?? -1 }) });
                 add(0, own, 'back', 'person');
                 add(1, team, 'back', 'person');
@@ -2483,7 +2479,7 @@ export function idleLine(store, chatKey, { messages, lastPos, today, userName = 
     }
     store.setMeta?.(key, String(lastPos));
     const who = userName ?? '对方';
-    return `（眼下没什么事等着，${who}这一阵只回一两个字：先看是心满意足、累了，还是在闷着、躲着——闷着的话先接住这个，别急着跳过去；场面真是自然停住了，可以让时间往后走——入夜、睡下、第二天、过几天——别一直停在同一刻；怎么过、过多久由你写，别替${who}定下什么。）`;
+    return `（眼下没有已到时候的事等着，${who}这一阵回复很短。若这一幕确实自然停住，可以作时间过渡；怎么过、过多久照当前情境，不替${who}作决定，也不跳过${who}还在进行的事。）`;
 }
 
 // 这个窗口此刻各对人的关系（记账的"关系"记录＋最近一份交回的规划写的关系现状，取更晚的）。
@@ -2736,7 +2732,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
             ...(hold?.related(pocket) && hold.label(pocket) ? [`  （这件和${hold.today?.(pocket) ? '今天' : ''}说好的「${hold.label(pocket)}」是一回事：办那件事的时候用得上）`] : []),
             // "世界"只留给真没人牵头的；新面孔没有卡，由前台把他写出来（D-107：以前这类事都挂"世界"，递成"从新闻、广播里冒出来"，和"房东端来一盘菜"对不上）
             ...(isPlayer(pocket.who) ? [camera ? `  （这是${userName ?? '玩家'}那边的事：别替${userName ?? '玩家'}做、别替${userName ?? '玩家'}说和想；只写眼前确实看得见、听得见的迹象，做不做由${userName ?? '玩家'}）`
-                : `  （这是${userName ?? '玩家'}那边的事：别替${userName ?? '玩家'}做、别替${playerWord(playerContext(store, chatKey))}说和想；只能从你看得见、听得见的地方带出来，或者由你提起、问起、帮${playerWord(playerContext(store, chatKey))}张罗，做不做由${playerWord(playerContext(store, chatKey))}）`]
+                : `  （这是${userName ?? '玩家'}那边的事：只从你确实看得见、听得见的迹象带出；做不做、怎么做，由${userName ?? '玩家'}决定，不替${userName ?? '玩家'}说和想）`]
                 : pocket.who === WORLD ? ['  （这件事按写明的迹象来到眼前；眼前能看见、听见多少，就写多少）']
                 : entryOf(pocket) === '到现场' && (call || face(pocket.who) || !present.includes(pocket.who)) ? [`  （${call ?? pocket.who}在${pocket.place || '那儿'}：他们到了那儿会碰上${call || face(pocket.who) ? `——这一局新出现的人，没有卡，由你把${personWord(pocket.who)}写出来` : ''}${call ? `；正文里还没人叫过${personWord(pocket.who)}的名字，就别写名字，只按看得见的样子写；有人问了、查了、看见名牌，${personWord(pocket.who)}叫${pocket.who}` : ''}）`]
                 : call ? [`  （${call}是这一局里新出现的人，没有卡：按事件写明的进场动作露面。正文里还没人叫过${personWord(pocket.who)}的名字，就别写名字，只按看得见的样子写；有人问了、查了、看见名牌，${personWord(pocket.who)}叫${pocket.who}）`]
@@ -3220,7 +3216,7 @@ export function driveMaterial(store, records, chatKey, { seeds = [], prices = nu
         }
     }
     for (const [i, h] of (node?.心事 ?? []).entries()) if (!saidSince(h, s.visible, { name: h.谁, since: plan?.anchor_pos ?? -1 }))
-        add('人', `held:${plan?.id}:${i}`, [h.谁], [h.处置, h.开口条件, h.事, h.不说时外显, h.说的场合].filter(Boolean).join('；'), { kind: '候选', pos: plan?.anchor_pos });
+        add('人', `held:${plan?.id}:${i}`, [h.谁], [h.处置, h.开口条件, h.事, h.说的场合].filter(Boolean).join('；'), { kind: '候选', pos: plan?.anchor_pos });
     for (const p of [...(node?.主角团 ?? []), ...(node?.要紧的人 ?? [])]) {
         const mind = p.心思 ? Object.entries(p.心思).filter(([, v]) => typeof v === 'string').map(([k, v]) => `${k}：${v}`).join('；') : '';
         add('人', `mind:${plan?.id}:${p.谁}`, [p.谁], [p.想干, p.下一步, mind].filter(Boolean).join('；'), { kind: '候选', pos: plan?.anchor_pos });
@@ -3396,7 +3392,7 @@ async function prefetchOthers(store, records, { assembler, keyMaker }, { chatKey
 // 同一格同时被要了两次（比如扩展重复触发）只组装一次。
 const inflight = new Map();
 
-export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, recent = [], recentUser = '', present = [], room = null }, records = null, { assembler = null, keyMaker = null, economy = null, contacts = null, absence = null, planner = null, world = null, mood = null, fresh = null, slot = null, vectors = null, pace = null, factions = null, situation = null, drift = null } = {}) {
+export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, recent = [], recentUser = '', present = [], room = null, soft = true }, records = null, { assembler = null, keyMaker = null, economy = null, contacts = null, absence = null, planner = null, world = null, mood = null, fresh = null, slot = null, vectors = null, pace = null, factions = null, situation = null, drift = null } = {}) {
     const chat = store.requireChat(chatKey);
     if (!chat.enabled) return { text: '', rule: '' };
     // 先折一次（世界往前走的那些写），再组格（只读）；预览（slot-preview）走 composeSlot，不经这里，什么都不写
@@ -3431,7 +3427,7 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     }
     const key = `${chatKey}\u0001${speaker}\u0001${anchor}\u0001${version}`;
     if (!inflight.has(key)) {
-        inflight.set(key, composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift })
+        inflight.set(key, composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift })
             .then(result => {
                 if (result.final) store.putSlot({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.parts ?? null, ver: version });
                 // 没钉住的（组装超时先给了纯程序那一格）也记下给了什么，标成 given：不当钉住的用（getSlot 认版本），
@@ -3445,6 +3441,6 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     }
     const { text, mode, contact = null, parts = null } = await inflight.get(key);
     // 正在等组装时喊停：旧版本不返回给前台，重新取暂停后的那一格。
-    if (versionNow() !== version) return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
+    if (versionNow() !== version) return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
     return { ...shape(text, parts), pinned: false, mode, contact };
 }

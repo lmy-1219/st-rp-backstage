@@ -16,8 +16,8 @@ const ctx = () => SillyTavern.getContext();
 // 当前预设里没有的那几块，按面板"提示词位置"里设的位置用扩展提示放。
 const live = Object.fromEntries(SLOT_MACROS.map(k => [k, '']));
 for (const k of SLOT_MACROS) { try { ctx().registerMacro?.(`rpe_${k}`, () => live[k] ?? '', '后台那一格（RP：幕后）'); } catch { /* 老版本 ST 没有宏：只用扩展提示 */ } }
-// {{rpe_soft}}：只是个记号，展开成空。预设里写着它的那条（"收着点"）开着没开，告诉后台那一格里关心那几句要不要（用户 10/14：老模型开、新模型关）
-try { ctx().registerMacro?.('rpe_soft', () => '', '记号：这份预设要不要"收着点"（RP：幕后）'); } catch { /* 老版本 ST 没有宏 */ }
+// {{rpe_soft}}：展开成空。开：身体决定权与防贬低提醒；关：只按本人状态照常相处；无标记：兼容开。
+try { ctx().registerMacro?.('rpe_soft', () => '', '记号：收着点开时提醒身体决定权与防贬低；关时照常相处；无标记兼容开（RP：幕后）'); } catch { /* 老版本 ST 没有宏 */ }
 // ST 自己的提示词管理（只在对话补全类的 API 下有）：动态取，取不到就只用扩展提示
 let stPrompts = null;
 let stWorldInfo = null;
@@ -50,8 +50,7 @@ function coveredByPreset(identifiers = false) {
     return out;
 }
 
-// 预设里写着 {{rpe_soft}} 的条目（"收着点"）：开着＝true（老模型，一关心就下指令，那一格里写明平辈、商量的口气）；
-// 关着＝false（新模型本来就偏软，那几句收掉）；预设里没有这条＝null，后台照开着算（和以前一样）
+// 预设里写着 {{rpe_soft}} 的条目：任一启用＝开（身体决定权与防贬低提醒）；都关闭＝关（只按本人状态照常相处）；无标记＝null，兼容开。
 function softFlag() {
     const m = promptManagerNow();
     if (!m?.serviceSettings || !m.activeCharacter) return null;
@@ -1319,7 +1318,7 @@ async function openPlaces() {
                 const who = document.querySelector('#rp_emergence_panel [data-role="preview-who"]');
                 const member = (who?.value === CAMERA_PICK ? { avatar: 'narrator', name: '旁白' } : null) ?? members(c).find(x => x.avatar === who?.value) ?? members(c)[0];
                 if (member) {
-                    const r = await api('slot-preview', { chatKey: state.chatKey, speaker: member.avatar, speakerName: member.name, recent: c.chat.slice(-3).map(x => String(x.mes ?? '')), recentUser: String([...c.chat].reverse().find(x => x.is_user)?.mes ?? ''), present: [c.name1, ...members(c).filter(x => !x.disabled).map(x => x.name)] });
+                    const r = await api('slot-preview', { chatKey: state.chatKey, speaker: member.avatar, speakerName: member.name, recent: c.chat.slice(-3).map(x => String(x.mes ?? '')), recentUser: String([...c.chat].reverse().find(x => x.is_user)?.mes ?? ''), present: [c.name1, ...members(c).filter(x => !x.disabled).map(x => x.name)], soft: softFlag() });
                     preview = r.text || '（这一轮他没有要给的）';
                 }
             }
@@ -2622,7 +2621,7 @@ function mountPanel() {
                 const member = avatar === CAMERA_PICK ? { avatar: 'narrator', name: '旁白' } : members(c).find(m => m.avatar === avatar);
                 if (member) {
                     const present = [c.name1, ...members(c).filter(m => !m.disabled).map(m => m.name)].filter(Boolean);
-                    const { text } = await api('slot-preview', { chatKey: state.chatKey, speaker: member.avatar, speakerName: member.name, recent: c.chat.slice(-3).map(m => String(m.mes ?? '')), recentUser: String([...c.chat.slice(-6)].reverse().find(m => m.is_user)?.mes ?? ''), present });
+                    const { text } = await api('slot-preview', { chatKey: state.chatKey, speaker: member.avatar, speakerName: member.name, recent: c.chat.slice(-3).map(m => String(m.mes ?? '')), recentUser: String([...c.chat.slice(-6)].reverse().find(m => m.is_user)?.mes ?? ''), present, soft: softFlag() });
                     await c.callGenericPopup(`<h3>${escapeHtml(member.name)}此刻会拿到的场记</h3><p><small>按最近 3 条消息找相关的旧事；实际发言时还会按那时的上文再算一次。</small></p><pre style="white-space:pre-wrap">${escapeHtml(text || '（空：没有他知道的、和眼下有关的事）')}</pre>`, c.POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
                 }
             }

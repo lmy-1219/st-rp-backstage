@@ -1,4 +1,3 @@
-import { personWord } from './pronoun.mjs';
 // 离开与回来（白皮书阶段 3B；需求 N-21/N-22/N-32～N-34；调研 17 §四～§六）。
 // 双时钟：窗口里按剧情时间走；只有用户真没进窗口时，才按现实时间一比一走，而且只对一直在场的主要角色。
 // 离开期间不生成任何情节，只记两件事：离开了多久（事实）、谁试着找过用户（一行事件，不写正文）。
@@ -53,10 +52,7 @@ export function attemptsDuring(absence, people, { max = 3, closenessOf = () => (
 // 主要角色回来时的分寸：按他和用户的亲疏。
 // 这些日子是什么样（出去了联系不上，还是一直睡着没醒）不在这里定：前台照最后那一幕来（用户 9/27）。
 function stirred(name, userName, level) {
-    if (level === '至亲') return `${name}和${userName}很近：这些日子${personWord(name)}多半坐不住——守过、找过、等过、急过、气过都有可能，怎么个坐不住由${personWord(name)}的性格和最后那一幕定。`;
-    if (level === '亲近') return `${name}会惦记${userName}这几天去哪了，见面会问，也许找过。`;
-    if (level === '熟络') return `${name}注意得到${userName}这几天不在，见面会问一句。`;
-    return `${name}未必在意${userName}这几天去了哪。`;
+    return `按现有关系，${name}与${userName}的亲疏是${level}；这段空白留下什么影响，照已经交代的经历。`;
 }
 
 const span = days => (days >= 14 ? `${Math.round(days / 7)} 周` : `${days} 天`);
@@ -69,13 +65,13 @@ export function returnLines({ name, userName = '对方', absence, open = [], att
         `${userName}离开了一阵：现实里有 ${d}没进这个窗口，按设定剧情里也过去了差不多 ${d}。中间这些日子没演。`,
         ...(reasoned ? [] : [`${name}这几天照常过自己的日子${open.length ? `；手上惦记的事可以一笔带过做到了哪一步：${open.map(r => r.text.replace(/[。．.]+$/, '')).join('；')}` : ''}。`]),
         ...(level ? [stirred(name, userName, level)] : []),
-        `这些天${userName}到底怎么了，由${userName}自己说；${name}可以猜、可以问、可以因为担心做过点什么，但别替${userName}定下来。`,
+        `这些天${userName}到底怎么了，由${userName}自己说；${name}只知道已经交代过的部分。`,
     ];
     // 用户先开口时才有这条退路；由他先开口时没有"这句话"，前台会拿十几天前那句当成没断过（实测照着上一幕往下演了）。
     if (!opening) lines.push(`要是${userName}这句话明显是接着上一幕说的、像是没断过，就当中间没断，这段不用管。`);
     // 这一轮由他先开口（用户还没说话）：推演没有结果时也得说清别替用户写原因（实测：前台自己写成了她这十一天一直昏迷在床上）。
     // 空白在旁人眼里是什么样（出去了没回来、一直睡着没醒）顺着最后那一幕，不预设是出走。
-    if (opening && !reasoned) lines.push(`（这一轮由你先开口：写${name}此刻在干什么、在想什么，和${userName}重新露面那一刻的第一反应——这段空白在身边的人眼里是什么样，顺着最后那一幕来；这些天${userName}到底怎么了、为什么，留给${userName}接着说，别替${userName}写。）`);
+    if (opening && !reasoned) lines.push(`（这一轮由${name}先开口，从上一幕和眼下的处境接续；这段空白的原因留给${userName}交代。）`);
     // 由他先开口时这几天找过来的不在这一轮给（实测开场就挨个念一遍），从他下一次开口起由余波递上（phoneCarry）。
     const delivered = attempts.filter(a => String(a.how ?? '').trim());
     if (first && delivered.length && !opening) {

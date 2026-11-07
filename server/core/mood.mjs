@@ -63,7 +63,7 @@ export function carryParts(prior, { name, userName = '对方', now = Infinity, c
         ...near.map(t => `· ${t}`)] : [];
     const tail = [];
     for (const [about, { since, items }] of later) {
-        tail.push(`${name}心里还挂着${about}${since > 0 ? `（${tag ? tag(today - since, today) : dayWord(since, timeScale)}的事）` : ''}：平时压在底下、不挂在嘴上，碰到了才冒出来；冒出来什么样、冒多少，照${personWord(name)}这个人：`, ...items.map(t => `· ${t}`));
+        tail.push(`${name}心里还挂着${about}${since > 0 ? `（${tag ? tag(today - since, today) : dayWord(since, timeScale)}的事）` : ''}（影响仍在，眼下的分量照新的经历）：`, ...items.map(t => `· ${t}`));
     }
     return { near: head, later: tail };
 }
@@ -81,7 +81,7 @@ export function lingerLines(records, { name, userName = null, dayOf, today, last
         && r.pos < lastPos - RECENT_WINDOW && today - dayOf(r.pos) <= lingerFor(r.duration, timeScale))
         .sort((a, b) => b.pos - a.pos).slice(0, MAX_LINGER).sort((a, b) => a.pos - b.pos);
     if (!picked.length) return [];
-    return [`${name}这几天心里、身上还没过去的（平时压在底下，碰到了才冒出来）：`, ...picked.map(r => `· ${when(today - dayOf(r.pos))}：${r.text}`)];
+    return [`${name}这几天心里、身上还没过去的（来自已发生的事）：`, ...picked.map(r => `· ${when(today - dayOf(r.pos))}：${r.text}`)];
 }
 
 // 余波（方案"场记的分量与连续性"D 层）：记账记下的他心里留下的那股劲（型"余波"，只记给他自己；relation.weight 多重 1～3，relation.until 等到什么才过去）。
@@ -101,7 +101,7 @@ export function afterLines(records, { name, dayOf = () => 0, today = 0, lastPos 
     const picked = rows.sort((a, b) => b.w - a.w || b.r.pos - a.r.pos).slice(0, AFTER_MAX).sort((a, b) => a.r.pos - b.r.pos);
     const when = x => (tag ? tag(x.day, today) : dayWord(today - x.day, timeScale) || ts.this + '早些时候');
     const until = x => (x.r.relation?.until ? `——等到${x.r.relation.until}才过去` : '');
-    return [`${name}心里还没过去的（就这个分量带着，没有新的事不往上加；平时压在底下、不用每句都提，碰到了才冒出来；等到写着的那件事就过去了）：`,
+    return [`${name}心里还没过去的（就这个分量带着，没有新的事不往上加；等到写着的那件事就过去了）：`,
         ...picked.map(x => `· ${when(x)}：${x.r.text}${until(x)}`)];
 }
 

@@ -27,16 +27,14 @@ function tail(text) {
     return last.length > 40 ? `……${last.slice(-40)}` : last;
 }
 
-// 用户这阵只回一两个字，不只是"没有新话头"（用户 9/29）：可能是心满意足、累了、懒得说，也可能是在敷衍、在躲、在赌气、在冷战。
-// 他在场就不能当没看见——让他照前面发生的事读这个变化，按他的性子接（担心地追问、试探，冒火、解释、无奈、嬉皮笑脸地哄、真哄，或者也闷着：赌气也是反应）；
-// 是哪一种不替他定。程序只点出"连着几句都这样""刚才还有来有往"。上一段演过的别再演一遍（B 段实测会整段重演）。
+// 用户这阵只回一两个字：程序点出连续短回复和刚才是否有来有往，提醒从上次停点接续；怎样回应由角色与当下情境决定。
 // 这一条的范围（用户 10/2，横向生长）：模型闲下来就推剧情——起身、出门、换地方。给它一个能照做的边界，比"不用急"管用：
 // 只写眼前这几分钟，停在对方能接的地方；对方没动，场面不挪、时间不跳。肯定句，不写"别急"。
 export function scopeLine({ userName = '对方' } = {}) {
-    return `（这一条只写眼前这几分钟，写到别人能接话的地方就停。${userName}没起身、没说走，就别替${userName}起身、换地方、跳时间；你自己想换地方、想往后走，可以开口提，跟不跟由${userName}。横着把这一刻过完也是戏：聊、问、收拾、手上的事。）`;
+    return `（这一条只写眼前这几分钟，写到别人能接话的地方就停。${userName}没起身、没说走，就别替${userName}起身、换地方、跳时间；你自己想换地方、想往后走，可以开口提，跟不跟由${userName}。）`;
 }
 
-export function onwardLine({ messages, speaker, name, userName = '对方', soft = true }) {
+export function onwardLine({ messages, speaker, name, userName = '对方' }) {
     const last = messages.at(-1);
     if (!last?.is_user || !acknowledgement(last.text)) return null;
     const mine = [...messages].reverse().find(m => !m.is_user && m.speaker === speaker);
@@ -49,7 +47,7 @@ export function onwardLine({ messages, speaker, name, userName = '对方', soft 
     for (let i = users.length - 1; i >= 0 && acknowledgement(users[i].text); i--) streak++;
     const changed = users.slice(0, users.length - streak).slice(-2).some(m => plain(m.text).length > 20);
     const end = tail(mine.text);
-    return `（${userName}${streak >= 2 ? '这阵连着几句都只回一两个字' : '这句只回了一两个字'}${changed ? '，刚才还有来有往' : ''}。${name}在场，会注意到：可能是心满意足、累了、懒得说，也可能是在敷衍、在躲、在赌气——前面发生过什么，${personWord(name)}心里多半有数。照${personWord(name)}读到的和${personWord(name)}的性子接：${soft ? '担心地追问、试探一句（是不是累了、不舒服、不高兴）、冒火、解释两句、无奈、嬉皮笑脸地哄、真哄，或者也闷着不理（赌气也是一种反应）' : '问一句、刺一句、冒火、无奈、自顾自干手上的事，或者也闷着不理（赌气也是一种反应），不用哄'}，别当没看见。上一段演过的不用再演一遍${end ? `，从停下的地方（"${end}"）接` : ''}。）`;
+    return `（${userName}${streak >= 2 ? '这阵连着几句都只回一两个字' : '这句只回了一两个字'}${changed ? '，刚才还有来有往' : ''}。上一段演过的不用再演一遍${end ? `，从停下的地方（"${end}"）接` : ''}；这一句怎样回应，照${name}的性格和眼前的情境。）`;
 }
 
 // 他上一段问了谁话（带问号的那句里点了名），那人不在场、接不了话。names＝名册里的名字；present＝在场、能开口的。
@@ -61,7 +59,7 @@ export function absentAskLine({ messages, speaker, name, names = [], present = [
     const who = names.filter(n => n && base(n) !== base(name) && !here.has(base(n)) && asked.some(s => s.includes(base(n))));
     if (!who.length) return null;
     const w = who.map(base).filter((x, i, a) => a.indexOf(x) === i).join('、');
-    return `（${name}上一段问了${w}话，可${w}不在这儿、开不了口，等不来回答：想知道的自己去看、去查，或者先搁下，别一轮轮追着问。）`;
+    return `（${name}上一段问了${w}话，可${w}不在这儿，本轮没有${w}的回答；接续时不用重复上一段的追问。）`;
 }
 
 const base = n => String(n ?? '').replace(/[（(][^）)]*[）)]\s*$/, '').trim();
@@ -89,7 +87,7 @@ export function takenLine({ messages, speaker, name, userName = '对方', remote
     const parts = [];
     if (other) {
         const said = other.speaker === 'narrator' ? `聊天里最新的一条是旁白写的场面（开头：「${head(other)}」）：里面的人说的、做的` : `聊天里最新的一条是${base(other.name) || '别人'}的（开头：「${head(other)}」）：${personWord(base(other.name) || '别人')}说的、做的`;
-        parts.push(`${said}，${name}都看见听见了，是眼前最近的事。可以接这一条——冲${personWord(other.speaker === 'narrator' ? '里面的人' : base(other.name) || '别人')}去、答${personWord(other.speaker === 'narrator' ? '里面的人' : base(other.name) || '别人')}、顶${personWord(other.speaker === 'narrator' ? '里面的人' : base(other.name) || '别人')}、顺着${personWord(other.speaker === 'narrator' ? '里面的人' : base(other.name) || '别人')}往下说——也可以接${name}更在意的别的；不用每条都冲着${userName}说`);
+        parts.push(`${said}，${name}都看见听见了，是眼前最近的事。接哪一处由${name}，不用每条都冲着${userName}说`);
     }
     if (before.length) parts.push(`${userName}刚才那句，${before.map(m => `${base(m.name) || '别人'}${other === m ? '' : `（开头：「${head(m)}」）`}`).join('、')}已经接过了：别再接同一处、别复述${userName}的话`);
     return `（${parts.join('。')}。）`;
@@ -269,12 +267,7 @@ export function varyLine({ name, ways = [], mold = null, userName = '对方', ec
         shape && `${ways?.length ? '最近两条的样子也是一个模子' : `${name}最近两条是一个模子`}：${shape}`,
         echo && (ways?.length || shape ? echo : `${name}${echo}`),
     ].filter(Boolean);
-    const ask = [
-        ways?.length || shape ? `这一条挑前几条没用过的${ways?.length ? (shape ? '开口、收尾、比喻、动作，长短和分段也换一换' : '开口、收尾、比喻和动作来写') : '长短、分段、开头和收尾'}` : '',
-        ways?.length ? `这些意思${personWord(name)}已经说过好几回，${userName}听见了，这一条接眼前新的事` : '',
-        echo ? `抓${personWord(name)}最在意的那一点直接说，不用先复述，也不用一条条都回` : '',
-    ].filter(Boolean);
-    return `（${parts.join('；')}。${ask.join('；')}。）`;
+    return `（${parts.join('；')}。这一条接眼前的新内容，不必复现上一条的说法和结构。）`;
 }
 
 // 同一件过渡琐事／同一段交代一再重复（T078）：看该说话人最近 CHORE_WINDOW 条非玩家回复的台词段，

@@ -33,10 +33,8 @@ export function heldLine(x) {
     const to = str(x.对谁) ? `（对${str(x.对谁)}）` : '';
     const why = str(x.为什么);
     const parts = [`眼下倾向${x.处置}${why ? `，因为${why}` : ''}`];
-    if (str(x.不说时外显)) parts.push(`没说的时候可能会：${str(x.不说时外显)}`);
-    const when = str(x.开口条件), where = str(x.说的场合);
+    const when = str(x.开口条件);
     if (when) parts.push(`在等的机会：${when}`);
-    if (where) parts.push(`想找的场合：${where}`);
     const secret = secretKeepNote(x);
     return `· ${str(x.事)}${to}——${parts.join('；')}${secret ? `；${secret}` : ''}`;
 }

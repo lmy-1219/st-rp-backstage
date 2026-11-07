@@ -190,10 +190,10 @@ export function openingLines(data, { knower, same = (a, b) => a === b, today = 0
     const where = firstDay ? rows.filter(x => x.类 === '在哪' && !gone(x.谁)) : [];
     if (where.length) out.push(`开场时各人在哪、在干什么（${knower}知道的；之后聊天里写了别的，以聊天为准）：`, ...where.map(x => `· ${x.谁}：${x.是}`));
     const mood = rows.filter(x => x.类 === '心事');
-    if (scene && mood.length) out.push('开场时心里带着的（这场戏里接着带着：怎么露、露多少照这个人，别一下演完，也别突然没了）：', ...mood.map(x => `· ${x.谁}：${x.是}${same(x.谁, knower) ? '' : `（${knower}知道）`}`));
+    if (scene && mood.length) out.push('开场时心里带着的（这一刻的起点，之后照实际经历变化）：', ...mood.map(x => `· ${x.谁}：${x.是}${same(x.谁, knower) ? '' : `（${knower}知道）`}`));
     else if (!scene && today - startDay <= MOOD_DAYS) {
         const own = mood.filter(x => same(x.谁, knower));
-        if (own.length) out.push(`${knower}心里还挂着开场时的事（平时压在底下、不挂在嘴上，碰到了才冒出来）：`, ...own.map(x => `· ${x.是}`));
+        if (own.length) out.push(`${knower}心里还挂着开场时的事：`, ...own.map(x => `· ${x.是}`));
     }
     return out;
 }

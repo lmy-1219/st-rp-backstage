@@ -328,7 +328,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             chatKey: str(b.chatKey, 'chatKey'), speaker: str(b.speaker, 'speaker'),
             speakerName: str(b.speakerName, 'speakerName', { optional: true }), anchor: str(b.anchor, 'anchor', { max: 64 }),
             recent: strings(b.recent, 5, 4000), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', present: strings(b.present, 30, 200),
-            room: roomOf(b.room), soft: b.soft === false ? false : undefined,   // 预设里"收着点"那条关着（用户 10/14：新模型用）
+            room: roomOf(b.room), soft: b.soft === false ? false : undefined,   // 严格 false 才关；无标记时兼容开
             }, records, { assembler, keyMaker, ...withPack(b.chatKey) });
             const options = promptOptionsFor(store, b.chatKey);
             const patch = tasteFor({ ...options, kind: b.speaker === 'narrator' ? 'camera' : 'act', model: typeof b.frontModel === 'string' ? b.frontModel.slice(0, 200) : null });
@@ -506,7 +506,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/slot-preview': async b => {
             const { text: whole, mode, parts = null } = await composeSlot(store, records, {
                 chatKey: str(b.chatKey, 'chatKey'), speaker: str(b.speaker, 'speaker'), speakerName: str(b.speakerName, 'speakerName', { optional: true }),
-                recent: strings(b.recent, 5, 4000), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', present: strings(b.present, 30, 200),
+                recent: strings(b.recent, 5, 4000), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', present: strings(b.present, 30, 200), soft: b.soft === false ? false : undefined,
             }, { ...(b.assemble === true ? { assembler, keyMaker } : {}), economy: withPack(b.chatKey).economy, contacts: { ...settings().contacts, record: false }, absence: { ...settings().absence, record: false }, world: { ...withPack(b.chatKey).world, record: false }, planner: { ...(settings().planner ?? {}), record: false }, mood: settings().mood, vectors: settings().vectors,
                 slot: settings().slot, pace: settings().pace, factions: withPack(b.chatKey).factions, situation: settings().situation ? { ...settings().situation, record: false } : null });
             // 分块放时，预览里标出每一块放在提示词的哪儿

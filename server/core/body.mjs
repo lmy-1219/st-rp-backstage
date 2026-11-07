@@ -216,15 +216,12 @@ export function cutLine(line, hers) {
 }
 
 // 那一句（放在那几块之后，一格只加一次）
-// soft：预设里开着"收着点"（老模型——一关心就下指令、拿她的样子开涮，要写明平辈、商量的口气）；关着（新模型本来就偏软，
-// 再写"心疼、陪着、问她要什么"只会更围着她转）就只说照她写的来、照常相处（用户 10/14："用老模型就开，用新模型就关"）
+// soft：开时提醒身体决定权与防伤病贬低；关时只按本人状态照常相处；无标记时兼容开。
 export function bodyNote(gate, userName, { soft = true, setup = null } = {}) {
     if (!userName || !gate) return null;
     if (gate.mode === 'open' && !soft) return `（${userName}的身子照${playerWord({ setup, name: userName })}自己最近写的来：「${gate.said}」。照常相处，不用围着它转。）`;
-    // 用户 10/13："每个人对user的伤病都是一副带着命令的语气，照顾和关心不是下指令让对方服从吧"——前台把"护着""陪着"写成了
-    // "滚回屋扎针""我就在门口坐半小时，没动静就踹门"。写明是平辈同伴：她的身子她自己拿主意；关心落在问、递、陪、挡事上，用商量的口气
-    if (gate.mode === 'open') return `（${userName}的身子照${playerWord({ setup, name: userName })}自己最近写的来：「${gate.said}」。${playerWord({ setup, name: userName })}是和你平起平坐的同伴，自己的身子自己拿主意。心疼、自责都行，嘴上一句就够；关心落在手上：问${playerWord({ setup, name: userName })}要什么、把东西递过去、陪着、替${playerWord({ setup, name: userName })}把外头的事挡掉。跟${playerWord({ setup, name: userName })}说这些用商量、提议的口气（"要不要……""我去……"），不对${playerWord({ setup, name: userName })}下指令、不给${playerWord({ setup, name: userName })}定时限、不替${playerWord({ setup, name: userName })}安排怎么养；别数落${playerWord({ setup, name: userName })}、别拿${playerWord({ setup, name: userName })}的样子开涮、别说${playerWord({ setup, name: userName })}弱。）`;
-    if (gate.mode === 'healed') return `（${userName}自己说已经好了，就按好了写，别再追问、别再叮嘱。）`;
+    if (gate.mode === 'open') return `（${userName}的身子照${playerWord({ setup, name: userName })}自己最近写的来：「${gate.said}」。身体上的决定由${userName}自己作；关心不等于要求服从，也不以伤病贬低${userName}。具体怎么相处照角色卡和眼前的关系。）`;
+    if (gate.mode === 'healed') return `（${userName}自己说已经好了，身体状态按这次更新。）`;
     return null;
 }
 

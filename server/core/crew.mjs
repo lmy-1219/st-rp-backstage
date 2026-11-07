@@ -1,10 +1,9 @@
 import { personWord } from './pronoun.mjs';
 // 主角团的打算（用户 10/12，N-363／N-365；方案 收尾与聚焦 第四节、方案 主角团规划 第二节 4）：
 // 用户："角色是活的，有问题自己找办法；规划里那些事没有角色行为，角色没有自己想干的事、没有驱动，和没后台的时候一样。"
-// 规划交回的"主角团这一段"（plans.node 的 主角团：谁、想干、下一步、拉她、为她、团里）递到本人身上：
+// 规划交回的"主角团这一段"（plans.node 的 主角团：谁、想干、下一步、拉她、团里）递到本人身上：
 //   · 轮到主角团里的人开口，他那一格带一句他这阵子自己的打算（他自己的事：场面闲了会去办、会提起，不用每轮都提）；
-//   · 她眼下有难处（body.herTrouble），再带"会为她做什么——去做，别光说"（关心不是当爹、不是保姆）；
-//   · 团里两人这一段之间会出的事（争吵、玩闹、较劲……），对方此刻在场才给；
+//   · 团里两人这一段之间的关系材料，对方此刻在场才给；
 //   · 他不在场时，换时段的那次结算按他的打算往前推一步（main.settleOnce），每人每格时间至多一次，落成他自己的一条记录，下次露面那一格里带着。
 // 都是程序拼的，不调模型；不写题材（D-37）。
 // 他心里的打算（用户 10/12，N-368；方案 角色有心思 第四节 3、4）：规划给主角团每人（和至多两个要紧的人）写了"心思"——想要、出发点、打算、瞒着、到哪为止，
@@ -58,7 +57,7 @@ export function mindLine(mind, { keep = () => true } = {}) {
     const want = tidy(mind.想要).replace(/^想要?/, ''), why = tidy(mind.出发点).replace(/^因为/, '');
     const body = [want && `想${want}`, why && `因为${why}`].filter(Boolean).join('，');
     if (!body) return null;
-    const line = warmWords(`你心里的打算（你自己的事，别说破）：${body}`);
+    const line = warmWords(`你这阵子的愿望和缘由：${body}`);
     return keep(line) ? line : null;
 }
 
@@ -74,23 +73,22 @@ export function pushedText(visible = [], { name, same = (a, b) => a === b, since
     return r ? String(r.text) : null;
 }
 
-// 他那一格里的那一块。name：开口的人；userName：玩家；entry：他那一份；present：眼下在场的人；trouble：她眼下有难处；
-// keep(一截)：说她伤病的那一截拿掉（body 的守门，bodyGuard.lines）——"为她"那一句只在她有难处时给，不过守门；pushed：上面那条记录的正文。
-// 返回 own（他自己的打算、她有难时、镜头外办到哪）和 team（团里两人之间的，对方在场才给）
-export function crewLines({ name, userName = null, entry = null, present = [], trouble = false, same = (a, b) => a === b, keep = () => true, pushed = null } = {}) {
+// 他那一格里的那一块。name：开口的人；userName：玩家；entry：他那一份；present：眼下在场的人；
+// keep(一截)：说她伤病的那一截拿掉（body 的守门，bodyGuard.lines）；pushed：上面那条记录的正文。
+// 返回 own（他自己的目标、镜头外办到哪）和 team（团里两人之间的，对方在场才给）
+export function crewLines({ name, userName = null, entry = null, present = [], same = (a, b) => a === b, keep = () => true, pushed = null } = {}) {
     if (!name || !entry || (userName && same(name, userName))) return { own: [], team: [] };
-    const her = userName ?? '玩家的角色';
     // 只给"想办成"（T073）：接下来想做（下一步）、想拉她一起（拉她）是具体步骤，前台拿到就一轮说完；镜头外推一步照旧读下一步，办过了的由 pushed 那句带到前台
     const segs = [['想办成', tidy(entry.想干)]].filter(([, v]) => v).map(([k, v]) => `${k}——${v}`).filter(s => keep(s));
     const own = [];
-    if (segs.length) own.push(`${name}这阵子自己想办成的事（${personWord(name)}自己的事：心里惦记着，场面合适了自然会去办、会提起，不用每轮都提）：${segs.join('；')}`);
+    if (segs.length) own.push(`${name}这阵子自己想办成的事（不用每轮都提）：${segs.join('；')}`);
     // 心思跟在"这阵子自己想办成的事"后面（数据约定第 2、3 条）
     const mind = mindLine(entry.心思, { keep });
     if (mind) own.push(mind);
     if (pushed) own.push(`（${String(pushed).replace(/[。．.]+$/, '')}——这是${personWord(name)}自己办的事，见了面提不提、说几分由${personWord(name)}）`);
     const team = (Array.isArray(entry.团里) ? entry.团里 : [])
         .filter(x => x && tidy(x.跟谁) && tidy(x.什么) && !same(tidy(x.跟谁), name) && present.some(p => p && same(p, tidy(x.跟谁))))
-        .map(x => `这一段你和${tidy(x.跟谁)}之间：${tidy(x.什么)}（遇上了自然带出来，别硬凑）`).filter(l => keep(l));
+        .map(x => `这一段你和${tidy(x.跟谁)}的关系材料：${tidy(x.什么)}（眼下走到哪，以正文为准）`).filter(l => keep(l));
     // 规划写的打算、团里的事也是递给前台的私下话：同样过一道换词（库里的原文不动）
     return { own: own.map(warmWords), team: team.map(warmWords) };
 }
