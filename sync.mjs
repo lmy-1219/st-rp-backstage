@@ -88,27 +88,45 @@ export function fingerprintMessage(message, speaker) {
 }
 
 // 当前聊天 → 序列（每条的指纹）＋ 按指纹找正文的表。
-export function buildSequence(chat, fallbackAvatar = null) {
+export function buildSequence(chat, fallbackAvatar = null, generating = null) {
     const seq = [];
     const bodies = new Map();
+    let pending = false;
     // 末尾正在生成的那条（酒馆先放一条空的再往里写）不同步：它的指纹是"这个人的空消息"，人人一样，
     // 同步过去会被当成改稿，把好几条不相干的消息串成一条链（试玩 10/7：昨天的"此刻的样子"跑到了今天这条上）
     let end = chat.length;
-    while (end > 0 && !chat[end - 1]?.is_user && !String(chat[end - 1]?.mes ?? '').trim()) end--;
+    while (end > 0 && !chat[end - 1]?.is_user && !String(chat[end - 1]?.mes ?? '').trim()) {
+        const m = chat[end - 1];
+        if (Array.isArray(m.swipes) && m.swipes.some(s => typeof s === 'string' && s.trim())) { pending = true; break; }
+        end--;
+    }
     for (const message of chat.slice(0, end)) {
         const speaker = speakerOf(message, fallbackAvatar);
         const f = fingerprintMessage(message, speaker);
+        let w = Number.isInteger(message.swipe_id) ? message.swipe_id : 0;
+        let swipes;
+        if (Array.isArray(message.swipes)) {
+            swipes = Array.from({ length: message.swipes.length }, (_, i) =>
+                typeof message.swipes[i] === 'string' && message.swipes[i].trim()
+                    ? fingerprint(!!message.is_user, speaker, message.swipes[i]) : null);
+            if (swipes[w] !== f) {
+                const matches = swipes.flatMap((fp, i) => fp === f ? [i] : []);
+                if (w >= swipes.length && matches.length === 1 && !generating) w = matches[0];
+                else pending = true;
+            }
+        }
+        if (generating?.message === message || (generating?.active && message === chat[end - 1] && !message.is_user)) pending = true;
         const k = message.extra?.rp_day;   // 用户点的剧情日期：day＝从这条起算新的一天｜same＝这里没有跨天｜d:N＝这条是第 N 天
         const b = message.extra?.rp_board;
         // w：正在用的是第几版左滑（后台据此分清"改了这一条"和"左滑换了一版"，N-271）
-        seq.push({ f, h: !!message.is_system, d: message.send_date == null ? null : String(message.send_date), w: Number.isInteger(message.swipe_id) ? message.swipe_id : 0, ...(validDayMark(k) ? { k } : {}), ...(b && typeof b === 'object' ? { b: JSON.stringify(b).slice(0, 4000) } : {}) });
+        seq.push({ f, h: !!message.is_system, d: message.send_date == null ? null : String(message.send_date), w, ...(swipes ? { swipes } : {}), ...(validDayMark(k) ? { k } : {}), ...(b && typeof b === 'object' ? { b: JSON.stringify(b).slice(0, 4000) } : {}) });
         // l：生成这条时酒馆真触发的世界书（扩展记在 extra.rp_lore 上）
         const l = Array.isArray(message.extra?.rp_lore) ? message.extra.rp_lore.filter(k => typeof k === 'string') : [];
         // v：谁看得见（extra.rp_vis，发消息、打电话来的那条；visibility.mjs）
         const v = message.extra?.rp_vis && typeof message.extra.rp_vis === 'object' ? message.extra.rp_vis : null;
         if (!bodies.has(f)) bodies.set(f, { f, u: !!message.is_user, s: speaker, n: message.name ?? null, t: String(message.mes ?? ''), ...(l.length ? { l } : {}), ...(v ? { v } : {}) });
     }
-    return { seq, bodies };
+    return { seq, bodies, pending };
 }
 
 // 按大致字节数分批上传，避免单次请求太大。

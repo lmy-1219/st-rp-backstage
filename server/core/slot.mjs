@@ -3414,19 +3414,22 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
         const dependent = menu.filter(m => m.after_title);
         const proof = dependent.length ? { visible: records?.visible?.(chatKey) ?? [], messages: store.currentMessages(chatKey) } : null;
         const causalVersion = dependent.length ? ':after:' + createHash('sha1').update(dependent.map(m => `${m.id}:${afterBlocked(m, menu, x => x.status, proof) ? 0 : 1}`).join('|')).digest('hex').slice(0, 16) : '';
-        return intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion + causalVersion;
+        const repair = Number((store.getRawMeta ?? store.getMeta)?.(`swipe_repair_rev:${chatKey}`)) || 0;
+        return intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion + causalVersion + (repair ? `:swipe:${repair}` : '');
     };
     const version = versionNow();
     const pinned = store.getSlot({ chatKey, speaker, anchor, ver: version });
     if (pinned !== null) {
         const parts = store.getSlotParts?.({ chatKey, speaker, anchor }) ?? null;
         const again = chat.test_slot ? { text: pinned, parts } : refreshPinned(store, records, { chatKey, speaker, speakerName, present, anchor }, pinned, parts, { fresh, pace });
-        return { ...shape(again.text, again.parts), pinned: true };
+        if (versionNow() === version) return { ...shape(again.text, again.parts), pinned: true };
+        return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
     }
     const key = `${chatKey}\u0001${speaker}\u0001${anchor}\u0001${version}`;
     if (!inflight.has(key)) {
         inflight.set(key, composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift })
             .then(result => {
+                if (versionNow() !== version) return result;
                 if (result.final) store.putSlot({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.parts ?? null, ver: version });
                 // 没钉住的（组装超时先给了纯程序那一格）也记下给了什么，标成 given：不当钉住的用（getSlot 认版本），
                 // 回头查得到、去复读核对时拿得到"想起的"那块（质量窗 10/5：从 10/4 早上起常常没钉住，后台查不到那几轮给了什么）

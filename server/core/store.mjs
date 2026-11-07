@@ -173,6 +173,13 @@ create index if not exists episodes_story on episodes(story_id, from_pos);
 export function fingerprint(isUser, speaker, text) {
     return createHash('sha256').update(`${isUser ? 1 : 0}\u0001${speaker}\u0001${text}`).digest('hex').slice(0, 32);
 }
+const isFp = fp => typeof fp === 'string' && /^[0-9a-f]{32}$/.test(fp);
+export function validSwipeEvidence(x) {
+    return !Object.hasOwn(x, 'swipes') || (Array.isArray(x.swipes) && x.swipes.length > 0 && x.swipes.length <= 10000
+        && Number.isInteger(x.w) && x.w >= 0 && x.w < x.swipes.length
+        && Array.from({ length: x.swipes.length }, (_, i) => Object.hasOwn(x.swipes, i) && (x.swipes[i] === null || isFp(x.swipes[i]))).every(Boolean)
+        && x.swipes[x.w] === x.f);
+}
 
 // 异常元数据兜底：正常改稿靠已访问集合防环；256 只防损坏的超长链拖住读取。
 export function* freshChain(fp, previous) {
@@ -276,6 +283,7 @@ export function openStore(file) {
     try { db.exec('alter table messages add column lore text'); } catch {}
     try { db.exec('alter table messages add column vis text'); } catch {}   // 谁看得见（extra.rp_vis：{ from, way, to? }，发消息、打电话来的那条只有本人、玩家、旁白看得见；visibility.mjs）   // 生成这条时酒馆真触发的世界书条目（"书|uid" 的 JSON 数组；质量窗 10/2：记账时这几条给全文）   // 递给了谁（N-277：口袋里别人牵头的事递出去就先锁给他）
     try { db.exec('alter table chat_seq add column sw integer'); } catch {}   // 正在用的是第几版左滑（分清改稿和左滑，N-271）   // 钉住那一格时的代码指纹（slot.SLOT_CODE）   // 跟着哪件约定（N-268：规划者写的；到了那天和它一起给，不让路）   // 节点规划：局面、目标、算成、落空、跨度、各条线、往后（JSON）
+    try { db.exec('alter table chat_seq add column swipes text'); } catch {}
     try { db.exec('alter table chat_seq add column board_mark text'); } catch {}
     // 清掉挂在空消息上的改稿链（试玩 10/7）：生成时的空占位被当成改稿，空消息的指纹人人一样，把不相干的几条串到了一起——
     // 昨天的"此刻的样子"、旧账的接续跟着链跑到了今天的消息上。以后同步不再挂（sync 里滤掉），这里把已经挂上的拆掉；没有就不动
@@ -409,10 +417,11 @@ export function openStore(file) {
     // 浏览器报来当前序列（每条的指纹）。缺正文 ⇒ 列出来让它补传；齐了 ⇒ 整体替换该窗口的序列。
     function sync({ chatKey, seq, members = null, anchors = null, force = false }) {
         const chat = requireChat(chatKey);
+        if (!Array.isArray(seq) || seq.some(x => !x || !isFp(x.f) || !validSwipeEvidence(x))) throw Object.assign(new Error('seq entry invalid'), { status: 400 });
         const known = q('select 1 from messages where story_id = ? and fp = ?');
         const need = [...new Set(seq.map(x => x.f))].filter(fp => !known.get(chat.story_id, fp));
         if (need.length) return { committed: false, need };
-        const oldRows = q('select fp, sw, sent_at from chat_seq where chat_key = ? order by pos').all(chatKey);
+        const oldRows = q('select fp, sw, swipes, sent_at from chat_seq where chat_key = ? order by pos').all(chatKey).map(r => ({ ...r, swipes: r.swipes ? JSON.parse(r.swipes) : null }));
         const oldFps = oldRows.map(r => r.fp);
         const newFps = seq.map(x => x.f);
         if (!force && looksCollapsed(oldFps.length, newFps.length)) {
@@ -423,11 +432,23 @@ export function openStore(file) {
         // 改前或改后是空消息的不算改稿：空消息的指纹人人一样（生成时的空占位），挂上链就把不相干的几条串成一条（试玩 10/7）
         const textOf = q('select text from messages where story_id = ? and fp = ?');
         const blank = fp => !String(textOf.get(chat.story_id, fp)?.text ?? '').trim();
-        const edits = inPlaceEdits(oldRows, seq).filter(e => !blank(e.fp) && !blank(e.old));
+        const coexists = (table, a, b) => Array.isArray(table) && table.includes(a) && table.includes(b);
+        const swipeAt = k => {
+            const o = oldRows[k], x = seq[k];
+            return !!o && !!x && o.fp !== x.f && (coexists(o.swipes, o.fp, x.f) || coexists(x.swipes, o.fp, x.f)
+                || (o.sw != null && Number.isInteger(x.w) && o.sw !== x.w));
+        };
+        const edits = inPlaceEdits(oldRows, seq, swipeAt).filter(e => !blank(e.fp) && !blank(e.old));
         return tx(() => {
+            const repaired = repairSwipes(chatKey, chat, oldRows, seq);
             q('delete from chat_seq where chat_key = ?').run(chatKey);
-            const insert = q('insert into chat_seq(chat_key, pos, fp, hidden, sent_at, mark, sw, board_mark) values (?, ?, ?, ?, ?, ?, ?, ?)');
-            seq.forEach((x, pos) => insert.run(chatKey, pos, x.f, x.h ? 1 : 0, x.d ?? null, validMark(x.k) ? x.k : null, Number.isInteger(x.w) ? x.w : null, typeof x.b === 'string' ? x.b : null));
+            const insert = q('insert into chat_seq(chat_key, pos, fp, hidden, sent_at, mark, sw, swipes, board_mark) values (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+            seq.forEach((x, pos) => {
+                const old = oldRows[pos], unchanged = old?.fp === x.f;
+                const sw = unchanged && !x.swipes && old?.sw != null ? old.sw : Number.isInteger(x.w) ? x.w : null;
+                const swipes = x.swipes ?? (unchanged ? old?.swipes : null);
+                insert.run(chatKey, pos, x.f, x.h ? 1 : 0, x.d ?? null, validMark(x.k) ? x.k : null, sw, swipes ? JSON.stringify(swipes) : null, typeof x.b === 'string' ? x.b : null);
+            });
             // 这个窗口有了动静（新消息、删了、改了、左滑换了）：记下来；上一次动静隔得久，记一段"没动静"（离开从这里算，10/3 用户）
             if (change.added || change.removed || edits.length) {
                 const before = new Set(oldFps);
@@ -444,7 +465,7 @@ export function openStore(file) {
             // 同一条消息换了字（去复读改写、就地改稿）：挂在旧指纹上的进场、离开、结算那几份跟着换成新指纹
             // （试玩 10/13：点了"他发来消息"，进场记在上一条的旧字上，去复读一改，场记就认不出这次进场，发消息的人被当成走进了屋）
             const renamed = [];
-            for (let k = 0; k < Math.min(oldRows.length, seq.length); k++) if (oldRows[k].fp !== seq[k].f && sameMessage(seq[k].f, oldRows[k].fp)) renamed.push([oldRows[k].fp, seq[k].f]);
+            for (let k = 0; k < Math.min(oldRows.length, seq.length); k++) if (!swipeAt(k) && oldRows[k].fp !== seq[k].f && sameMessage(seq[k].f, oldRows[k].fp)) renamed.push([oldRows[k].fp, seq[k].f]);
             if (renamed.length) {
                 const rows = q('select key, value from meta where key in (?, ?, ?) or key like ? or key like ?').all(`arrived:${chatKey}`, `arrivals:${chatKey}`, `away_plan:${chatKey}`, `settled_contact:${chatKey}:%`, `settled:${chatKey}:%`);
                 const relink = (value, source = false) => typeof value === 'string' ? source ? value : renamed.reduce((s, [a, b]) => s.split(a).join(b), value)
@@ -461,8 +482,8 @@ export function openStore(file) {
             // 记账、口袋递给谁那几步照旧不跟（那是照那版的字记的）；玩家自己那条换了一版也不跟（edits 测试）
             const tipAt = seq.length - 1;
             // 只认扩展报了左滑序号、而且序号换了的（没报序号的老页面，最后一条换了说不清是左滑还是删了重写，照旧不跟——expiry 测试）
-            if (tipAt >= 0 && oldRows.length === seq.length && oldRows[tipAt].fp !== seq[tipAt].f && Number.isInteger(seq[tipAt].w) && oldRows[tipAt].sw != null && oldRows[tipAt].sw !== seq[tipAt].w
-                && !edits.some(e => e.pos === tipAt) && !sameMessage(seq[tipAt].f, oldRows[tipAt].fp)
+            if (tipAt >= 0 && oldRows.length === seq.length && swipeAt(tipAt)
+                && !edits.some(e => e.pos === tipAt)
                 && oldRows.slice(0, tipAt).every((r, k) => r.fp === seq[k].f)) {
                 const userAt = fp => !!q('select is_user from messages where story_id = ? and fp = ?').get(chat.story_id, fp)?.is_user;
                 if (!userAt(oldRows[tipAt].fp) && !userAt(seq[tipAt].f)) {
@@ -482,7 +503,7 @@ export function openStore(file) {
             if (chat.parent_key && chat.branch_len == null && newFps.length) branchLen(chat, newFps);
             // 接入时自动开了记账的（extract_from＝-1）：第一次同步时，带着一大段旧聊天的只从接入以后记（旧的要不要补记，面板上给估价由用户点，D-100）。
             if (chat.extract_from === -1) q('update chats set extract_from = ? where key = ?').run(newFps.length > 3 ? newFps.length : 0, chatKey);
-            return { committed: true, need: [], total: newFps.length, ...change, ...(edits.length ? { edited: edits.map(e => e.pos) } : {}) };
+            return { committed: true, need: [], total: newFps.length, ...change, ...(edits.length ? { edited: edits.map(e => e.pos) } : {}), ...(repaired ? { repaired } : {}) };
         });
     }
 
@@ -490,7 +511,7 @@ export function openStore(file) {
     // 老扩展不带左滑序号：最后一条字变了多半是左滑换了一版，不算改稿。
     // 中间连着改了几条也算（质量窗 10/2：离线直接改聊天文件常一次改挨着的几条，以前只认孤零零的一条，挨着的都当删了重写）：
     // 连着变了的一段两头都没变、总条数不变、不超过 EDIT_RUN 条；挨着末尾的只认一条（末尾连着变多半是删回去重写了）。
-    function inPlaceEdits(oldRows, seq) {
+    function inPlaceEdits(oldRows, seq, swipeAt) {
         const n = Math.min(oldRows.length, seq.length), out = [];
         const kept = i => oldRows[i].fp === seq[i].f;
         for (let i = 0; i < n; i++) {
@@ -501,11 +522,119 @@ export function openStore(file) {
             if (ok) for (let k = i; k <= j; k++) {
                 const o = oldRows[k], x = seq[k];
                 const sameSwipe = o.sw != null && Number.isInteger(x.w) ? o.sw === x.w : k < n - 1;
-                if (sameSwipe && !sameMessage(x.f, o.fp)) out.push({ pos: k, fp: x.f, old: o.fp });
+                if (sameSwipe && !swipeAt(k) && !sameMessage(x.f, o.fp)) out.push({ pos: k, fp: x.f, old: o.fp });
             }
             i = j;
         }
         return out;
+    }
+
+    // 只拆同一张版本表中并存的兄弟边。先用旧序列接住原本可见的规划，再拆全局键。
+    function repairSwipes(chatKey, chat, oldRows, seq) {
+        const evidence = new Map();
+        for (let pos = 0; pos < Math.max(oldRows.length, seq.length); pos++)
+            for (const table of [oldRows[pos]?.swipes, seq[pos]?.swipes])
+                if (Array.isArray(table)) for (const fp of table) if (fp) {
+                    const parent = getMeta(`fresh_from:${fp}`);
+                    if (parent && parent !== fp && table.includes(parent)) {
+                        const prior = evidence.get(fp);
+                        evidence.set(fp, { parent, pos, ambiguous: prior?.ambiguous || (prior && prior.pos !== pos) });
+                    }
+                }
+        if (!evidence.size) return 0;
+        const edges = new Map();
+        const message = q('select story_id, is_user, speaker, text from messages where fp = ?');
+        const uses = q('select s.pos, c.story_id from chat_seq s join chats c on c.key = s.chat_key where s.fp = ?');
+        for (const [fp, edge] of evidence) {
+            const a = message.all(fp), b = message.all(edge.parent);
+            const positions = [...uses.all(fp), ...uses.all(edge.parent)];
+            const conflict = edge.ambiguous || a.length !== 1 || b.length !== 1 || a[0].story_id !== chat.story_id || b[0].story_id !== chat.story_id
+                || a[0].is_user !== b[0].is_user || a[0].speaker !== b[0].speaker || !a[0].text.trim() || !b[0].text.trim()
+                || positions.some(r => r.story_id !== chat.story_id || r.pos !== edge.pos);
+            if (conflict) {
+                const key = `swipe_conflict:${fp}`;
+                if (getMeta(key) !== edge.parent) { setMeta(key, edge.parent); log(chatKey, 'swipe_repair_conflict', { edge: [fp, edge.parent], reason: 'shared_identity_or_position' }); }
+            } else edges.set(fp, edge.parent);
+        }
+        if (!edges.size) return 0;
+        const previous = fp => getMeta(`fresh_from:${fp}`);
+        const accepted = new Map(), planMoves = new Map(), logMoves = new Map(), affected = new Set();
+        const chats = q('select * from chats where story_id = ?').all(chat.story_id);
+        const views = chats.map(c => ({ key: c.key, seq: q('select fp from chat_seq where chat_key = ? order by pos').all(c.key).map(r => r.fp) }));
+        const byKey = new Map(chats.map(c => [c.key, c]));
+        const byView = new Map(views.map(v => [v.key, v]));
+        const limits = new Map(views.map(v => {
+            const found = new Map(); let c = byKey.get(v.key), cut = Infinity;
+            while (c && !found.has(c.key)) {
+                found.set(c.key, cut);
+                if (!c.parent_key) break;
+                cut = Math.min(cut, branchLen(c));
+                c = byKey.get(c.parent_key);
+            }
+            return [v.key, found];
+        }));
+        const visible = (view, origin, pos, fp, next) => {
+            const cut = limits.get(view.key).get(origin);
+            return cut != null && (pos == null ? cut === Infinity
+                : (pos < 0 || freshAncestorIn(view.seq[pos], new Set([fp]), next)) && (cut === Infinity || pos < cut));
+        };
+        const plansRows = q("select p.* from plans p join chats c on c.key = p.chat_key where c.story_id = ? and p.status != 'withdrawn'").all(chat.story_id);
+        const logRows = q("select m.* from menu_log m join chats c on c.key = m.chat_key where c.story_id = ? and m.by_name = '规划'").all(chat.story_id);
+        for (const [fp, parent] of [...edges]) {
+            const before = x => accepted.has(x) ? null : previous(x);
+            const after = x => x === fp || accepted.has(x) ? null : previous(x);
+            const nextPlans = new Map(), nextLogs = new Map();
+            let conflict = false;
+            for (const p of plansRows) {
+                const anchor = planMoves.get(p.id) ?? p.anchor_fp, basis = basisOf(p);
+                const seen = (v, at, next) => visible(v, p.chat_key, p.anchor_pos, at, next)
+                    && (!basis || visible(v, p.chat_key, basis.pos, basis.fp, next));
+                const baseline = views.map(v => seen(v, anchor, before));
+                if (views.every((v, i) => baseline[i] === seen(v, anchor, after))) continue;
+                const target = byView.get(p.chat_key)?.seq[p.anchor_pos];
+                if (!target || !views.every((v, i) => baseline[i] === seen(v, target, after))) { conflict = true; break; }
+                nextPlans.set(p.id, target);
+            }
+            if (!conflict) for (const m of logRows) {
+                const anchor = logMoves.get(m.id) ?? m.fp;
+                const baseline = views.map(v => visible(v, m.chat_key, m.pos, anchor, before));
+                if (views.every((v, i) => baseline[i] === visible(v, m.chat_key, m.pos, anchor, after))) continue;
+                const target = byView.get(m.chat_key)?.seq[m.pos];
+                if (!target || !views.every((v, i) => baseline[i] === visible(v, m.chat_key, m.pos, target, after))) { conflict = true; break; }
+                nextLogs.set(m.id, target);
+            }
+            if (conflict) {
+                edges.delete(fp);
+                const key = `swipe_conflict:${fp}`;
+                if (getMeta(key) !== parent) { setMeta(key, parent); log(chatKey, 'swipe_repair_conflict', { edge: [fp, parent], reason: 'shared_plan_visibility' }); }
+                continue;
+            }
+            for (const v of views) if (v.seq.some(current => {
+                const old = [...freshChain(current, before)], newer = [...freshChain(current, after)];
+                return old.length !== newer.length || old.some((x, i) => x !== newer[i]);
+            })) affected.add(v.key);
+            accepted.set(fp, parent);
+            for (const [id, target] of nextPlans) planMoves.set(id, target);
+            for (const [id, target] of nextLogs) logMoves.set(id, target);
+        }
+        if (!accepted.size) return 0;
+        edges.clear();
+        for (const [fp, parent] of accepted) edges.set(fp, parent);
+        let plans = 0, logs = 0;
+        for (const [id, target] of planMoves) plans += q('update plans set anchor_fp = ? where id = ?').run(target, id).changes;
+        for (const [id, target] of logMoves) logs += q('update menu_log set fp = ? where id = ?').run(target, id).changes;
+        const deleted = q('delete from meta where key = ? and value = ?');
+        let repaired = 0;
+        for (const [fp, parent] of edges) repaired += deleted.run(`fresh_from:${fp}`, parent).changes;
+        if (repaired) {
+            for (const key of affected) {
+                setMeta(`swipe_repair_rev:${key}`, String((Number(getRawMeta(`swipe_repair_rev:${key}`)) || 0) + 1));
+                q('delete from carries where chat_key = ?').run(key);
+                q('update slots set carry = null where chat_key = ?').run(key);
+            }
+            log(chatKey, 'swipe_repaired', { edges: [...edges].map(([fp, parent]) => [fp, parent]), repaired, plans, logs, windows: affected.size });
+        }
+        return repaired;
     }
 
     // 窗口当前可见的消息（按位置）。后续的抽取、选料都从这里取。

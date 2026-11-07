@@ -1688,6 +1688,18 @@ function scheduleSync(delay = 1500) {
     state.timer = setTimeout(() => syncNow(), delay);
 }
 
+function activeGeneration() {
+    if (globalThis.document?.body?.dataset?.generating !== 'true' && !ctx().is_group_generating) { state.generation = null; return null; }
+    const g = state.generation;
+    return g?.epoch === state.epoch && g.chatKey === state.chatKey ? g : { active: true };
+}
+if (globalThis.MutationObserver && globalThis.document?.body) new globalThis.MutationObserver(() => {
+    if (globalThis.document.body.dataset.generating !== 'true' && !ctx().is_group_generating && (state.generation?.epoch === state.epoch || state.pendingSyncEpoch === state.epoch)) {
+        state.generation = null;
+        scheduleSync(0);
+    }
+}).observe(globalThis.document.body, { attributes: true, attributeFilter: ['data-generating'] });
+
 // light＝只等"后台认得这些消息"（sync 提交）；状态、门、日期、世界书、规划这些刷新放到后面跑，不挡调用的人（T080 返工：生成前的同步用）。
 function syncNow(force = false, light = false) {
     if (!state.chatKey || !settings().enabled) return Promise.resolve(false);
@@ -1714,8 +1726,10 @@ async function syncOnce(force = false, light = false) {
             if (epoch !== state.epoch) return false;
             cameraOf(c);   // 旁白卡写的记 narrator：先认出它再算指纹
             const tb = performance.now();
-            const { seq, bodies } = buildSequence(c.chat, fallbackAvatar(c));
+            const generating = activeGeneration();
+            const { seq, bodies, pending } = buildSequence(c.chat, fallbackAvatar(c), generating);
             tick('同步:算指纹', performance.now() - tb, `${seq.length} 条`);
+            if (pending) { state.pendingSyncEpoch = epoch; return false; }
             const payload = {
                 chatKey: state.chatKey, seq, force, members: members(c),
                 anchors: c.chatMetadata?.contextIsolation?.anchors ?? null,
@@ -1732,13 +1746,14 @@ async function syncOnce(force = false, light = false) {
             if (epoch !== state.epoch) return false;
             state.collapsed = result.collapsed ?? null;
             if (!result.committed) return false;
+            if (state.pendingSyncEpoch === epoch) state.pendingSyncEpoch = null;
             // 记下后台这次认得的序列：生成前用它判断锚点那条是不是已经同步过（anchorCovered）
             state.synced = { chatKey: state.chatKey, epoch, seq: seq.map(s => ({ f: s.f, w: s.w })) };
-            if (result.added || result.removed || result.edited) changed = true;
+            if (result.added || result.removed || result.edited || result.repaired) changed = true;
             // 删改、换稿后不等下一句排队：沿现有事件账落实 undo，不认新离场、不叫人说话。
             // 撤销开回的区间和取消静音后的名单也同步回后台，之后的场面才是新状态。
             // light 且没有删改换稿时，undo 这趟只是顺手补做（上次没落实的重试），放到后面跑，不挡生成。
-            if (light && !(result.removed || result.edited)) {
+            if (light && !(result.removed || result.edited || result.repaired)) {
                 void autoPeek({ onlyUndo: true }).then(done => { if (done && epoch === state.epoch) return syncNow(); }).catch(() => {});
             } else if (await autoPeek({ onlyUndo: true })) {
                 if (epoch !== state.epoch) return false;
@@ -1874,6 +1889,8 @@ async function onChatChanged() {
     state.personaWindow = chatIds(ctx()).stChatId;
     const epoch = ++state.epoch;
     state.lastCameraPrompt = null;
+    state.generation = null;
+    state.pendingSyncEpoch = null;
     state.lastPrompt = null;   // 换了窗口：上一次量的长度（别的卡、别的聊天）不作数
     clearTimeout(state.timer);
     clearTimeout(state.planTimer);
@@ -1981,8 +1998,8 @@ async function join(epoch = state.epoch) {
 function anchorSynced(rows, c) {
     const s = state.synced;
     if (!s || s.chatKey !== state.chatKey || s.epoch !== state.epoch || state.syncFlight || state.dirty) return false;
-    const { seq } = buildSequence(rows, fallbackAvatar(c));
-    if (seq.length !== rows.length || s.seq.length < seq.length) return false;
+    const { seq, pending } = buildSequence(rows, fallbackAvatar(c), activeGeneration());
+    if (pending || seq.length !== rows.length || s.seq.length < seq.length) return false;
     return seq.every((x, i) => x.f === s.seq[i].f && x.w === s.seq[i].w);
 }
 
@@ -3484,7 +3501,10 @@ for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSA
     on(name, (id) => { if (guideStaleOn(name) && state.guide.open) { state.guide = guideClosed(); render(); } if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED') stripDoorMark(id).catch(() => {}); if (name === 'GROUP_UPDATED') watchMembers(); scheduleSync(); if (name !== 'MESSAGE_SENT') refreshDoor(); if (name === 'MESSAGE_RECEIVED') askGuide(false).catch(() => {}); });
 }
 on('OAI_PRESET_CHANGED_AFTER', restoreCameraPrompts);
-for (const name of ['GENERATION_ENDED', 'GENERATION_STOPPED']) on(name, clearPrompts);
+for (const name of ['GENERATION_ENDED', 'GENERATION_STOPPED']) on(name, () => {
+    clearPrompts();
+    if (state.generation?.epoch === state.epoch || state.pendingSyncEpoch === state.epoch) { state.generation = null; scheduleSync(0); }
+});
 // 旁白那一段写完了（N-292、D-169）：叙述用了"我"就提醒你重写；这一段递过"谁要露面"、末尾也点了他的名，就先在后台把他进场那份理好，再问你。
 // 没点名：这次不问（后台下一段旁白再带一回，还没写到这个时段就不再递）。发消息、打电话来的人每说完一条，轻轻问一句要不要让他回去忙。
 on('MESSAGE_RECEIVED', () => {
@@ -3914,7 +3934,13 @@ async function freshen(id, type) {
 // 这一轮酒馆真触发了哪几条世界书（质量窗 10/2）：记在接下来那条回复上（extra.rp_lore，跟着聊天文件走），同步时交给后台；
 // 记账时这几条给全文（以前靠字面挑，会漏会撞）。条目正文也交给后台认得——没开"按开口的人筛"时只认、不花钱判谁知道。
 // 别的扩展在后台悄悄生成（quiet）时触发的不算。换一套卡、书、预设也一样：这是酒馆自己的事件，不认书名、不认条目写法。
-on('GENERATION_STARTED', async type => { state.genType = type ?? 'normal'; state.genAt = performance.now(); await sendPersona(); });
+on('GENERATION_STARTED', async (type, _options, dryRun) => {
+    if (dryRun) return;
+    state.genType = type ?? 'normal'; state.genAt = performance.now();
+    const c = ctx();
+    state.generation = { epoch: state.epoch, chatKey: state.chatKey, message: ['swipe', 'continue'].includes(type) ? c.chat?.at(-1) : null, active: true };
+    await sendPersona();
+});
 on('WORLD_INFO_ACTIVATED', entries => {
     if (!settings().enabled || !state.chatKey || !Array.isArray(entries) || state.genType === 'quiet') return;
     const list = entries.filter(e => e && e.uid != null).slice(0, 60).map(e => ({ key: `${e.world ?? ''}|${e.uid}`, hash: loreHash(e.content), world: e.world ?? '',

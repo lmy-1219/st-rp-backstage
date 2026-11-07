@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, menuDays, scaleFor, renderEntry, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
 import { labelsOf, sinceWord, dateIn, dayNumber, timelineLabel } from './timeline.mjs';
-import { validMark, planFailure } from './store.mjs';
+import { validMark, validSwipeEvidence, planFailure } from './store.mjs';
 import { digests } from './digest.mjs';
 import { parsePlan, nearPlace, verifiedPlanSourceIds } from './planner.mjs';
 import { guideFor, markShown, recordPick, REFILL_KEY } from './guide.mjs';
@@ -58,9 +58,9 @@ const roomOf = v => { if (!v || typeof v !== 'object') return null; const n = x 
 function readSeq(seq) {
     if (!Array.isArray(seq)) bad('seq invalid');
     return seq.map(x => {
-        if (!x || !isFp(x.f)) bad('seq entry invalid');
+        if (!x || !isFp(x.f) || !validSwipeEvidence(x)) bad('seq entry invalid');
         // k：用户在这条上点的剧情日期（day｜same｜d:N，N-265）
-        return { f: x.f, h: !!x.h, d: typeof x.d === 'string' ? x.d.slice(0, 64) : null, ...(Number.isInteger(x.w) && x.w >= 0 && x.w < 10000 ? { w: x.w } : {}), ...(validMark(x.k) ? { k: x.k } : {}), ...(typeof x.b === 'string' && x.b.length <= 4000 ? { b: x.b } : {}) };
+        return { f: x.f, h: !!x.h, d: typeof x.d === 'string' ? x.d.slice(0, 64) : null, ...(Number.isInteger(x.w) && x.w >= 0 && x.w < 10000 ? { w: x.w } : {}), ...(Object.hasOwn(x, 'swipes') ? { swipes: x.swipes } : {}), ...(validMark(x.k) ? { k: x.k } : {}), ...(typeof x.b === 'string' && x.b.length <= 4000 ? { b: x.b } : {}) };
     });
 }
 
@@ -232,10 +232,11 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/options': b => store.setOptions({ chatKey: str(b.chatKey, 'chatKey'), testSlot: b.testSlot }),
         'POST /v1/messages': b => store.putMessages({ chatKey: str(b.chatKey, 'chatKey'), messages: readMessages(b.messages) }),
         'POST /v1/sync': b => {
+            const chatKey = str(b.chatKey, 'chatKey'), seq = readSeq(b.seq);
             // 同步前：给眼下的最后一条记一份快照（它当最后一条时最后的样子）；删回到它时拿来对账（rewind.mjs）
-            if (records) try { if (store.currentMessages(str(b.chatKey, 'chatKey')).length) snapshotRewind(store, records, b.chatKey); } catch {}
+            if (records) try { if (store.currentMessages(chatKey).length) snapshotRewind(store, records, chatKey); } catch {}
             const result = store.sync({
-                chatKey: str(b.chatKey, 'chatKey'), seq: readSeq(b.seq), force: !!b.force,
+                chatKey, seq, force: !!b.force,
                 members: Array.isArray(b.members) ? b.members : null,
                 anchors: b.anchors && typeof b.anchors === 'object' ? b.anchors : null,
             });
