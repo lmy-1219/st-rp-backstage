@@ -351,7 +351,7 @@ export function intimateProgressFor(store, records, chatKey, context = null) {
 function intimateScene(store, records, chatKey, present = []) {
     const tl = timelineFor(store, records, chatKey);
     const board = boardFor(store, records, chatKey, { present, timeline: tl });
-    return { place: board?.camera?.place || board?.fast?.place || '', day: tl.today, part: tl.part ?? null };
+    return { place: board?.camera?.place || '', day: tl.today, part: tl.part ?? null };
 }
 export function intimateStopped(store, records, chatKey, { present = [], record = false } = {}) {
     const raw = store.getMeta?.(`intimate_stop:${chatKey}`);
@@ -1079,9 +1079,8 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         const same = (a, b) => sameName(a, b, rosterNames) || (!!rel && !!personOf(rel, a, rosterNames) && personOf(rel, a, rosterNames) === personOf(rel, b, rosterNames));
         const seed = seedOf(lifeRows, x => knowsRow(x, name, same));
         const sheet = lifeSheet(fed.filter(r => r.holder_name === name || (r.audience ?? []).includes(name)), { same, names: [...rosterNames, userName].filter(Boolean), seed });
-        // 镜头在哪：此刻的样子里的位置（在场的人的；不在场的人上回躺在哪张床上，不说明镜头在那屋里）、周围，加最近两条括号里的叙述（扩展带来的，玩家刚发的那句可能还没同步；对白里说到"家"不算）
-        const narration = t => (String(t ?? '').match(/（[^）]*）|\([^)]*\)/g) ?? []).join(' ');
-        const scene = [board?.camera?.place, board?.fast?.place, ...foldState(store.stateNotesOf?.(chatKey) ?? []).filter(n => n.aspect === '周围' || (n.aspect === '位置' && [name, ...present].some(p => sameName(p, n.who, rosterNames)))).map(n => n.text), ...[...recent.slice(-2), recentUser].map(narration)].filter(Boolean).join('\n');
+        // 住处取料只认场面表里的结构化镜头地点。
+        const scene = board?.camera?.place ?? '';
         // 他是发消息、打电话来的：人不在那处住处，家里的样子不给（试玩 10/6：他在摊子上发短讯，那一格写着"这处住处现在的样子，镜头就在这儿"）
         add(0, lifeLines(sheet, { name, present: remote ? [] : present, scene: remote ? '' : scene, same, names: [...rosterNames, userName].filter(Boolean), board: remote ? null : board }), 'base', 'person');
         // 他在他自己住的地方发消息、打电话（用户 10/8：他屋里添了什么没给他，前文买的被褥被写成了别的料子）：那处的样子给他，镜头不在那儿
@@ -1091,8 +1090,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         const same = (a, b) => sameName(a, b, rosterNames) || (!!rel && !!personOf(rel, a, rosterNames) && personOf(rel, a, rosterNames) === personOf(rel, b, rosterNames));
         const seed = seedOf(lifeRows.filter(x => x.类 !== '身体'));
         const sheet = lifeSheet(visible, { same, names: [...rosterNames, userName].filter(Boolean), seed });
-        const narration = t => (String(t ?? '').match(/（[^）]*）|\([^)]*\)/g) ?? []).join(' ');
-        const scene = [board?.camera?.place, board?.fast?.place, ...foldState(store.stateNotesOf?.(chatKey) ?? []).filter(n => n.aspect === '周围' || (n.aspect === '位置' && [name, ...present].some(p => sameName(p, n.who, rosterNames)))).map(n => n.text), ...[...recent.slice(-2), recentUser].map(narration)].filter(Boolean).join('\n');
+        const scene = board?.camera?.place ?? '';
         add(0, homeLines(sheet, { present, scene, same, names: [...rosterNames, userName].filter(Boolean), board }), 'base', 'scene');
         // 在场的人身上一直带着的（没好的旧伤、靠药撑着……）：照玩家知道的（用户 10/9，开局单"人物开场状态"的身体）
         if (userName) {
@@ -1144,7 +1142,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             told = liveLongTold(told, fpAt, (pos, day) => store.basisLive?.(chatKey, pos, day) !== false);
             const earlier = told.filter(t => t.who === who && t.pos < lastPos);
             const give = longGive(events, { day: today, lastPos, timeScale: ts, name: camera ? userName ?? name : name, sameName: (a, b) => sameName(a, b, rosterNames), when: tagDay,
-                place: remote ? '' : [board?.camera?.place, board?.fast?.place].filter(Boolean).join('\n'), talk: recentUser ?? '',
+                place: remote ? '' : board?.camera?.place ?? '', talk: recentUser ?? '',
                 heard: (kind, k) => earlier.some(t => t.kind === kind && t.k === k && (kind === '过去了' || t.day === today)) });
             add(2, give.lines, 'world', 'scene');
             const at = messages.at(-1);
@@ -1881,15 +1879,15 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
                 }
                 // 剧情走到了开局单里某条储备线写明的地方（N-293，用户 10/6：一个人去了某个酒吧，开局单里一条储备线的条件写着"在那儿"，规划里却一件都没有）：
                 // 展开那条线，给眼下这个节点补几件此刻就能用上的（规划那档模型，一次七八毛、几分钟，后台跑不等）。同一条线一个剧情日至多一回；
-                // 那条线眼下已经有排着、在口袋里的事就不用。在哪看场面表（镜头在哪、快路认的地方）、此刻的样子和最近两条括号里的叙述——嘴上说起那个地方不算。
+                // 那条线眼下已经有排着、在口袋里的事就不用。地点只取场面表和本窗口有效的此地记录。
                 if (planner.onPlace) {
-                    const narration = t => (String(t ?? '').match(/（[^）]*）|\([^)]*\)/g) ?? []).join(' ');
-                    const where = [board?.camera?.place, board?.fast?.place, ...foldState(store.stateNotesOf?.(chatKey) ?? []).filter(n => (n.aspect === '位置' || n.aspect === '周围' || n.aspect === '地方') && (n.who === '此地' || (userName && sameName(n.who, userName, rosterNames)))).map(n => n.text),
-                        ...messages.slice(-2).map(m => narration(m.text))].filter(Boolean).join('\n');
+                    const where = board?.camera?.place ?? '';
                     // 进了那处以后，"此刻的样子"常把地方写成里面更细的一块（试玩 10/9：某家酒吧 → 里面的包厢 → 吧台边，酒吧的名字没了，
                     // 人还在那儿却认不出）：同一天、四十条以内、上一回"在路上"以后记过的地方都算
                     const spots = (store.stateNotesOf?.(chatKey) ?? []).filter(n => n.who === '此地' && n.aspect === '地方' && n.pos <= lastPos && lastPos - n.pos <= 40 && dayOf(n.pos) === today).sort((a, b) => a.pos - b.pos);
-                    const here = spots.slice(spots.findLastIndex(n => /路上|往.{1,12}去|出了|离开/.test(n.text)) + 1).map(n => n.text).join('\n');
+                    const here = where && board?.camera?.from !== 'mark'
+                        ? spots.slice(spots.findLastIndex(n => /^(没了|没有了|已经没了|无)$|路上|往.{1,12}去|出了|离开/.test(n.text)) + 1)
+                            .filter(n => !/^(没了|没有了|已经没了|无)$/.test(n.text)).map(n => n.text).join('\n') : '';
                     const whereNow = [where, here].filter(Boolean).join('\n');
                     const busy = new Set(store.menuOf(chatKey).filter(m => m.status === 'waiting' || m.status === 'pocket').map(m => m.line));
                     for (const x of store.setupOf?.(storyId)?.data?.储备线 ?? []) {

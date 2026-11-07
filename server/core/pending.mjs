@@ -8,7 +8,7 @@ import { buildLedger, samePerson, sameParty, namedParties } from './money.mjs';
 import { entryOf, ifTakenOf, ifSunkOf } from './planner.mjs';
 import { settledMatter } from './matters.mjs';
 import { settledBy, paceFor, timelineFor } from './slot.mjs';
-import { timelineLabel } from './timeline.mjs';
+import { timelineLabel, dateIn, dayNumber } from './timeline.mjs';
 import { boardFor, boardLoader } from './board.mjs';
 import { lifeSheet } from './life.mjs';
 import { awayPlansOf } from './opening.mjs';
@@ -57,9 +57,14 @@ function promiseItems(records, timeline, same) {
         const p = promiseOf(r, { dayOf, partAt: part, weekdayOf, timeScale });
         if (!p) continue;
         const s = stageOf(p, { today: num(timeline?.today) ?? dayOf(records.at(-1)?.pos ?? r.pos), part: timeline?.part ?? part(records.at(-1)?.pos ?? r.pos), timeScale });
-        const stageStatus = { later: '排着', open: '排着', cond: '排着', eve: '到了', today: '到了', met: '到了', late: '过了时候', overdue: '过了时候', lapse: '过去了' }[s] ?? '排着';
+        const stageStatus = { later: '排着', open: '排着', cond: '排着', eve: '排着', today: '到了', met: '到了', late: '过了时候', overdue: '过了时候', lapse: '过去了' }[s] ?? '排着';
         const today = num(timeline?.today) ?? dayOf(records.at(-1)?.pos ?? r.pos);
-        let status = stageStatus, statusAt = s === 'lapse' ? (records.at(-1)?.pos ?? r.pos) : null, why = s === 'lapse' ? `按${timeScale.ordinal(today)}算的` : '';
+        const nowPart = timeline?.part ?? part(records.at(-1)?.pos ?? r.pos);
+        const parts = timeScale.parts;
+        const dayPart = p.due?.part && (s === 'today' || s === 'late');
+        const comparable = p.due?.part && parts.includes(p.due.part) && parts.includes(nowPart);
+        const waitingPart = dayPart && (!comparable || parts.indexOf(nowPart) < parts.indexOf(p.due.part));
+        let status = waitingPart ? '排着' : stageStatus, statusAt = s === 'lapse' ? (records.at(-1)?.pos ?? r.pos) : null, why = s === 'lapse' ? `按${timeScale.ordinal(today)}算的` : '';
         const close = closed.get(r.id);
         if (close) { status = close.outcome === '改了' ? '改了' : close.outcome === '没办成' ? '黄了' : close.outcome === '不做了' ? '黄了' : close.outcome === LAPSED ? '过去了' : '办了'; statusAt = close.pos; why = `${close.outcome ?? '办了'}（#${close.pos}）`; }
         else if (twins.has(r.id)) { status = '办了'; why = '跟着同一件事了结'; }
@@ -303,6 +308,14 @@ export function playerView(store, records, chatKey) {
     };
     const timeline = timelineFor(store, records, chatKey, messages);
     const when = pos => timelineLabel(timeline, pos);
+    const scale = scaleOf(timeline.scale);
+    const promiseWhen = (item, source) => {
+        const due = item.when;
+        const original = source.promise?.when ?? '';
+        const label = day => [dateIn(timeline.start, day)?.ymd, scale.ordinal(dayNumber(timeline.start, day))].filter(Boolean).join(' · ');
+        const target = due && Number.isInteger(due.day) ? `${label(due.day)}${due.end != null && due.end !== due.day ? `～${label(due.end)}` : ''}${original ? `（原记：${original}）` : ''}` : original;
+        return [`约在：${target || '未定'}`, `记于：${when(source.pos)}`].join('；');
+    };
     const lastPos = messages.at(-1)?.pos ?? 0;
     const span = paceFor(store, chatKey).sinkMsgs;
     const recent = pos => Number.isInteger(pos) && pos <= lastPos && lastPos - pos <= span;
@@ -312,10 +325,22 @@ export function playerView(store, records, chatKey) {
         const shown = safeText(r);
         if (!shown || !subjects.length) return null;
         const text = subjects.some(name => r.raw_text.includes(name)) ? shown : `${subjects[0]}：${shown}`;
-        return { text, kind, status, who, when: when(pos), rumor };
+        return { text, kind, status, who, when: kind === '约定' && item ? promiseWhen(item, r) : `记于：${when(pos)}`, rumor };
     };
     const groups = { concern: [], open: [], changed: [] };
-    for (const item of pendingFor(store, records, chatKey, { timeline }).items) {
+    const candidates = [];
+    const eligible = r => known(r) && recent(r.pos) && (!r.ref_id || known(byId.get(r.ref_id)));
+    const actual = r => ['现在', '过去', '当时'].includes(r.tense) && !r.guess && !r.fabricated;
+    const offer = (r, row, priority, tier = 0) => {
+        if (!row || !eligible(r)) return;
+        // holder 只说明谁持有这笔记录；结果原文说的是别人动手时不改写执行者。
+        const prefix = `${r.holder_name}：`;
+        if (tier === 0 && r.type !== '听说' && r.holder_name && !r.raw_text.includes(r.holder_name) && row.text.startsWith(prefix))
+            row = { ...row, text: row.text.slice(prefix.length) };
+        candidates.push({ ...row, when: `结果记于：${when(r.pos)}`, _id: r.id, _pos: r.pos, _priority: priority, _tier: tier });
+    };
+    const pending = pendingFor(store, records, chatKey, { timeline }).items;
+    for (const item of pending) {
         if (!['约定', '等回音', '要求', '钱', '碰上的事'].includes(item.kind)) continue;
         if (!item.source?.id || !known(byId.get(item.source.id))) continue;
         const source = byId.get(item.source.id);
@@ -323,14 +348,40 @@ export function playerView(store, records, chatKey) {
         if (!row) continue;
         if (CLOSED_STATUSES.has(item.status)) {
             const evidence = byId.get(item.settledBy);
-            if (evidence && recent(evidence.pos) && known(evidence))
-                groups.changed.push({ ...row, when: when(evidence.pos), _pos: evidence.pos });
+            if (evidence && eligible(evidence) && (evidence.idea_ref == null || known(byId.get(evidence.idea_ref)))) {
+                const result = view(evidence, '了结', item.status, evidence.pos);
+                if (result) result.kind = item.kind;
+                offer(evidence, result, item.kind === '碰上的事' && !source.matter?.kind ? 0 : 2, item.status === '有回音' ? 1 : 0);
+            }
         } else if (['约定', '等回音'].includes(item.kind)) groups.concern.push({ ...row, _pos: item.since });
         else if (['要求', '钱', '碰上的事'].includes(item.kind)) groups.open.push({ ...row, _pos: item.since });
     }
-    for (const r of visible) if (known(r) && recent(r.pos) && ['了结', '听说'].includes(r.type)) {
-        const row = view(r, r.type, r.type, r.pos, r.type === '听说');
-        if (row) groups.changed.push({ ...row, _pos: r.pos });
+    for (const r of visible) if (eligible(r)) {
+        if (r.type === '了结') {
+            if (r.idea_ref != null && !known(byId.get(r.idea_ref))) continue;
+            const status = { 做了: '办了', 改了: '改了', 不做了: '黄了', 没办成: '黄了', 过去了: '过去了' }[r.outcome] ?? r.type;
+            const target = byId.get(r.idea_ref);
+            offer(r, view(r, r.type, status, r.pos), target?.matter && !target.matter.kind ? 0 : 2);
+        } else if ((r.type === '改变' || (r.type === '做' && r.life)) && actual(r)) {
+            const subject = [r.about, r.holder_name].find(name => name && r.raw_text?.includes(name));
+            if (!subject) continue;
+            const shown = safeText(r);
+            if (shown) offer(r, { text: shown, kind: r.type, status: r.type, who: [subject], rumor: false }, 1);
+        } else if (r.type === '做' && actual(r) && visible.some(x => eligible(x) && (x.closed_by?.id === r.id || x.answered_by?.id === r.id))) {
+            const subject = [r.about, r.holder_name].find(name => name && r.raw_text?.includes(name));
+            const shown = subject && safeText(r);
+            if (shown) offer(r, { text: shown, kind: r.type, status: r.type, who: [subject], rumor: false }, 3);
+        } else if (r.type === '听说') offer(r, view(r, r.type, r.type, r.pos, true), 4, 1);
     }
-    return Object.fromEntries(Object.entries(groups).map(([key, values]) => [key, values.sort((a, b) => b._pos - a._pos).slice(0, 6).map(({ _pos, ...row }) => row)]));
+    const seenIds = new Set(), seenPositions = new Set();
+    candidates.sort((a, b) => a._priority - b._priority || a._id - b._id);
+    const unique = candidates.filter(row => { if (seenIds.has(row._id)) return false; seenIds.add(row._id); return true; });
+    unique.sort((a, b) => a._tier - b._tier || b._pos - a._pos || a._priority - b._priority || a._id - b._id);
+    for (const row of unique) {
+        if (seenPositions.has(row._pos)) continue;
+        seenPositions.add(row._pos);
+        groups.changed.push(row);
+        if (groups.changed.length === 6) break;
+    }
+    return Object.fromEntries(Object.entries(groups).map(([key, values]) => [key, (key === 'changed' ? values : values.sort((a, b) => (b._pos ?? 0) - (a._pos ?? 0))).slice(0, 6).map(({ _pos, _id, _priority, _tier, ...row }) => row)]));
 }

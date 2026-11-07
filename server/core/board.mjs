@@ -1,7 +1,7 @@
 // 场面表的唯一读口：先看隔离区间，再看进场记录、去向、离场记录和传入名单。
-// 镜头由“此地”状态与叙述中的移动合并；时间完全采用调用方传入的 timeline。
-// 来源先后：在场区间 > 指纹有效的消息/电话进场 > 去向 > 隔离区间离场 > present 名单 > never。
-// 镜头按此地与快路的位置比较，住处、时间和呼叫分别取 homes、timeline 和 arrival.callsFor。
+// 镜头只取有效的“此地”状态与用户标记；时间完全采用调用方传入的 timeline。
+// 来源先后：在场区间 > 指纹有效的消息/电话进场 > 去向 > 隔离区间离场 > present 名单 > 单聊身份兜底 > never。
+// 住处、时间和呼叫分别取 homes、timeline 和 arrival.callsFor。
 import { createHash } from 'node:crypto';
 import { hasCard, validAwayPlan, lastLeave, awayStage, callsFor, isRemote, metInPerson } from './arrival.mjs';
 import { narrationOf, dateOf, calendarOf, weatherOn, PARTS } from './timeline.mjs';
@@ -14,9 +14,10 @@ const CAMERA_NAME = '旁白';   // 镜头那张卡的名字（slot.mjs 也是这
 const MOVE_WORDS = '走进|走到|进了|进入|来到|到了|回到|下楼到|下楼找到|上楼到|推门进|拐进|踏进|钻进|跟着[^，。；！？,;!?]{0,12}进了';
 const PLACE_RE = new RegExp(`(?:${MOVE_WORDS})\\s*([^，。；！？,;!?\\s]{2,12}?)(?=[，。；！？,;!?]|里|内|门口|外|$)`, 'g');
 const GENERIC_PLACES = new Set(['家里', '这里', '那里', '外头', '楼下', '楼上', '门口', '屋里', '里面', '外面', '这边', '那边', '前面', '后面', '窗边', '床边', '门外', '屋外']);
-// 往哪儿去（试玩 10/7："从地下室出来，往主街走去"——镜头一直留在地下室那间屋里）：去的那个地方算镜头所在
+// movement 仍供自动离场使用；它的词面结果不进入镜头地点。
 const HEAD_RE = /(?:往|朝)\s*([^，。；！？,;!?\s（）()]{2,10}?)\s*(?:走去|走|去|赶|跑|那边去|方向)/g;
 const TIME_RE = /凌晨|早上|上午|中午|下午|傍晚|晚上|深夜/g;
+const CLEARED_PLACE = /^(没了|没有了|已经没了|无)$/;
 
 const values = value => Array.isArray(value) ? value : Object.values(value ?? {});
 const number = value => Number.isFinite(Number(value)) ? Number(value) : null;
@@ -91,7 +92,8 @@ export function boardAt(input = {}) {
     const marks = (input.marks ?? []).map((mark, index) => {
         try { const value = typeof mark === 'string' ? JSON.parse(mark) : mark; return value && typeof value === 'object' ? { ...value, pos: number(value.pos) ?? index } : null; } catch { return null; }
     }).filter(mark => mark && mark.pos <= pos);
-    const latestPlaceMark = marks.filter(mark => typeof mark.place === 'string' && mark.place.trim()).at(-1) ?? null;
+    const latestPlaceMark = marks.filter(mark => typeof mark.place === 'string' && mark.place.trim())
+        .sort((a, b) => a.pos - b.pos).at(-1) ?? null;
     const timeline = input.timeline ?? {};
     const lastRow = timeline.rows?.at(-1) ?? {};
     const today = timeline.today ?? lastRow.day ?? 0;
@@ -108,7 +110,9 @@ export function boardAt(input = {}) {
     const notes = (input.stateNotes ?? [])
         .filter(note => note?.who === '此地' && note.aspect === '地方' && note.text && (number(note.pos) ?? 0) <= pos)
         .sort((a, b) => (number(a.pos) ?? 0) - (number(b.pos) ?? 0));
-    const state = notes.at(-1) ?? null;
+    const latestState = notes.at(-1) ?? null;
+    const foldedPlace = foldState(notes).find(n => n.who === '此地' && n.aspect === '地方') ?? null;
+    const state = latestState && !CLEARED_PLACE.test(latestState.text.trim()) ? foldedPlace : null;
     const candidates = messages.slice(-2).map(message => ({ ...movement(message.text), pos: number(message.pos) ?? pos })).filter(item => item.place);
     const recent = input.recentUser?.text ?? input.recentUser;
     if (recent) {
@@ -116,21 +120,22 @@ export function boardAt(input = {}) {
         if (found) candidates.push({ ...found, pos: pos + 1 });
     }
     const fast = candidates.at(-1) ?? { place: null, pos: null, time: null };
-    const useState = state && (!fast.place || (number(state.pos) ?? 0) >= (number(fast.pos) ?? 0));
-    // 三路按位置比，后来的赢；同一条上都有时：用户的纠正 > 此地（模型读过原文认的）> 快路（程序正则认的）
-    const rank = { mark: 2, state: 1, fast: 0 };
+    // 清除也占一个位置，不能越过它拾回旧地点；同位置用户标记优先。
+    const rank = { mark: 1, state: 0 };
     const cameraCandidates = [
         latestPlaceMark ? { place: latestPlaceMark.place, pos: latestPlaceMark.pos, from: 'mark' } : null,
-        useState ? { place: state.text, pos: number(state.pos) ?? 0, from: 'state' } : null,
-        fast.place ? { place: fast.place, pos: candidates.at(-1)?.pos ?? pos, from: 'fast' } : null,
-    ].filter(Boolean).sort((a, b) => ((a.pos ?? 0) - (b.pos ?? 0)) || (rank[a.from] - rank[b.from]));
+        latestState ? { place: state?.text ?? null, pos: number(latestState.pos) ?? 0, from: state ? 'state' : null } : null,
+    ].filter(Boolean).sort((a, b) => ((a.pos ?? 0) - (b.pos ?? 0)) || ((rank[a.from] ?? 0) - (rank[b.from] ?? 0)));
     const camera = cameraCandidates.at(-1) ?? { place: null, pos: null, from: null };
     const cameraPlace = camera.place;
     const cameraFrom = camera.from;
     const fallbackRow = { day: today, part };
     const present = new Set(input.present ?? []);
     // 镜头那张卡（旁白）不是人，不进场面表（和 slot.mjs 的 CAMERA_NAME 一样）
-    const roster = (input.roster ?? []).map(rosterEntry).filter(person => person?.name && person.name !== CAMERA_NAME);
+    const solo = input.solo && messages.some(m => !m.is_user && m.speaker === input.solo.avatar && m.name === input.solo.name)
+        ? input.solo : null;
+    const roster = (input.roster ?? []).map(rosterEntry).filter(person => person?.name && person.name !== CAMERA_NAME)
+        .filter(person => !solo || person.name !== solo.name || person.avatar === solo.avatar);
     // 进场被删掉了（那次进场挂的那条消息没了、换了），隔离扩展的区间却还开着（试玩 10/7：删回去重来，旁白一回话正好落在他当初进场那条的位置上，
     // 他就"在场"了，门上那一行跟着没了）：区间起点对应的进场全作废了就不算；之后又有还算数的进场，从那次算起。没有进场记录的区间照旧
     const entries = values(input.arrivals);
@@ -167,7 +172,12 @@ export function boardAt(input = {}) {
         const planned = planFor(input.awayPlans, person);
         const plan = planned?.seed && present.has(person.name) ? null : validAwayPlan(planned, messages, input.sourceLive);
         const leave = lastLeave(own, avatar, pos + 1);
-        const inGroup = present.size ? present.has(person.name) : !!segment;
+        const soloHere = solo?.avatar === avatar && solo.name === person.name;
+        // 单聊身份只为仍有效的这次联系补参与资格；较新的去向或离场已经结束它。
+        const soloRemote = soloHere && arrived && liveEntry(arrived)
+            && (leave == null || leave < Number(arrived.at))
+            && (!plan || (plan.at != null && Number(plan.at) < Number(arrived.at)));
+        const inGroup = present.size ? present.has(person.name) || soloRemote : !!segment || soloRemote;
         const remote = validRemote(arrived, messages, inGroup, input.stateNotes ?? [], roster.map(p => p.name));
         let status = 'never';
         let since = null;
@@ -188,7 +198,9 @@ export function boardAt(input = {}) {
             status = 'away';
             since = leave ?? plan?.at ?? null;
             place = (leave != null ? ownSpot(person.name, leave) : null) ?? plan?.where ?? null;
-        } else if (present.has(person.name)) {
+        } else if (present.has(person.name) || (soloHere && !planned && (!meta || mineIn || liveEntry(meta)) && !entries.some(e =>
+            (e.avatar === avatar || e.who === person.name) && Number(e.at) <= pos + 1 && !liveEntry(e))
+            && !(input.anchors?.[avatar]?.segments ?? []).some(x => Number(x.from) <= pos && (emptySegment(x) || !liveSegment(x, person))))) {
             status = 'present';
             place = cameraPlace;
         }
@@ -241,12 +253,37 @@ function uptoAnchor(messages, anchor) {
     return messages.slice(0, count);
 }
 
+function soloMember(chat, roster) {
+    if (chat.group_id != null && chat.group_id !== '') return null;
+    let members;
+    try { members = JSON.parse(chat.members ?? '[]'); } catch { return null; }
+    if (!Array.isArray(members)) return null;
+    const active = members.filter(m => m && !m.disabled);
+    if (active.length !== 1) return null;
+    const member = active[0];
+    if (!member.avatar || !member.name || member.name === CAMERA_NAME) return null;
+    const matches = roster.filter(p => p.avatar === member.avatar && p.name === member.name);
+    return matches.length === 1 ? { avatar: member.avatar, name: member.name } : null;
+}
+
+function messageMarks(messages) {
+    return messages.map(m => {
+        try {
+            const mark = typeof m.boardMark === 'string' ? JSON.parse(m.boardMark) : m.boardMark;
+            return mark && typeof mark === 'object' ? { ...mark, pos: m.pos } : null;
+        } catch { return null; }
+    });
+}
+
 function cacheVersion(store, chat, chatKey, present, recentUser, marks) {
     const notes = store.stateNotesOf?.(chatKey) ?? [];
     const arrived = store.getMeta?.(`arrived:${chatKey}`) ?? '';
     const plans = store.getMeta?.(`away_plan:${chatKey}`) ?? '';
     return JSON.stringify({
         notes: [notes.length, notes.at(-1)?.id ?? null],
+        group: chat.group_id ?? null,
+        members: chat.members ?? null,
+        cast: (store.getCast?.(chat.story_id) ?? []).map(p => [p.avatar, p.name]),
         anchors: String(chat.anchors ?? '').length,
         arrived,
         arrivals: store.getMeta?.(`arrivals:${chatKey}`) ?? '',
@@ -281,12 +318,13 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
     const homes = lifeSheet(visible).homes;
     const stateNotes = store.stateNotesOf?.(chatKey) ?? [];
     const roster = store.getCast?.(chat.story_id) ?? [];
+    const solo = soloMember(chat, roster);
     const done = new Map();
     const at = (anchor = null) => {
         const messages = uptoAnchor(all, anchor);
         const key = `${messages.length}|${messages.at(-1)?.fp ?? ''}`;
         if (done.has(key)) return done.get(key);
-        const value = boardAt({ messages, marks: messages.map(m => m.boardMark), stateNotes, anchors, roster, arrived, arrivals, knocks, knockLive: e => store.knockLive?.(chatKey, e), awayPlans, sourceLive: source => store.basisLive?.(chatKey, source.pos, source.day) !== false, present: present ?? [], recentUser, timeline: timeline ?? {}, homes });
+        const value = boardAt({ messages, marks: messageMarks(messages), stateNotes, anchors, roster, solo, arrived, arrivals, knocks, knockLive: e => store.knockLive?.(chatKey, e), awayPlans, sourceLive: source => store.basisLive?.(chatKey, source.pos, source.day) !== false, present: present ?? [], recentUser, timeline: timeline ?? {}, homes });
         done.set(key, value);
         return value;
     };
