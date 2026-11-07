@@ -7,7 +7,7 @@ import { withRecommended } from './recommended.mjs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { openStore, fingerprint, planFailure } from './store.mjs';
+import { openStore, fingerprint, planFailure, freshAncestorIn } from './store.mjs';
 import { openRecords } from './records.mjs';
 import { loadConfig } from './config.mjs';
 import { createStagesAdmin } from './stages.mjs';
@@ -653,7 +653,7 @@ function prepareState({ chatKey }) {
     let read = [];
     try { read = JSON.parse(store.getMeta(readKey) ?? '[]'); } catch {}
     const seen = new Set(read);
-    const isRead = m => { let fp = m.fp; for (let i = 0; i < 4 && fp; i++) { if (seen.has(fp)) return true; fp = store.getMeta(`fresh_from:${fp}`); } return false; };
+    const isRead = m => freshAncestorIn(m.fp, seen, p => store.getMeta(`fresh_from:${p}`));
     const fresh = msgs.slice(-20).filter(m => !isRead(m)).slice(-8);
     if (!fresh.length || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return null;
     const userName = [...msgs].reverse().find(m => m.is_user)?.name ?? null;

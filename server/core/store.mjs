@@ -174,6 +174,20 @@ export function fingerprint(isUser, speaker, text) {
     return createHash('sha256').update(`${isUser ? 1 : 0}\u0001${speaker}\u0001${text}`).digest('hex').slice(0, 32);
 }
 
+// 异常元数据兜底：正常改稿靠已访问集合防环；256 只防损坏的超长链拖住读取。
+export function* freshChain(fp, previous) {
+    const seen = new Set();
+    for (let i = 0; fp && i < 256 && !seen.has(fp); i++) {
+        seen.add(fp);
+        yield fp;
+        fp = previous(fp);
+    }
+}
+export function freshAncestorIn(fp, seen, previous) {
+    for (const p of freshChain(fp, previous)) if (seen.has(p)) return true;
+    return false;
+}
+
 // 序列一下子少了很多条，多半是聊天文件塌了（N-51），先不认，等用户确认。
 export function looksCollapsed(oldLength, newLength) {
     return oldLength >= 20 && newLength < oldLength * 0.5 && oldLength - newLength >= 10;
@@ -750,10 +764,9 @@ export function openStore(file) {
         const byFp = new Map();
         for (const r of rows) byFp.set(r.fp, [...(byFp.get(r.fp) ?? []), r]);
         const out = [];
-        for (const m of currentMessages(chatKey)) {
-            let fp = m.fp;
-            for (let i = 0; i < 4 && fp; i++) { for (const r of byFp.get(fp) ?? []) out.push({ ...r, pos: m.pos }); fp = getMeta(`fresh_from:${fp}`); }
-        }
+        for (const m of currentMessages(chatKey))
+            for (const fp of freshChain(m.fp, p => getMeta(`fresh_from:${p}`)))
+                for (const r of byFp.get(fp) ?? []) out.push({ ...r, pos: m.pos });
         return out;
     }
     // 这一局玩家用过的名字：历史消息、各窗口当前人设、已确认规划人设。
@@ -767,9 +780,7 @@ export function openStore(file) {
     }
     function markFreshened(newFp, oldFp) { if (newFp && oldFp && newFp !== oldFp) setMeta(`fresh_from:${newFp}`, oldFp); }
     function sameMessage(currentFp, anchorFp) {
-        let fp = currentFp;
-        for (let i = 0; i < 4 && fp; i++) { if (fp === anchorFp) return true; fp = getMeta(`fresh_from:${fp}`); }
-        return false;
+        return freshAncestorIn(currentFp, new Set([anchorFp]), p => getMeta(`fresh_from:${p}`));
     }
     function historyOf(chatKey) {
         const seq = q('select fp from chat_seq where chat_key = ? order by pos').all(chatKey).map(r => r.fp);

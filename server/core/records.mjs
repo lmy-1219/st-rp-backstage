@@ -1,3 +1,5 @@
+import { freshChain } from './store.mjs';
+
 // 记录（证据账）：每条都挂在一条消息（局＋指纹）上，带原文片段、谁的说法、当时谁在场。
 // 一个窗口能看到哪些记录，只看它当前序列里还有没有那条消息——改稿删稿后旧记录自动不可见。
 const SCHEMA = `
@@ -165,8 +167,7 @@ export function openRecords(db) {
         let prevOf;
         try { const get = q('select value from meta where key = ?'); prevOf = fp => get.get(`fresh_from:${fp}`)?.value ?? null; } catch { return; }
         for (const fp of fps) {
-            const olds = [];
-            for (let p = prevOf(fp), i = 0; p && i < 4; p = prevOf(p), i++) olds.push(p);
+            const olds = [...freshChain(fp, prevOf)].slice(1);
             if (!olds.length) continue;
             const marks = olds.map(() => '?').join(', ');
             const before = q(`select id, type, text, promise from records where story_id = ? and status = 'ok' and fp in (${marks})`).all(storyId, ...olds);
