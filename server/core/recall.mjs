@@ -117,6 +117,7 @@ export function timedOut(r, age, timeScale = DAY) {
     return !FOREVER.test(t) && ((SAME_DAY.test(t) && age >= 1) || (NEXT_DAY.test(t) && age >= 2));
 }
 export function expiredTodo(r, age, timeScale = DAY) {
+    if (r?.todo_kind === 'action') return false;
     if (!(age > 0)) return false;
     const t = String(r?.text ?? '');
     return (SAME_DAY.test(t) && age >= 1) || (NEXT_DAY.test(t) && age >= 2) || age >= scaleOf(timeScale).expire;
@@ -290,6 +291,7 @@ export function contentGrams(text, ignore = []) {
 }
 export function answeredTodo(r, { messages = [], targets = [], asker = null, same = (a, b) => a === b, speakerOf = m => m.name ?? m.speaker, isPlayer = m => !!m.is_user, ignore = [], remote = false } = {}) {
     if (r?.closed_by) return { pos: r.closed_by.pos ?? null, how: 'closed' };
+    if (r?.todo_kind === 'action') return null;
     const tg = (targets ?? []).filter(Boolean);
     if (!tg.length) return null;
     const after = (messages ?? []).filter(m => (m.pos ?? 0) > r.pos).sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
@@ -536,7 +538,7 @@ export function selectMaterial({ name, present = [], messages, records: given, o
     // "想法"等到了结才关；"待办"没人去关，太久以前的（多半早办完或过期了）不再提。
     // 约定（N-268）：了结了才关；今天到时候的、过了没办的另有一块（slot 的"今天说好的"，skipOpen），这里不重复；畅想只在聊到了时想起。
     // 打算里写明只管那一时的（"等天一亮再说""今晚先……"），过了那个时候不再惦记（约定另有到期那一套）
-    const openAll = mine.filter(r => ((r.type === '想法' && openIdeaIds.has(r.id) && (r.promise || !timedOut(r, today - toDay(r.pos), timeScale))) || (r.promise && openIdeaIds.has(r.id)) || (r.todo && !r.closed_by && r.type !== '想法' && !r.promise && lastPos - r.pos <= TODO_WINDOW && !expiredTodo(r, today - toDay(r.pos), timeScale)))
+    const openAll = mine.filter(r => ((r.type === '想法' && openIdeaIds.has(r.id) && (r.promise || !timedOut(r, today - toDay(r.pos), timeScale))) || (r.promise && openIdeaIds.has(r.id)) || (r.todo && !r.closed_by && r.type !== '想法' && !r.promise && (r.todo_kind === 'action' || (lastPos - r.pos <= TODO_WINDOW && !expiredTodo(r, today - toDay(r.pos), timeScale)))))
         && !(r.promise?.kind === '畅想' && !(relevance.get(r.id) > 0)) && !skipOpen?.has(r.id)
         && !used.has(r.id) && openForPerson(r, name, mine, messages) && !isStale(r.id));
     const open = [...openAll.filter(r => r.pos < recentFrom), ...openAll.filter(r => r.pos >= recentFrom)].slice(-MAX_OPEN).sort((a, b) => a.pos - b.pos);

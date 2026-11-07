@@ -78,6 +78,7 @@ export function openRecords(db) {
     try { db.exec('alter table records add column unfinished integer not null default 0'); } catch {}   // "说"讲到一半停下的（N-124）：在场听的人过后惦记着追问，讲完了由"了结"关上   // 时间型记录：{part, unsure}（叙述里写明的一天里的什么时候；拿不准时间是不是往前走了）
     try { db.exec('alter table records add column standing integer not null default 0'); } catch {}   // 说好的：两人之间以后一直照着做的规矩（怎么称呼、别再做什么），每次开口都带着   // 势力账的三种记录：协议{parties,title,stage}、归属{who,public,real}、立场{a,b,public,real}   // 宽一点的检索词：大类、日常场合（换了说法、只说到同一类东西时接得上）
     try { db.exec('alter table records add column promise text'); } catch {}   // 约定（N-268）：{kind, doers, with, when}——类、谁办、跟谁、约在（照原文）
+    try { db.exec('alter table records add column todo_kind text'); } catch {}
     try { db.exec('alter table records add column lasting integer not null default 0'); } catch {}   // 分量（质量窗 10/2）：1＝会一直算数的（住哪、本事、名声、谁在找什么、钱和约定），不受每条消息的条数上限
     try { db.exec('alter table records add column known text'); } catch {}
     try { db.exec('alter table records add column lesson text'); } catch {}
@@ -100,10 +101,10 @@ export function openRecords(db) {
     } catch {}
 
     // 记录的写入统一走这里（新写入与重核共用）。
-    const COLUMNS = 'story_id, fp, job_id, type, text, about, tense, quotes, todo, fabricated, duration, elapsed, idea_ref, outcome, holder, holder_name, audience, keys, money, relation, wide, faction, standing, clock, unfinished, promise, lasting, known, lesson, life, rep, guess, matter, reach, status, reason, created_at';
+    const COLUMNS = 'story_id, fp, job_id, type, text, about, tense, quotes, todo, todo_kind, fabricated, duration, elapsed, idea_ref, outcome, holder, holder_name, audience, keys, money, relation, wide, faction, standing, clock, unfinished, promise, lasting, known, lesson, life, rep, guess, matter, reach, status, reason, created_at';
     // 被拦下的记录可能对不上任何一条消息（模型报错了消息号），指纹记成 '-' 照样留痕。
     const valuesOf = (storyId, jobId, r, status, reason) => [storyId, r.fp ?? '-', jobId, r.type ?? '?', r.text ?? '', r.about ?? null, r.tense ?? null,
-        JSON.stringify(r.quotes ?? []), r.todo ? 1 : 0, r.fabricated ? 1 : 0, r.duration ?? null, r.elapsed ?? null,
+        JSON.stringify(r.quotes ?? []), r.todo ? 1 : 0, r.todoKind ?? null, r.fabricated ? 1 : 0, r.duration ?? null, r.elapsed ?? null,
         r.ideaRef ?? null, r.outcome ?? null, r.holder ?? '?', r.holderName ?? null, JSON.stringify(r.audience ?? []),
         r.keys?.length ? JSON.stringify(r.keys) : null, r.money ? JSON.stringify(r.money) : null, r.relation ? JSON.stringify(r.relation) : null, r.wide?.length ? JSON.stringify(r.wide) : null, r.faction ? JSON.stringify(r.faction) : null, r.standing ? 1 : 0, r.clock ? JSON.stringify(r.clock) : null, r.unfinished ? 1 : 0, r.promise ? JSON.stringify(r.promise) : null, r.lasting ? 1 : 0, r.known?.length ? JSON.stringify(r.known) : null, r.lesson ? JSON.stringify(r.lesson) : null, r.life ? JSON.stringify(r.life) : null, r.rep ? JSON.stringify(r.rep) : null, r.guess ? 1 : 0, r.matter ? JSON.stringify(r.matter) : null, r.reach ?? null, status, reason, now()];
     const insertRecord = () => q(`insert into records(${COLUMNS}) values (${COLUMNS.split(',').map(() => '?').join(', ')})`);
@@ -230,17 +231,17 @@ export function openRecords(db) {
     // 窗口当前看得见的记录（消息还在序列里的）。带上出处位置。
     // 对账以后每条还带：closed_by（被看得见的"了结"或"回答"关上了：{id, pos}）、superseded_by（被看得见的"改掉"换掉了，以后不算数）。
     // 被改掉的默认不给（那一格、规划、账本都只拿活着的）；all=true 时连它们一起给（面板上划线显示）。
-    function visible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false } = {}) { return memo('visible', `${chatKey}|${status}|${type ?? ''}|${all ? 1 : 0}|${rawBasis ? 1 : 0}`, () => readVisible(chatKey, { status, type, all, rawBasis }), a => [...a]); }
-    function readVisible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false } = {}) {
+    function visible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false, through = null } = {}) { return memo('visible', `${chatKey}|${status}|${type ?? ''}|${all ? 1 : 0}|${rawBasis ? 1 : 0}|${through ?? ''}`, () => readVisible(chatKey, { status, type, all, rawBasis, through }), a => [...a]); }
+    function readVisible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false, through = null } = {}) {
         const rows = q(`select r.*, min(s.pos) pos from records r
                         join chats c on c.key = ? and c.story_id = r.story_id
                         join chat_seq s on s.chat_key = c.key and s.fp = r.fp
-                        where r.status = ?${type ? ' and r.type = ?' : ''}
-                        group by r.id order by pos, r.id`).all(...[chatKey, status, ...(type ? [type] : [])]);
+                        where r.status = ?${type ? ' and r.type = ?' : ''}${through == null ? '' : ' and s.pos <= ?'}
+                        group by r.id order by pos, r.id`).all(...[chatKey, status, ...(type ? [type] : []), ...(through == null ? [] : [through])]);
         const check = !rawBasis && sourceReader ? memo('sourceReader', chatKey, () => sourceReader(chatKey)) : null;
         const out = rows.map(r => ({ ...r, quotes: JSON.parse(r.quotes), audience: JSON.parse(r.audience), keys: r.keys ? JSON.parse(r.keys) : [], money: r.money ? JSON.parse(r.money) : null, relation: r.relation ? JSON.parse(r.relation) : null, clock: r.clock ? JSON.parse(r.clock) : null, wide: r.wide ? JSON.parse(r.wide) : [], faction: r.faction ? JSON.parse(r.faction) : null, promise: r.promise ? JSON.parse(r.promise) : null, known: r.known ? JSON.parse(r.known) : [], lesson: r.lesson ? JSON.parse(r.lesson) : null, life: r.life ? JSON.parse(r.life) : null, rep: r.rep ? JSON.parse(r.rep) : null, matter: r.matter ? JSON.parse(r.matter) : null })).filter(r => rawBasis || liveSource(r.known, chatKey, check));
         if (status !== 'ok') return out;
-        const { closed, superseded, outgoing } = linksOf(chatKey, rawBasis);
+        const { closed, answered, superseded, outgoing } = linksOf(chatKey, rawBasis, through);
         const byId = new Map(out.map(r => [r.id, r]));
         const targetOf = id => byId.get(id) ?? q('select id, text, holder_name from records where id = ?').get(id) ?? null;
         for (const r of out) {
@@ -251,6 +252,7 @@ export function openRecords(db) {
             if (ref) Object.defineProperty(r, 'ref_id', { value: ref.id });
             if (ref) { r.refers = ref.id; r.text = `${r.text}${REF_OPEN}${ref.holder_name ?? ''}那句：${String(ref.text).replace(/[。．.]+$/, '').slice(0, 80)}）`; }
             if (closed.has(r.id)) r.closed_by = closed.get(r.id);
+            if (answered.has(r.id)) r.answered_by = answered.get(r.id);
             if (superseded.has(r.id)) r.superseded_by = superseded.get(r.id);
             // 猜的（用户 10/7：防住猜测被当成真的）：读出来就带着这是谁猜的——没人证实过的要他拿不准先问；证实了标出来；被否定的跟改掉一样不再给
             if (r.guess) r.text = `${r.text}${r.closed_by?.kind === '证实' ? `（${r.holder_name ?? '他'}猜的，后来证实了）` : `（这是${r.holder_name ?? '他'}猜的，没人证实过——拿不准就先问一句，别当成真的）`}`;
@@ -259,36 +261,43 @@ export function openRecords(db) {
     }
 
     // 看得见的了结和链接：关上了谁（了结、回答）、换掉了谁（改掉）。只认发起那条记录还看得见的。
-    function linksOf(chatKey, rawBasis = false) { return memo('links', `${chatKey}|${rawBasis ? 1 : 0}`, () => readLinks(chatKey, rawBasis)); }
-    function readLinks(chatKey, rawBasis = false) {
-        const closed = new Map(), superseded = new Map(), outgoing = new Map();
-        const seen = q(`select r.id, r.type, r.idea_ref, r.known, l.to_id, l.kind, min(s.pos) pos from records r
+    function linksOf(chatKey, rawBasis = false, through = null) { return memo('links', `${chatKey}|${rawBasis ? 1 : 0}|${through ?? ''}`, () => readLinks(chatKey, rawBasis, through)); }
+    function readLinks(chatKey, rawBasis = false, through = null) {
+        const closed = new Map(), answered = new Map(), superseded = new Map(), outgoing = new Map();
+        const seen = q(`select r.id, r.type, r.idea_ref, r.outcome, r.known, l.to_id, l.kind, target.todo_kind target_kind, min(s.pos) pos from records r
                         join chats c on c.key = ? and c.story_id = r.story_id
                         join chat_seq s on s.chat_key = c.key and s.fp = r.fp
                         left join record_links l on l.from_id = r.id
+                        left join records target on target.id = coalesce(r.idea_ref, l.to_id)
                         where r.status = 'ok' and (r.type = '了结' or l.id is not null)
-                        group by r.id, l.id order by pos, r.id`).all(chatKey);
+                        ${through == null ? '' : `and s.pos <= ? and (target.id is null or exists (
+                            select 1 from chat_seq ts where ts.chat_key = c.key and ts.fp = target.fp and ts.pos <= ?))`}
+                        group by r.id, l.id order by pos, r.id`).all(...(through == null ? [chatKey] : [chatKey, through, through]));
         const check = !rawBasis && sourceReader ? memo('sourceReader', chatKey, () => sourceReader(chatKey)) : null;
-        for (const x of seen) {
-            if (!rawBasis && !liveSource(x.known ? JSON.parse(x.known) : [], chatKey, check)) continue;
-            if (x.type === '了结' && x.idea_ref != null && !closed.has(x.idea_ref)) closed.set(x.idea_ref, { id: x.id, pos: x.pos });
-            if ((x.kind === '回答' || x.kind === '证实') && !closed.has(x.to_id)) closed.set(x.to_id, { id: x.id, pos: x.pos, kind: x.kind });
+        const live = seen.filter(x => rawBasis || liveSource(x.known ? JSON.parse(x.known) : [], chatKey, check));
+        for (const x of live) {
             if ((x.kind === '改掉' || x.kind === '否定') && !superseded.has(x.to_id)) superseded.set(x.to_id, { id: x.id, pos: x.pos, kind: x.kind });
             if (x.kind) outgoing.set(x.id, [...(outgoing.get(x.id) ?? []), { to: x.to_id, kind: x.kind }]);
         }
-        return { closed, superseded, outgoing };
+        for (const x of live) {
+            if (superseded.has(x.id)) continue;
+            if (x.kind === '回答' && !answered.has(x.to_id)) answered.set(x.to_id, { id: x.id, pos: x.pos, kind: x.kind });
+            if ((x.kind === '回答' || x.kind === '证实') && x.target_kind !== 'action' && !closed.has(x.to_id)) closed.set(x.to_id, { id: x.id, pos: x.pos, kind: x.kind });
+            if (x.type === '了结' && x.idea_ref != null) closed.set(x.idea_ref, { id: x.id, pos: x.pos, outcome: x.outcome });
+        }
+        return { closed, answered, superseded, outgoing };
     }
 
     // 还开着的想法：看得见的"想法"里，没被看得见的"了结"（或"回答"）对应上的；还有讲到一半停下的"说"（unfinished，讲完了由"了结"关上）、
     // 说定了要办的"说"（约定，N-268：办了、不办了、改了、没办成都由"了结"关上）。被"改掉"的也不算开着。
-    function openIdeas(chatKey) {
-        const told = visible(chatKey, { type: '说' }).filter(r => r.unfinished || r.promise);
-        return [...visible(chatKey, { type: '想法' }), ...told].filter(r => !r.closed_by).sort((a, b) => a.pos - b.pos || a.id - b.id);
+    function openIdeas(chatKey, { through = null } = {}) {
+        const told = visible(chatKey, { type: '说', through }).filter(r => r.unfinished || r.promise);
+        return [...visible(chatKey, { type: '想法', through }), ...told].filter(r => !r.closed_by).sort((a, b) => a.pos - b.pos || a.id - b.id);
     }
 
     // 还没答的问题和要求（待办的说、做；约定另算）：最近 window 条里的、没被关上的。
-    function openTodos(chatKey, { lastPos = null, window = 150 } = {}) {
-        return visible(chatKey).filter(r => r.todo && ['说', '做'].includes(r.type) && !r.promise && !r.unfinished && !r.closed_by && (lastPos == null || lastPos - r.pos <= window));
+    function openTodos(chatKey, { lastPos = null, window = 150, through = null } = {}) {
+        return visible(chatKey, { through }).filter(r => r.todo && ['说', '做'].includes(r.type) && !r.promise && !r.unfinished && !r.closed_by && (r.todo_kind === 'action' || lastPos == null || lastPos - r.pos <= window));
     }
 
     function jobs(chatKey, limit = 20) {

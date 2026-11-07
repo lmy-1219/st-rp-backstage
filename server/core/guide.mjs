@@ -95,11 +95,11 @@ export function signLine(m, { nearPlace = null, names = [] } = {}) {
 }
 
 // menu：menuDays 套过日子的菜单；today：今天是第几天
-export function signposts({ menu = [], today, node = null, players = [], present = [], names = [], visible = [], max = GUIDE.max.default, nearPlace = null, render = t => t } = {}) {
+export function signposts({ menu = [], today, node = null, players = [], present = [], names = [], visible = [], messages = [], max = GUIDE.max.default, nearPlace = null, render = t => t } = {}) {
     if (!Number.isFinite(today)) return [];
     const picked = [], seen = new Set();
     const ok = menu.filter(m => LIVE.has(m.status) && entryOf(m) === '到现场' && placeText(m)
-        && !(Number.isFinite(m.ready_day) && today < m.ready_day) && !afterBlocked(m, menu) && goes(m, { players, present, names }))
+        && !(Number.isFinite(m.ready_day) && today < m.ready_day) && !afterBlocked(m, menu, x => x.status, { visible, messages }) && goes(m, { players, present, names }))
         .sort((a, b) => rank(a, node) - rank(b, node) || a.id - b.id);
     for (const m of ok) {
         const key = placeText(m);
@@ -135,7 +135,7 @@ export function skipLine({ menu = [], today, timeScale = DAY } = {}) {
 export function guideAt(input = {}) {
     const cfg = guideConfig(input.cfg), messages = input.messages ?? [];
     const st = stuckAt({ messages, events: input.events ?? [], shown: input.shown ?? null, quiet: cfg.quiet, scene: cfg.scene, same: input.same });
-    const items = signposts({ menu: input.menu, today: input.today, node: input.node, players: input.players, present: input.present, names: input.names, visible: input.visible, max: cfg.max, nearPlace: input.nearPlace, render: input.render });
+    const items = signposts({ menu: input.menu, today: input.today, node: input.node, players: input.players, present: input.present, names: input.names, visible: input.visible, messages, max: cfg.max, nearPlace: input.nearPlace, render: input.render });
     const skip = skipLine({ menu: input.menu, today: input.today, timeScale: input.timeScale });
     const scene = immersive(messages);
     const hasChoice = items.length > 0 || !!skip;

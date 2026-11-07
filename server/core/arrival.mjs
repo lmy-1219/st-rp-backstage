@@ -271,11 +271,12 @@ export function awaySpan(a, b, timeScale = DAY) {
 }
 
 // 完成标记也认结算那条的指纹：删改后恢复成原来的去办，不让旧结果留在事账里。
-export function validAwayPlan(plan, messages) {
+export function validAwayPlan(plan, messages, sourceLive = null) {
     // 记这份去向时的最后一条删了：这份去向就没了（试玩 10/7：删掉的那一版里记的"回去喝汤"一直挂着，进场那份照它写了"还没顾上去喝热汤"）
     if (plan?.fp && Number.isFinite(Number(plan.at)) && !messages.some(m => m.pos === Number(plan.at) - 1 && m.fp === plan.fp)) return null;
     // 他人到场、用掉了这份去向的那次进场还算数（他那条回复还在、或者正在写）：没了；那次进场不算了，去向回来（方案 删消息等于没发生过）
     if (plan?.dropped && arrivalLive(plan.dropped, [...messages].sort((a, b) => a.pos - b.pos))) return null;
     if (!plan?.errands) return plan;
-    return { ...plan, errands: plan.errands.map(e => e?.settled && !messages.some(m => m.pos === e.settled.pos && m.fp === e.settled.fp) ? e.text : e) };
+    return { ...plan, errands: plan.errands.map(e => e?.settled && (!messages.some(m => m.pos === e.settled.pos && m.fp === e.settled.fp)
+        || (Number.isFinite(e.settled.day) && sourceLive?.(e.settled) === false)) ? (e.text ?? { ...e, done: undefined, note: undefined, settled: undefined }) : e) };
 }

@@ -106,14 +106,20 @@ if (freshHome) log('new data folder: wrote the recommended config');
 const store = openStore(path.join(home, 'rp.sqlite'));
 const records = openRecords(store.db);
 const dayVersion = store.db.prepare('select total_changes() n');
-let dayCacheVersion = -1, dayCache = new Map();
+let dayCacheVersion = -1, dayCache = new Map(), pointCache = new Map();
 const confirmedDays = chatKey => {
     const ver = dayVersion.get().n;
-    if (ver !== dayCacheVersion) { dayCacheVersion = ver; dayCache = new Map(); }
+    if (ver !== dayCacheVersion) { dayCacheVersion = ver; dayCache = new Map(); pointCache = new Map(); }
     if (!dayCache.has(chatKey)) dayCache.set(chatKey, confirmedDayFor(store, { ...records, visible: key => records.visible(key, { rawBasis: true, type: '时间' }) }, chatKey));
     return pos => dayCache.get(chatKey)(pos + 0.5);
 };
-store.setConfirmedDayOf((chatKey, pos) => confirmedDays(chatKey)(pos), confirmedDays);
+const confirmedPoint = (chatKey, pos) => {
+    confirmedDays(chatKey);
+    if (!pointCache.has(chatKey)) pointCache.set(chatKey, timelineFor(store, { ...records, visible: key => records.visible(key, { rawBasis: true, type: '时间' }) }, chatKey));
+    const tl = pointCache.get(chatKey);
+    return { day: tl.firmDayOf(pos + 0.5), part: tl.firmRows.filter(r => r.pos <= pos).at(-1)?.part ?? null, parts: tl.parts };
+};
+store.setConfirmedDayOf((chatKey, pos) => confirmedDays(chatKey)(pos), confirmedDays, confirmedPoint);
 records.setSourceLive(store.sourceLive, store.sourceReader);
 const situation = openSituation(store.db);
 // 配置每次用时现读：用户改了钥匙或预算不用重启后台。
@@ -883,7 +889,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
     const own = ownDue ? { want: String(ownEntry.想干 ?? '').trim(), next: String(ownEntry.下一步 ?? '').trim() } : null;
     const rowAt = pos => tl.rows.find(r => r.pos === pos) ?? tl.rows.filter(r => r.pos <= pos).at(-1) ?? null;
     const unans = unanswered ? [unansweredLine(unanswered, { userName, span: awaySpan(rowAt(unanswered.since?.pos ?? last.pos), tl.rows.at(-1) ?? { day: tl.today, part: tl.part }, tl.scale) + `（隔了 ${last.pos - (unanswered.since?.pos ?? last.pos)} 条消息）` })] : [];
-    const promises = unanswered ? promisesFor(pending.items, { who, userName, same: sameP, plans: Object.values(plans).map(p => validAwayPlan(p, messages)).filter(Boolean) }) : [];
+    const promises = unanswered ? promisesFor(pending.items, { who, userName, same: sameP, plans: Object.values(plans).map(p => validAwayPlan(p, messages, source => store.basisLive(chatKey, source.pos, source.day))).filter(Boolean) }) : [];
     const spot = unanswered ? placeNow(store.stateNotesOf?.(chatKey) ?? [], { lastPos: last.pos, sameDay: pos => (tl.rows.filter(r => r.pos <= pos).at(-1)?.day ?? tl.today) === tl.today, fallback: board.camera?.from === 'state' || board.camera?.from === 'mark' ? board.camera.place ?? '' : '' }) : '';
     const here = unanswered ? [spot && `在${spot}`, (p => (p.length ? `身边有${p.join('、')}` : '身边没别人'))(board.people.filter(p => ['present', 'remote'].includes(p.status) && p.name !== CAMERA_NAME).map(p => p.name))].filter(Boolean).join('，') : '';
     const around = unanswered ? board.people.filter(p => p.card && p.name !== who && p.name !== CAMERA_NAME && ['away', 'absent'].includes(p.status) && (p.place || p.plan?.doing || p.plan?.errands?.length))
@@ -896,8 +902,8 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
         const costUsd = ((r.usage?.input ?? 0) * s.priceInPerM + (r.usage?.output ?? 0) * s.priceOutPerM) / 1e6;
         records.logAssemble({ chatKey, speaker: '(结算)', model: s.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
         const got = parseSettle(r.text); if (!got) return { ok: false };
-        const fp = last.fp;
-        const addSettle = data => records.addDerived({ ...data, known: [...(data.known ?? []), { basis: { pos: last.pos, fp, day: tl.today } }] });
+        const fp = last.fp, source = { pos: last.pos, fp, day: tl.today };
+        const addSettle = data => records.addDerived({ ...data, known: [...(data.known ?? []), { basis: source }] });
         // 他按自己的打算办到哪：落成他自己的一条（照去办的落法），下次露面那一格里带着（slot 的主角团那一块）；
         // 这一格时间记一笔推过了——结算没写"打算"也算推过，别再花一回
         if (own) {
@@ -907,7 +913,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
         for (const e of got.errands) {
             const item = errands.find(x => x.text === e.text); if (!item) continue;
             addSettle({ storyId: chat.story_id, fp, type: '做', text: `${who}这段时间：${e.note}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
-            for (const [key, p] of Object.entries(plans)) if (p?.who === who) p.errands = (p.errands ?? []).map(x => (x?.text ?? x) === e.text ? { text: e.text, done: e.result, note: e.note, settled: { pos: last.pos, fp } } : x);
+            for (const [key, p] of Object.entries(plans)) if (p?.who === who) p.errands = (p.errands ?? []).map(x => (x?.text ?? x) === e.text ? { text: e.text, done: e.result, note: e.note, settled: source } : x);
         }
         if (got.home && homeChanged(lifeSheet(records.visible(chatKey).filter(r => r.holder_name === who || (r.audience ?? []).includes(who)), { same: (a, b) => sameName(a, b, roster) }).people.find(p => sameName(p.name, who, roster))?.home ?? '', [leaving, ...errands.map(e => e.text)])) addSettle({ storyId: chat.story_id, fp, type: '改变', text: `${who}换了住处：${got.home}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who, life: { who, kind: '住处', now: got.home, gone: '' }, duration: '直到被改变' });
         if (got.mind) addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}这段时间心里：${got.mind}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
@@ -1079,7 +1085,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
                 ...store.menuOf(chatKey).filter(m => (m.goer === who || m.who === who) && m.errand && (m.status === 'waiting' || m.status === 'pocket')).map(m => m.errand)].slice(0, 6);
             const home = lifeSheet(visible, { same: (a, b) => sameName(a, b, roster) }).people.find(p => sameName(p.name, who, roster))?.home ?? '';
             let plan = boardPerson?.plan ?? null;
-            if (!boardPerson) try { plan = Object.values(JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {}).find(p => p?.who === who && p.errands) ?? null; } catch {}
+            if (!boardPerson) try { plan = Object.values(JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {}).map(p => validAwayPlan(p, msgs, source => store.basisLive(chatKey, source.pos, source.day))).find(p => p?.who === who && p.errands) ?? null; } catch {}
             // span 是给模型看的一句话（"同一天，早上走的，现在下午"），不是场面表的 stage；stage 另带着
             let contact = null; try { contact = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null'); } catch {}
             // 写下这条以后他已经自己进过场（landing.enteredSince 认隔离区间、进场记录）：过时了，不当"他想说的"给

@@ -83,9 +83,12 @@ function todoItems(records, messages, board, timeline, userName, same, boardAt =
         const namedAny = named.length ? named : known.filter(n => textOf(r.text).includes(n) || (r.about && same(r.about, n)));
         const targets = namedAny.length ? namedAny : (r.about && !same(r.about, asker) ? [r.about] : audience);
         const answer = r.closed_by;
-        let status = answer ? '有回音' : '等着', statusAt = answer?.pos ?? null;
+        const action = r.todo_kind === 'action';
+        const result = action && answer ? records.find(x => x.id === answer.id && x.type === '了结') : null;
+        const response = action && r.answered_by ? records.find(x => x.id === r.answered_by.id) : null;
+        let status = action ? (result ? ({ 做了: '办了', '不做了': '黄了', 没办成: '黄了', 改了: '改了', 过去了: '过去了' }[result.outcome] ?? '排着') : '排着') : answer ? '有回音' : '等着', statusAt = action ? result?.pos ?? null : answer?.pos ?? null;
         const remote = peopleAt(r.pos).find(p => same(p.name, asker) && ['remote', 'away'].includes(p.status));
-        if (!answer) {
+        if (!answer && !action) {
             const after = messages.filter(m => (m.pos ?? 0) > r.pos);
             // 谁开的口看 name（speaker 是头像文件名）；提问的人在外头时，只认正文里叫到他的那条（发给他的消息、打给他的电话）
             // "已回应"和各人那一格共用 recall.answeredTodo（从严：closed_by、紧接着的回应、有 2 字以上实词重合；无关的话不算）
@@ -95,8 +98,9 @@ function todoItems(records, messages, board, timeline, userName, same, boardAt =
             else if (expiredTodo(r, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos), scaleOf(timeline?.scale))) { status = '失效'; statusAt = num(timeline?.today) ?? null; }
         }
         const who = targets.length ? targets : audience;
-        out.push(base({ id: `ask:${r.id}`, kind: '要求', text: r.text, who, with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `对方 #${statusAt} 回了` : status === '失效' ? '过了时候' : '', settledBy: answer?.id }));
-        if (remote) out.push(base({ id: `wait:${r.id}`, kind: '等回音', text: r.text, who: [asker], with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `第${statusAt}条有回音` : `已等${scaleOf(timeline?.scale).span(Math.max(0, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos))).replace(' ', '')}`, settledBy: answer?.id }));
+        const why = action ? result ? `${result.outcome}（#${result.pos}）` : response && recordKnownTo(response, userName, same) ? '已回应，尚无办成记录' : '尚无办成记录' : status === '有回音' ? `对方 #${statusAt} 回了` : status === '失效' ? '过了时候' : '';
+        out.push(base({ id: `ask:${r.id}`, kind: '要求', text: r.text, who, with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why, settledBy: action ? result?.id : answer?.id }));
+        if (remote && !action) out.push(base({ id: `wait:${r.id}`, kind: '等回音', text: r.text, who: [asker], with: who, owner: asker, since: r.pos, source: { type: r.type, id: r.id }, status, statusAt, why: status === '有回音' ? `第${statusAt}条有回音` : `已等${scaleOf(timeline?.scale).span(Math.max(0, (num(timeline?.today) ?? 0) - dayAt(timeline, r.pos))).replace(' ', '')}`, settledBy: answer?.id }));
     }
     return out;
 }
@@ -164,8 +168,8 @@ function errandItems(awayPlans, board) {
     for (const plan of arr(awayPlans)) for (const [i, e] of arr(plan.errands).entries()) {
         const person = plan.who ?? plan.name ?? plan.avatar;
         const p = arr(board?.people).find(x => x.name === person);
-        const status = e.done === '办了' ? '办了' : e.done === '没办成' ? '黄了' : p?.status === 'present' ? '办了' : p?.stage === 'due' ? '到了' : '排着';
-        out.push(base({ id: `errand:${person}:${i + 1}`, kind: '去办', text: e.text ?? e.title ?? textOf(e), who: [person], owner: person, place: e.place ?? e.where ?? null, entry: '镜头外', when: plan.span ?? null, since: e.pos ?? plan.at ?? 0, source: { type: 'away_plan', id: person }, status, why: e.done ? e.note ?? '' : p?.status === 'present' ? '已经进场' : p?.stage ?? '还在外头' }));
+        const status = e.done === '办了' ? '办了' : e.done === '没办成' ? '黄了' : p?.stage === 'due' ? '到了' : '排着';
+        out.push(base({ id: `errand:${person}:${i + 1}`, kind: '去办', text: e.text ?? e.title ?? textOf(e), who: [person], owner: person, place: e.place ?? e.where ?? null, entry: '镜头外', when: plan.span ?? null, since: e.pos ?? plan.at ?? 0, source: { type: 'away_plan', id: person }, status, why: e.done ? e.note ?? '' : p?.status === 'present' ? '已回来，尚无办成记录' : p?.stage ?? '还在外头' }));
     }
     return out;
 }
@@ -212,12 +216,12 @@ const pendingCache = new Map();
 export function pendingFor(store, records, chatKey, { anchor = null, present = [], recentUser = '', timeline = null } = {}) {
     const chat = store.requireChat(chatKey);
     const all = store.currentMessages(chatKey);
-    const visible = records.visible(chatKey);
     const menu = store.menuOf(chatKey);
     const messages = anchor ? (() => {
         const m = /^(\d+):(.+)$/.exec(String(anchor));
         return m && all[Number(m[1]) - 1]?.fp === m[2] ? all.slice(0, Number(m[1])) : all;
     })() : all;
+    const visible = records.visible(chatKey, { through: anchor ? messages.at(-1)?.pos ?? -1 : null });
     const meta = {
         // 记下的去向，加上开局单里开场不在场的人（opening.mjs）
         away: JSON.stringify(awayPlansOf(store, chatKey, { messages: all })),
@@ -230,7 +234,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     // 版本里带上口袋各件的状态（进口袋、用上了是菜单日志变的，条数不变）
     const seqHash = createHash('sha1').update(messages.map(m => `${m.pos}:${m.fp}:${m.boardMark ?? ''}`).join('|')).digest('hex').slice(0, 16);
     const rowsHash = createHash('sha1').update((timeline?.rows ?? []).map(r => `${r.pos}:${r.day}:${r.part ?? ''}`).join('|')).digest('hex').slice(0, 16);
-    const key = JSON.stringify({ chatKey, seqHash, time: [timeline?.timeView ?? 'firm', timeline?.today, timeline?.part, rowsHash], records: [visible.length, visible.at(-1)?.id ?? null], menu: menu.map(m => `${m.id}:${m.status}:${m.held_by ?? ''}`).join(','), meta, anchor, present, recentUser });
+    const key = JSON.stringify({ chatKey, seqHash, time: [timeline?.timeView ?? 'firm', timeline?.today, timeline?.part, rowsHash], records: visible.map(r => `${r.id}:${r.closed_by?.id ?? ''}:${r.answered_by?.id ?? ''}:${r.superseded_by?.id ?? ''}`).join(','), menu: menu.map(m => `${m.id}:${m.status}:${m.held_by ?? ''}`).join(','), meta, anchor, present, recentUser });
     if (pendingCache.has(key)) {
         const value = pendingCache.get(key); pendingCache.delete(key); pendingCache.set(key, value); return value;
     }
@@ -245,7 +249,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     const rel = store.relationsOf?.(chat.story_id);
     const relation = rel ? normalizeRelations(rel) : null;
     const same = (a, b) => sameName(a, b, rosterNames) || (!!relation && !!personOf(relation, a, rosterNames) && personOf(relation, a, rosterNames) === personOf(relation, b, rosterNames));
-    awayPlans = Object.values(awayPlans).map(p => validAwayPlan(p, messages)).filter(Boolean);
+    awayPlans = Object.values(awayPlans).map(p => validAwayPlan(p, messages, source => store.basisLive?.(chatKey, source.pos, source.day) !== false)).filter(Boolean);
     // 结算写下的"要来联系"：按名册认人——以前有用别名记下的（试玩 10/12：等着没人接那条路写成了短名，名册里是全名，
     // 认不出"他后来自己进了场""这条用掉了"，一条早该作废的消息每轮都挂着）；同一个人有几笔，留最新那笔
     const contacts = [];

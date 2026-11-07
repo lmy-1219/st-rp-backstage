@@ -196,9 +196,15 @@ export function diffSequences(oldFps, newFps) {
 
 export function openStore(file) {
     const db = new DatabaseSync(file);
-    let confirmedDayOf = null, confirmedDaysOf = null;
-    const setConfirmedDayOf = (fn, daysFn = null) => { confirmedDayOf = fn; confirmedDaysOf = daysFn; };
-    const basisLive = (chatKey, pos, basisDay) => !Number.isFinite(basisDay) || !confirmedDayOf || (Number.isInteger(pos) && confirmedDayOf(chatKey, pos) >= basisDay);
+    let confirmedDayOf = null, confirmedDaysOf = null, confirmedPointOf = null;
+    const setConfirmedDayOf = (fn, daysFn = null, pointFn = null) => { confirmedDayOf = fn; confirmedDaysOf = daysFn; confirmedPointOf = pointFn; };
+    const basisLive = (chatKey, pos, basisDay, basisPart = null) => {
+        if (basisPart == null) return !Number.isFinite(basisDay) || !confirmedDayOf || (Number.isInteger(pos) && confirmedDayOf(chatKey, pos) >= basisDay);
+        if (!Number.isFinite(basisDay) || !Number.isInteger(pos) || !confirmedPointOf) return false;
+        const point = confirmedPointOf(chatKey, pos), parts = point?.parts ?? [];
+        const before = parts.indexOf(basisPart), now = parts.indexOf(point?.part);
+        return before >= 0 && Number.isFinite(point?.day) && (point.day > basisDay || (point.day === basisDay && now >= before && now >= 0));
+    };
     db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma busy_timeout = 3000;');
     db.exec(SCHEMA);
     for (const column of ['partial text', 'continuation text', 'partial_kind text', 'repairable integer not null default 0', 'repair_error text', 'repaired integer not null default 0', 'source text']) {
@@ -249,6 +255,7 @@ export function openStore(file) {
     // 六格（章程 F1）：用意、触发（JSON）、时效（JSON）、前提、接了会怎样、没接会怎样；菜单项上读作 purpose、trigger、ttl、premise、ifTaken、ifSunk
     for (const col of ['purpose', 'trig', 'ttl', 'premise', 'if_taken', 'if_sunk', 'category', 'close_text', 'twist', 'lead', 'intimate']) { try { db.exec(`alter table menu add column ${col} text`); } catch {} }   // intimate：亲密线四格 JSON，旧件为 null
     try { db.exec('alter table menu_log add column why text'); } catch {}   // 这一步为什么（过期了"没赶上：……"、前提不成立、被新规划替换）
+    try { db.exec('alter table menu_log add column basis_part text'); } catch {}
     try { db.exec('alter table menu_log add column by_plan integer'); } catch {}
     // 每条消息当最后一条时的小快照（rewind.mjs：删回去以后拿重算的和它比，对不上的亮出来）
     db.exec('create table if not exists snapshots(chat_key text not null, pos integer not null, fp text not null, data text not null, at text not null, primary key(chat_key, fp))');   // 交给某人那一格里的一步（递给他、用上了、顺带提了）：等他那条回复（方案 删消息等于没发生过）
@@ -789,13 +796,14 @@ export function openStore(file) {
     function sourceReader(chatKey) {
         const history = historyOf(chatKey), currentFps = currentMessages(chatKey).map(m => m.fp), days = new Map();
         let confirmed;
-        const dayLive = (pos, day) => !Number.isFinite(day) || !confirmedDayOf || (Number.isInteger(pos) && (days.has(pos) ? days.get(pos) : (days.set(pos, (confirmed ??= confirmedDaysOf?.(chatKey) ?? null) ? confirmed(pos) : confirmedDayOf(chatKey, pos)), days.get(pos))) >= day);
+        const dayLive = (pos, day, part = null) => part != null ? basisLive(chatKey, pos, day, part)
+            : !Number.isFinite(day) || !confirmedDayOf || (Number.isInteger(pos) && (days.has(pos) ? days.get(pos) : (days.set(pos, (confirmed ??= confirmedDaysOf?.(chatKey) ?? null) ? confirmed(pos) : confirmedDayOf(chatKey, pos)), days.get(pos))) >= day);
         return source => {
-        if (!history.sees(chatKey, source.pos, source.fp) || !dayLive(source.pos, source.day)) return false;
+        if (!history.sees(chatKey, source.pos, source.fp) || !dayLive(source.pos, source.day, source.part)) return false;
         const current = currentFps[source.pos];
         if (source.exact && current !== source.fp) return false;
-        if (source.menuStatus) return q('select fp, story_day from menu_log where chat_key = ? and item_id = ? and status = ? and pos = ?').all(chatKey, source.menu, source.menuStatus, source.pos)
-            .some(row => sameMessage(current, row.fp) && dayLive(source.pos, row.story_day));
+        if (source.menuStatus) return q('select fp, story_day, basis_part from menu_log where chat_key = ? and item_id = ? and status = ? and pos = ?').all(chatKey, source.menu, source.menuStatus, source.pos)
+            .some(row => sameMessage(current, row.fp) && dayLive(source.pos, row.story_day, row.basis_part));
         return true;
         };
     }
@@ -1134,7 +1142,7 @@ export function openStore(file) {
         const items = q(`select * from menu where plan_id in (${marks}) order by id`).all(...ids)
             .filter(m => (m.anchor_pos == null || h.sees(m.chat_key, m.anchor_pos, m.anchor_fp)) && (!getMeta(`event_source:${m.id}`) || sourceLive(chatKey, JSON.parse(getMeta(`event_source:${m.id}`)))));
         const steps = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids)
-            .filter(s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && basisLive(chatKey, s.pos, s.story_day) && replied(s));
+            .filter(s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && basisLive(chatKey, s.pos, s.story_day, s.basis_part) && replied(s));
         for (const m of items) {
             readCells(m);
             m.cause = causeFor(chatKey, fromJson(m.cause_ref)) ? fromJson(m.cause_ref) : null;
@@ -1192,8 +1200,8 @@ export function openStore(file) {
             if (last && last.status === 'offered' && last.pos === at.pos && last.fp === at.fp && (last.by_name ?? null) === (patch.by ?? null)) return;
         }
         // pending：交给某人那一格里的一步，等他那条回复（见 menuOf）；只有写了是谁的才等
-        q('insert into menu_log(chat_key, item_id, status, story_day, pos, fp, by_name, pending, why, created_at, by_plan) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-            .run(chatKey, id, patch.status, patch.pocket_day ?? patch.basisDay ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now(), Number.isSafeInteger(patch.byPlan) && patch.byPlan > 0 ? patch.byPlan : null);
+        q('insert into menu_log(chat_key, item_id, status, story_day, basis_part, pos, fp, by_name, pending, why, created_at, by_plan) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(chatKey, id, patch.status, patch.pocket_day ?? patch.basisDay ?? null, patch.basisPart ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now(), Number.isSafeInteger(patch.byPlan) && patch.byPlan > 0 ? patch.byPlan : null);
     }
 
     // ---------- 外援（API 没响应时交给桌面应用里的 AI 窗口做的活） ----------

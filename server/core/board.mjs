@@ -165,7 +165,7 @@ export function boardAt(input = {}) {
         const arrived = meta && (!mineIn || (Number(meta.at) === Number(mineIn.at) && meta.fp === mineIn.fp)) ? meta : mineIn?.how ? { ...mineIn, who: mineIn.who ?? person.name } : null;
         // 开局单里开场不在场的那份去向（opening.mjs）：名单里有他（人就在这儿）就不算
         const planned = planFor(input.awayPlans, person);
-        const plan = planned?.seed && present.has(person.name) ? null : validAwayPlan(planned, messages);
+        const plan = planned?.seed && present.has(person.name) ? null : validAwayPlan(planned, messages, input.sourceLive);
         const leave = lastLeave(own, avatar, pos + 1);
         const inGroup = present.size ? present.has(person.name) : !!segment;
         const remote = validRemote(arrived, messages, inGroup, input.stateNotes ?? [], roster.map(p => p.name));
@@ -286,7 +286,7 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
         const messages = uptoAnchor(all, anchor);
         const key = `${messages.length}|${messages.at(-1)?.fp ?? ''}`;
         if (done.has(key)) return done.get(key);
-        const value = boardAt({ messages, marks: messages.map(m => m.boardMark), stateNotes, anchors, roster, arrived, arrivals, knocks, knockLive: e => store.knockLive?.(chatKey, e), awayPlans, present: present ?? [], recentUser, timeline: timeline ?? {}, homes });
+        const value = boardAt({ messages, marks: messages.map(m => m.boardMark), stateNotes, anchors, roster, arrived, arrivals, knocks, knockLive: e => store.knockLive?.(chatKey, e), awayPlans, sourceLive: source => store.basisLive?.(chatKey, source.pos, source.day) !== false, present: present ?? [], recentUser, timeline: timeline ?? {}, homes });
         done.set(key, value);
         return value;
     };

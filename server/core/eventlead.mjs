@@ -72,21 +72,21 @@ const entryFor = (m, done = {}, moves = []) => { const e = done?.[m.id]; const m
 export const leadOut = (lead, move = null) => !!lead && DONE.has(lead.status) && !(move && Number.isFinite(lead.settled_pos) && lead.settled_pos < move.at?.pos);
 // 引子自己到点了没（用户 10/25：没到时间点的东西不递给前台）：自己的日子到了（没写日子的当到了），"在哪件之后"那件也了结了（判法同 stepPocket）。
 // 活动快到了不等于引子能先拿出来：没到点的不挂门，预告只给模糊风声
-export const leadReady = (lead, menu = [], today) => !!lead && !(Number.isFinite(lead.ready_day) && Number.isFinite(today) && today < lead.ready_day) && !afterBlocked(lead, menu);
-const leadCandidateReady = (lead, menu, today, move = null) => leadReady(lead, menu, today) && entryOf(lead) === '找上门'
+export const leadReady = (lead, menu = [], today, evidence = {}) => !!lead && !(Number.isFinite(lead.ready_day) && Number.isFinite(today) && today < lead.ready_day) && !afterBlocked(lead, menu, x => x.status, evidence);
+const leadCandidateReady = (lead, menu, today, move = null, evidence = {}) => leadReady(lead, menu, today, evidence) && entryOf(lead) === '找上门'
     && (LIVE.has(lead.status) || (DONE.has(lead.status) && move && Number.isFinite(lead.settled_pos) && lead.settled_pos < move.at?.pos));
 
 // 该升级的那几件（折一次时）：活动还排着、在口袋里，到了它那一格的前一格（只有当格的就当格），引子还没拿出来，也还没升级过。
 // canDoor(引子)：挂得上门（找上门、牵头的人有卡又不在场）。返回 [{ event, lead, how: 'door'|'line' }]
-export function leadSteps(menu = [], { today, part = null, node = null, done = {}, moves = [], canDoor = () => false } = {}) {
+export function leadSteps(menu = [], { today, part = null, node = null, done = {}, moves = [], canDoor = () => false, visible = [], messages = [] } = {}) {
     const out = [], leads = new Set();
     if (!Number.isFinite(today)) return out;
     for (const m of menu) {
-        if (!LIVE.has(m.status) || !datedEvent(m, { node })) continue;
+        if (!LIVE.has(m.status) || !datedEvent(m, { node }) || afterBlocked(m, menu, x => x.status, { visible, messages })) continue;
         if (today < m.ready_day - 1 || today > m.ready_day) continue;
         if (entryFor(m, done, moves)) continue;
         const lead = leadOf(m, menu);
-        if (!leadCandidateReady(lead, menu, today, moveOf(m, moves)) || !triggerTimeReady(lead, part)) continue;
+        if (!leadCandidateReady(lead, menu, today, moveOf(m, moves), { visible, messages }) || !triggerTimeReady(lead, part)) continue;
         if (leadOut(lead, moveOf(m, moves))) continue;
         if (lead && leads.has(lead.id)) { out.push({ event: m, lead, how: 'shared' }); continue; }   // 几件活动共用一个引子：只送一回，后面几件跟着记成升级过
         if (lead) leads.add(lead.id);
@@ -194,7 +194,7 @@ export function eventStep(store, records, chatKey, { menu = [], messages = [], t
     const done = liveMap(read(store, LEADS_KEY(chatKey), {}), messages, store, chatKey);
     const canDoor = lead => entryOf(lead) === '找上门' && !!tidy(lead.who) && lead.who !== WORLD && !herName(lead.who, player)
         && roster.some(e => hasCard(e) && same(e.name, lead.who)) && !here.some(n => same(n, lead.who));
-    const steps = leadSteps(menu, { today: firmToday, part, node, done, moves, canDoor });
+    const steps = leadSteps(menu, { today: firmToday, part, node, done, moves, canDoor, visible: records.visible(chatKey), messages });
     for (const s of steps) {
         if (s.how === 'door' && s.lead.status !== 'pocket') store.updateMenu(chatKey, s.lead.id, { status: 'pocket', pocket_day: firmToday, by: '引子', why: '有日子的活动快到了，引子还没送到：挂到门上', at });
         done[s.event.id] = { how: s.how, lead: s.lead?.id ?? null, at, basisDay: firmToday };
@@ -221,7 +221,7 @@ export function markEchoed(store, chatKey, ids = [], at, basisDay = null) {
 
 // 组那一格时（slot.extrasFor）：升级成"下一句"、还没给出去的那几件，放在这一格最前面；给了记在被回的那条上（左滑重来照给，删了那条重给）。
 // 活动已经过去了、撤了，或者引子在升级以后拿出来了：不再给。retime(文字, 写的那一格)：规划写的"明晚"按今天换说法
-export function leadNotice(store, chatKey, { menu = [], messages = [], anchorMsg = null, today, part = null, retime = t => t } = {}) {
+export function leadNotice(store, chatKey, { menu = [], messages = [], visible = [], anchorMsg = null, today, part = null, retime = t => t } = {}) {
     const all = read(store, LEADS_KEY(chatKey), {});
     const rows = [];
     const seen = new Set();
@@ -229,9 +229,9 @@ export function leadNotice(store, chatKey, { menu = [], messages = [], anchorMsg
         if (e?.how !== 'line' || !liveAt(e.at, messages, store, chatKey, e.basisDay)) continue;
         if (e.given && liveAt(e.given, messages, store, chatKey, e.basisDay) && e.given.pos !== anchorMsg?.pos) continue;
         const m = menu.find(x => String(x.id) === id);
-        if (!m || !LIVE.has(m.status) || (Number.isFinite(today) && m.ready_day < today)) continue;
+        if (!m || !LIVE.has(m.status) || afterBlocked(m, menu, x => x.status, { visible, messages }) || (Number.isFinite(today) && m.ready_day < today)) continue;
         const lead = e.lead != null ? menu.find(x => x.id === e.lead) : null;
-        if (!lead || leadOf(m, menu)?.id !== lead.id || !leadCandidateReady(lead, menu, today, m.moved) || !triggerTimeReady(lead, part) || seen.has(lead.id)) continue;
+        if (!lead || leadOf(m, menu)?.id !== lead.id || !leadCandidateReady(lead, menu, today, m.moved, { visible, messages }) || !triggerTimeReady(lead, part) || seen.has(lead.id)) continue;
         seen.add(lead.id);
         rows.push({ event: m, lead, text: tidy(retime(lead.surface, lead.said_day)) });
     }

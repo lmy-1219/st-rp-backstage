@@ -112,7 +112,7 @@ export const PLAN_SYSTEM = [
     '每件事写：哪条线；谁牵头（名册或关系表里的人；这个节点要用到名册里没有的人——一个房东、一个同行、一个新搬来的——先在"新面孔"里列出名字、一句是谁、熟不熟（街坊熟人／生人）、没名字时怎么叫（称呼："街角面摊的老板""柜台后那个女人"），就能写他，程序会记进名册；',
     '  生人在露面、应答、知情里只用称呼，不写名字——城里没人知道每个陌生人叫什么，名字留在后台，主角那边问了、查了、看见名牌才用；街坊熟人可以直接叫名字；',
     '只为这一局编，别借原作或别的故事里的人；真不是哪个人牵头的——传闻、某个势力的动静、这个地方本身的变化——才写"世界"）；露面——一句可以被看见的事（它冒出来的样子，不写它怎么收场）；应答——玩家那边伸手、问起时它的内容（前台不会吊着给，但牵头的人怎么给、留不留一手由他）；',
-    '沉底——一直没人理会会怎样，一句，不带责备；第几天后（从今天起算，0＝现在就行）；在哪件之后（写那件的题，上一份里还排着的旧件的题也行；没有就空着）；用在什么场面（玩家看得到的那一刻：在场的人在哪、在干什么时它冒出来；别写"或者某人回来说起"）、分量多大（一句/半轮/一整轮）；',
+    '沉底——没人理会会怎样，一句，不责备；第几天后（今天为0）；在哪件之后（确实依赖那件办成才填题，单纯接续留空）；用在什么场面（在场的人在哪、干什么时看见它）、分量多大（一句/半轮/一整轮）；',
     '进场——这件事怎么来到眼前，三选一：找上门（来电、敲门、楼下撞见、捎来的话，到了日子就能冒出来）；到现场（得有人去了那个地方才碰得上：看房碰上的中介、零件摊、包厢里等着的人）——再写"在哪"（几个字）、"谁去"（实际会去的人）、"由头"（这个人凭眼下知道的事，为什么想去；写本人需要，不预告现场的遭遇）、"路标"（玩家已经知道的去处和理由；还不知道就空着）。到场前需要递由头时，"入戏依据"写 {"本人打算":"姓名"}，或 {"记录":[本次材料中的编号]}；自己的打算只交给本人，已有消息保留是谁怎样知道的；镜头外（玩家不在的时候发生在牵头的人身上，他一个人去办事撞上的——那就是他自己的经历，剧情时间真过去了才算发生，提不提、怎么提由他）。能当着玩家发生的，别写成镜头外。',
     LEAD_NOTE,
     '每件事再说清它是干什么用的、什么时候冒出来、什么时候作废、靠什么还成立、接了不接各落下什么、最多走到哪就算完（用意、触发、时效、前提、接了会怎样、没接会怎样、收尾，写法看最后的样例）——用意只写主线／关系／意外／氛围四个词之一，别写句子；其余几格各一两句，写实在的，别复述露面和触发。',
@@ -127,7 +127,7 @@ export const PLAN_SYSTEM = [
     '【说好的事】是角色和玩家自己定下的：排事以它们为骨架——到了那天会遇上什么、办的时候会撞见谁，排成跟着它的事（"跟着约定"写它的编号）；别排会把它挤掉的事。办不办、怎么办由前台和玩家；',
     '事件若明确接着本次材料里带编号的已发生事实，可以写「起因」：{"记录": 编号}；若接着已有菜单的真实结果，可以写 {"菜单结果": 编号}。拿不准就不写，不能凭同人同地猜。编号只用于核对，不放进露面、应答或知情。',
     '已经有了结果的（办了、改了、没办成、就这么过去了），按结果排后续：谁因此高兴、失望、起疑、借机、找上门，小事也算，不带责备。几件事可以撞在同一天，让人分身乏术——先顾哪件、不顾哪件是角色自己的选择，都会有后果。',
-    '【上一个节点里的事】里玩家接了的事写明了往后会落下什么；拿出来了还没下文的列在【还没下文的口子】里，每件在"口子"里答一句：收（"落地"写它是怎么落地的，一句，程序记成了结）或续（这一份里排一件接着它的，"续成"写那件的题，那件的"在哪件之后"写它）——续的才排后续，一件最多续一次，标了"这次只能收"的只能收；过程性的、玩家没再追的，收。沉了的，牵头的人心里记着，也可以从这里长出事来。',
+    '【上一个节点里的事】带着先前的走向；已发生的结果照事实接。没下文的口子逐件答收或续：收写一句落地；续在这一份排接着处理它的事，续成写题，在哪件之后仅用于确实依赖前件办成的事。一件最多续一次，标了这次只能收的就收；过程性的、玩家没再追的，收。沉了的事也可以留下影响。',
     '那里面还排着、在口袋里的，每件在"旧件"里答一句：留（照旧留着，这一份别再写它）、撤（不合眼下了）、换（这一份里有一件接替它，"换成"写那件的题）。',
     '【用过的母题】里多的，这一份少用，要用就换个角度；【这一份的骰子】骰子只给你起念头，用得上就用，别为凑数硬排（骰子上的词换成这一局里说得通的样子，怎么长由你）。各格里别提"骰子"。',
     '',
@@ -152,7 +152,7 @@ export const PLAN_SYSTEM = [
     ' "旧件": [{"题": "上一份那件的题", "处理": "留|撤|换", "换成": "换的时候写接替它的那件的题"}],',
     ' "口子": [{"题": "那件的题", "处理": "收|续", "落地": "收的时候：它是怎么落地的，一句", "续成": "续的时候：这一份里接着它的那件事的题"}],',
     ' "事件": [{"线": "...", "谁": "...", "题": "几个字", "露面": "...", "应答": "...", "沉底": "...", "知情": "...", "来由": "...", "第几天后": 0, "在哪件之后": "", "跟着约定": "", "用在": "...", "进场": "找上门|到现场|镜头外", "在哪": "", "谁去": "", "由头": "", "路标": "", "入戏依据": null, "引子": "", "分量": "...", "母题": "...",',
-    '   "类别": "撑的是开局单类别里的哪一样", "用意": "主线|关系|意外|氛围", "触发": {"场景": "镜头在哪、谁在场", "目标": "哪件事办成／没办成（也写进在哪件之后）", "时间": "第几天、什么时段（也写进第几天后）"}（用得上的写，可叠加）,',
+    '   "类别": "开局单类别中的哪一样", "用意": "主线|关系|意外|氛围", "触发": {"场景": "镜头在哪、谁在场", "目标": "所依赖的实际结果；失败的后续引用事实起因", "时间": "第几天、什么时段（也写进第几天后）"}（按需，可叠加）,',
     '   "时效": {"只在那场戏": "跟着人：谁｜跟着地方：哪儿｜跟着时间：什么时候"} 或 "当天|三天内|一直", "前提": "这件事成立靠的什么还没变", "接了会怎样": "往后落下什么", "没接会怎样": "牵头的人心里记下什么、外头有什么动静",',
     '   "收尾": "这件事最多走到哪就算完、完了落下什么，一句", "变数": "这一场的一个意外和它为了什么；照直来更好看才空着"}]}',
 ].join('\n');
@@ -372,10 +372,20 @@ export function buildBrief(s) {
         ...s.gaps.map(g => `· ${g.who}「${g.title}」：挂了${g.age > 0 ? ` ${ts.span(g.age)}` : `不到一${ts.word}`}（收期 ${ts.span(g.close)}${g.age >= g.close ? '，已经过了' : ''}）`
             + `${g.closeText ? `；上一份写的收尾：${clip(g.closeText, 100)}` : g.ifTaken ? `；没写收尾（接了会怎样：${clip(g.ifTaken, 100)}）` : ''}${g.cont >= 1 ? '；已经续过一次，这次只能收' : ''}`));
     // 旧件带一行露面（三家对比：只给题，有的同题重写了七件，口袋里会有两份），并说清怎么处理
+    const oldSketch = m => {
+        if (!['void', 'expired'].includes(m.status)) return '';
+        const sentence = (value, left) => { const t = String(value ?? '').trim(); if (t.length <= left) return t; return [...t.matchAll(/[。！？；;]/g)].map(x => t.slice(0, x.index + 1)).filter(x => x.length <= left).at(-1) ?? ''; };
+        let line = '旧安排的来由/设想（未据此认定已发生）';
+        for (const [label, value] of [['撤下缘由', m.why], ['原来由', m.origin], ['接了会怎样', ifTakenOf(m)]]) {
+            const part = sentence(value, 240 - line.length - label.length - 2);
+            if (part) line += `；${label}：${part}`;
+        }
+        return line;
+    };
     if (s.menu.length) out.push('', node?.目标 ? '【上一个节点里的事】' : '【上一张菜单的情况】', MENU_NOTE,
         ...s.menu.flatMap(m => [`· ${Number.isSafeInteger(m.id) ? `[事${m.id}] ` : ''}${m.line ? `〔${m.line}〕` : ''}${m.who}「${m.title}」：${m.taken && m.status === 'shown' ? '拿出来了，玩家伸手了' : { waiting: '还排着，没放出来', pocket: '还排着，在口袋里', shown: '拿出来了', used: '用上了', sunk: '沉底了', sunk_told: '沉底了', void: '不成立了，撤了', expired: '没赶上，过期了' }[m.status] ?? m.status}`
             + ((m.taken ?? m.status === 'used') && ifTakenOf(m) ? ` → 往后：${ifTakenOf(m)}` : /sunk/.test(m.status) && ifSunkOf(m) ? `（没接：${ifSunkOf(m)}）` : ''),
-        ...(String(m.surface ?? '').trim() ? [`  露面：${clip(m.surface, 60)}`] : [])]));
+        ...(String(m.surface ?? '').trim() ? [`  露面：${clip(m.surface, 60)}`] : []), ...(oldSketch(m) ? [`  ${oldSketch(m)}`] : [])]));
     if (s.bringNext?.length) out.push('', '【上次你说下次要带上的】', ...s.bringNext.map(x => `· ${x}`));
     // 母题账和骰子（白皮书 §5.7：多样性只能来自程序掷骰＋用过的母题记账）
     if (s.motifs?.length) out.push('', '【用过的母题】（这一局出过的事按类数的，多的在前）', ...s.motifs.slice(0, 16).map(m => `· ${m.motif} ×${m.n}`));
@@ -414,7 +424,7 @@ const clip = (t, n) => { const s = String(t ?? '').replace(/\s+/g, ' ').trim(); 
 // 上一份的事怎么处理（三家对比：只给题、没说会不会留着，同一拍子被重写，口袋里出两份；第二轮：说了"别重复"照样重写，
 // 过时的旧件也没人撤——章程 H3 改成每件还排着的都答留／撤／换，程序照答办）
 // 章程 K1：拿出来了、用上了的不再一律"接着写后续"（每件事只往下长、收不住）——还没下文的在【还没下文的口子】里答收还是续
-export const MENU_NOTE = '（拿出来了、用上了的，还没下文的在【还没下文的口子】里答收还是续；沉了、过期了、撤了的，别重排同一拍子；还排着的、在口袋里的，每件在"旧件"里答留、撤还是换——留下的照旧留着，别再写一遍）';
+export const MENU_NOTE = '（拿出来却没着落的，在口子里答收或续；撤下、过期只是旧安排的结局，结合撤下缘由与事实，看尚合理的影响能怎样接续。玩家已放下的尊重其选择。还排着、在口袋里的逐件答留、撤或换，留下的沿用。）';
 
 // ---------- 还没下文的口子（章程 K1，方案"收尾与聚焦"二.2） ----------
 // 拿出来了（shown／used）、记成了"碰上的事"（matters.mjs）、还没了结的那几件：规划逐件答收还是续，程序照答办（K2）。
@@ -1241,8 +1251,18 @@ export function parseNodeCheck(text) {
 // 掷骰（可复现）：同一条、同一天，结果不变。
 // shown＝角色已经把这件事拿出来了（记账认出来的，D-100）；接下来给后半截，然后算 used。
 export const SETTLED = new Set(['used', 'shown', 'sunk', 'sunk_told', 'void', 'expired']);
-// "在哪件之后"：同一份规划里那件还没了结，这件就先等着；题目对不上就不拦（stepPocket、引子到点没都用这一个）
-export const afterBlocked = (m, menu = [], statusOf = x => x.status) => !!m?.after_title && menu.some(x => x.id !== m.id && x.plan_id === m.plan_id && x.title === m.after_title && !SETTLED.has(statusOf(x)));
+// 后件只凭同一窗口里有原文依据的实际成功解锁；菜单状态不是办成的证据。
+export function afterBlocked(m, menu = [], statusOf = x => x.status, { visible = [], messages = [] } = {}) {
+    if (!m?.after_title) return false;
+    const same = menu.filter(x => x.plan_id === m.plan_id && x.title === m.after_title);
+    const prior = same.length ? same : menu.filter(x => x.plan_id < m.plan_id && x.title === m.after_title);
+    if (prior.length !== 1 || prior[0].id === m.id) return true;
+    const quoted = r => Array.isArray(r.quotes) && r.quotes.length > 0 && r.quotes.every(q =>
+        typeof q === 'string' && q.trim() && messages.some(msg => msg.fp === r.fp && String(msg.text ?? '').includes(q)));
+    return !visible.some(r => r.type === '做' && r.matter?.menu === prior[0].id && !r.matter?.kind
+        && visible.some(end => end.type === '了结' && end.idea_ref === r.id && end.outcome === '做了' && quoted(end))
+        && !visible.some(end => end.type === '了结' && end.idea_ref === r.id && end.outcome !== '做了'));
+}
 
 export const roll = (key, sides) => parseInt(createHash('sha256').update(String(key)).digest('hex').slice(0, 8), 16) % sides;
 
@@ -1268,7 +1288,7 @@ export const NOW_MOTIF = '后续·当下';
 // timeScale：这一局的尺度——放几格沉底按它（天尺度 2 天、慢沉 5 天；年尺度 1 年、2 年）；按消息数沉的不变。
 // pace：这局的节奏（章程 H2，tempo.paceOf）——份数、沉底的格数和条数、氛围意外各几件、一场戏叠几件；不给就是中档（和以前一样）。
 // stacked：此刻这场戏里已经拿出来、还没下文的有几件（stackedHere）；到了这一档的上限，别的先不进口袋（镜头外的、局势排的"当下"、跟着约定的不算）。
-export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, firm = null, hold = null, keep = () => false, gone = null, timeScale = DAY, pace = null, stacked = 0, contentTier = null }) {
+export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, firm = null, hold = null, keep = () => false, gone = null, timeScale = DAY, pace = null, stacked = 0, contentTier = null, visible = [], messages = [] }) {
     const ts = scaleOf(timeScale);
     const basePace = paceOf(pace, ts);
     const intimateFirst = contentTier === '纯NSFW';
@@ -1278,7 +1298,7 @@ export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, fir
     const changes = [];
     if (gone) for (const m of menu.filter(m => m.status === 'pocket' || m.status === 'waiting')) {
         const g = gone(m);
-        if (g?.status) changes.push({ id: m.id, status: g.status, why: g.why ?? '', ...(Number.isFinite(g.basisDay) ? { basisDay: g.basisDay } : {}) });
+        if (g?.status) changes.push({ id: m.id, status: g.status, why: g.why ?? '', ...(Number.isFinite(g.basisDay) ? { basisDay: g.basisDay } : {}), ...(g.basisPart ? { basisPart: g.basisPart } : {}) });
     }
     const out = m => changes.some(c => c.id === m.id);
     const sink = firm ?? { today, dayOf };
@@ -1297,7 +1317,7 @@ export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, fir
         changes.push(change);
     }
     const gate = pocketGate(menu, { today: sink.today, part, at, hold, pace: p, stacked, contentTier, timeScale, gone,
-        statusOf: m => changes.find(c => c.id === m.id)?.status ?? m.status });
+        statusOf: m => changes.find(c => c.id === m.id)?.status ?? m.status, visible, messages });
     for (const m of gate.ready) {
         if (!gate.canEnter(m.id)) continue;
         changes.push({ id: m.id, status: 'pocket', pocket_day: sink.today });
@@ -1310,11 +1330,11 @@ export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, fir
 
 // 普通入袋和兴头提前共用；唯一可免的是候选件的 ready_day。
 // statusOf 让普通步进看见本轮先过期／沉底的结果；提前按写入前的最新菜单重建。
-export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone = null, pace = null, stacked = 0, contentTier = null, timeScale = DAY, statusOf = m => m.status } = {}) {
+export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone = null, pace = null, stacked = 0, contentTier = null, timeScale = DAY, statusOf = m => m.status, visible = [], messages = [] } = {}) {
     const base = paceOf(pace, scaleOf(timeScale)), intimateFirst = contentTier === '纯NSFW';
     const p = intimateFirst ? { ...base, mix: { ...base.mix, 亲密: base.name === '慢' ? 1 : 2 } } : base;
     const now = m => m.motif === NOW_MOTIF;
-    const blocked = m => afterBlocked(m, menu, statusOf);
+    const blocked = m => afterBlocked(m, menu, statusOf, { visible, messages });
     const valid = m => statusOf(m) === 'waiting' && !gone?.(m)?.status && !blocked(m);
     const ready = menu.filter(m => valid(m) && today >= m.ready_day && triggerTimeReady(m, part))
         .sort((a, b) => rankOf(a, intimateFirst) - rankOf(b, intimateFirst) || a.ready_day - b.ready_day || a.id - b.id);
@@ -1374,7 +1394,7 @@ export function expiredPocket(m, ctx = {}) {
     const what = String(t.what ?? '').trim();
     if (t.follow === '时间') {
         const p = PART_ORDER.indexOf(partIn(what)), nowPart = PART_ORDER.indexOf(partAt(at));
-        return dayGone || (p >= 0 && nowPart > p) ? { status: 'expired', why: `没赶上：${what || '那个时候'}已经过了`, basisDay: today } : null;
+        return dayGone || (p >= 0 && nowPart > p) ? { status: 'expired', why: `没赶上：${what || '那个时候'}已经过了`, basisDay: today, ...(!dayGone ? { basisPart: partAt(at) } : {}) } : null;
     }
     // 跟着人、跟着地方：得先在过（进口袋那一下、递出去那一下），现在不在了才算过期；一直没到过的照旧按时间沉
     const seenAt = [inPocket ? m.pocket_pos : null, Number.isFinite(m.held_pos) ? m.held_pos : null].filter(Number.isFinite);

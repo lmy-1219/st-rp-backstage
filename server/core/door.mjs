@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { hasCard, callsFor, wayOf, partsBetween } from './arrival.mjs';
 import { boardFor } from './board.mjs';
 import { pendingFor } from './pending.mjs';
-import { entryOf, awaitingExtract } from './planner.mjs';
+import { entryOf, awaitingExtract, afterBlocked } from './planner.mjs';
 import { sameName } from './setup.mjs';
 import { normalizeRelations, personOf, leaderOf } from './relations.mjs';
 import { absentPeople, pickContact } from './contacts.mjs';
@@ -18,11 +18,11 @@ import { paceName, MID } from './tempo.mjs';
 
 // 被"引子"挂上门的那几件（活动快到了替它放进口袋，eventlead.eventStep）：按套过日子的菜单（和 eventStep 同一套）判引子自己到点没，
 // 没到点标 early——门上不算到时候了。别的进口袋路径（stepPocket、改期、局势当下）一概不动（T073）
-export function earlyLeads(store, menu = [], timeline = null) {
+export function earlyLeads(store, menu = [], timeline = null, evidence = {}) {
     if (!menu.some(m => m.status === 'pocket' && m.pocket_by === '引子')) return menu;
     const days = menuDays(store, menu, timeline?.firmDayOf ?? timeline?.dayOf ?? null);
     const today = timeline?.firmToday ?? timeline?.today;
-    return menu.map((m, i) => m.status === 'pocket' && m.pocket_by === '引子' && !leadReady(days[i], days, today) ? { ...m, early: true } : m);
+    return menu.map((m, i) => m.status === 'pocket' && m.pocket_by === '引子' && !leadReady(days[i], days, today, evidence) ? { ...m, early: true } : m);
 }
 
 // 递出去后回复还没记账的口袋件（T081）：门上这一轮先不算 ready，等记账确认是 shown 还是仍 pocket 再按原规则走
@@ -88,7 +88,7 @@ export function doorAt(input = {}) {
         // 他牵头、已经拿出来了、后半截还等他自己说的（status shown）也在门上：别人不替他交后半截（slot.menuFor）
         // 拿出来那条以后他自己进了场（landing.enteredSince）：这件门上不再挂——他来过了，后半截他在场时自己说（slot.menuFor 照旧给他）
         const pocketAt = m => (m.status === 'shown' ? m.settled_pos ?? m.pocket_pos : m.pocket_pos);
-        const pockets = (memory ? [] : menu).filter(m => same(m.who, who) && (m.status === 'pocket' || m.status === 'shown') && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
+        const pockets = (memory ? [] : menu).filter(m => same(m.who, who) && (m.status === 'pocket' || m.status === 'shown') && (m.status === 'shown' || !afterBlocked(m, menu, x => x.status, { visible: input.visible, messages })) && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
             && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivalHistory ?? input.arrivals ?? [], knockLive: input.knockLive }));
         const reached = !memory && reach && same(reach.person ?? reach.who, who);
         const called = callsFor(narrationOf(recentUser), [who, ...(rel ? personOf(rel, who, names)?.又名 ?? [] : [])]);
@@ -213,7 +213,8 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const rel = relations ? normalizeRelations(relations) : null;
     const sameWho = (a, b) => sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names));
     const isDone = typeof records?.isDone === 'function' ? fp => records.isDone(chat.story_id, fp) : null;
-    const menu = awaitingPockets(earlyLeads(store, store.menuOf?.(chatKey) ?? [], timeline), { messages, isDone, record: planner?.record !== false, same: sameWho });
+    const visible = records.visible(chatKey).filter(r => r.pos <= messages.at(-1)?.pos);
+    const menu = awaitingPockets(earlyLeads(store, store.menuOf?.(chatKey) ?? [], timeline, { visible, messages }), { messages, isDone, record: planner?.record !== false, same: sameWho });
     const holds = read(store, `arrival_hold:${chatKey}`, []);
     const arrivals = read(store, `arrivals:${chatKey}`, []), arrivalHistory = read({ getMeta: store.getRawMeta ?? store.getMeta }, `arrivals:${chatKey}`, []);
     const knocks = read(store, `knocks:${chatKey}`, []);
@@ -228,7 +229,6 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const people = absentPeople({ records: records.visible(chatKey), messages, present, userName, roster, dayOf, openIdeaIds: new Set((records.openIdeas?.(chatKey) ?? []).map(r => r.id)) })
         .filter(p => (!planner?.provider || p.lastPos >= 0) && !(rel && leaderOf(rel, p.person, roster.map(e => e.name))));
     // "可能来联系"得有由头（场记章程 #2）：他和玩家之间有一件碰上了、还没下文的事才挂，label 带那件事的题；没出场过的也一样
-    const visible = records.visible(chatKey);
     const reachable = people.flatMap(p => {
         // 没出场过的人也一样：门上不随机挑（他该怎么登场由规划、口袋、名册钩子排；旁白那一格里的"此刻可以有这件事"另算）
         const r = sharedMatter(visible, { person: p.person, userName, same: sameWho });
@@ -238,7 +238,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const justBack = store.absences?.(chatKey)?.at(-1)?.from_pos;
     const reach = contacts?.enabled === false || !recentUser || (justBack != null && lastPos - justBack <= 8) ? null
         : already ? reachable.find(p => p.person === already.person) : pickContact({ people: reachable, dayOf, lastPos, offers, minGap: contacts?.minGap ?? 16 });
-    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, arrivalHistory, knockLive: e => store.knockLive?.(chatKey, e), knocks, members, pace: paceFor(store, chatKey) };
+    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, visible, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, arrivalHistory, knockLive: e => store.knockLive?.(chatKey, e), knocks, members, pace: paceFor(store, chatKey) };
     const key = `${chatKey}:${createHash('sha1').update(JSON.stringify(input)).digest('hex')}`;
     let cache = caches.get(store);
     if (!cache) caches.set(store, cache = new Map());
