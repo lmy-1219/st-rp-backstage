@@ -200,7 +200,7 @@ export function closeLed({ records, chatKey, storyId, who, fp, same = (a, b) => 
 }
 
 // 场上的事（用户 10/8："口袋既然递出来了，在它了结、离开该场景之前，就跟随谁开口就递过去——第一次主动提起，后来的留在场上都不用刻意提起，
-// 只看玩家有没有提起"）：拿出来了、还没了结的那件，这场戏里接着开口的每个人（当时在场看见的；镜头照玩家的眼睛）都带着它，连同玩家接了以后怎样。
+// 只看玩家有没有提起"）：拿出来了、还没了结的那件，这场戏里接着开口的每个人（当时在场看见的；镜头照玩家的眼睛）都带着；旧应答只随尚未交付的 shown 项。
 // 这场戏：同一天、拿出来以后 STAGE_SPAN 条以内。拿出来的那个人这一轮正在交后半截的不重复给。
 export const STAGE_SPAN = 20;
 export function stageLines({ menu = [], visible = [], name, knower = name, speaker = name, same = (a, b) => a === b, lastPos = 0, dayOf = () => 0, today = 0, userName = '玩家', talk = '', gone = () => false }) {
@@ -214,8 +214,8 @@ export function stageLines({ menu = [], visible = [], name, knower = name, speak
     const tidy = t => String(t ?? '').trim().replace(/[。．.]+$/, '');
     return {
         menus: new Set(on.map(({ m }) => m.id)),
-        lines: [`场上已经有的事（前面已经拿出来了、还没了结；不用再刻意提起——${userName}接了这茬、问起了，就照下面顺着往下；没接就让它待在那儿）：`,
-            ...on.flatMap(({ m, r }) => [`· 「${m.title}」：${tidy(m.surface)}${talksOf(r, talk) ? '（眼下说到的就是这件）' : ''}`, ...(m.respond ? [`  （${userName}接了的话：${tidy(m.respond)}）`] : [])])],
+        lines: [`场上已经有的事（已经发生、还没了结；别重演旧动作——${userName}这句提起才接着回应，没提就留在场上）：`,
+            ...on.flatMap(({ m, r }) => [`· 「${m.title}」：${tidy(m.surface)}${talksOf(r, talk) ? '（眼下说到的就是这件）' : ''}`, ...(m.status === 'shown' && m.respond ? [`  （${userName}接了的话：${tidy(m.respond)}）`] : [])])],
     };
 }
 
