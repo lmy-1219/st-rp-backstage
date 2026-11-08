@@ -3,7 +3,7 @@
 // ② 每次某个角色要发言前，向后台要"只给他的那一格"，临时塞进这次请求，用完即清；
 // ③ 设置面板里的开关与状态。后台连不上时什么都不做，ST 照常。
 import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStaleOn, guideClosed, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, isolateLeaveSupportsIndex, closeIsolationAt, runLeaveAttempt, resetLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
-import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
+import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 
 const MODULE = 'rp_emergence';
 const KEYS = { rule: 'rp_emergence_rule', slot: 'rp_emergence_slot', mid: 'rp_emergence_mid', recall: 'rp_emergence_recall', world: 'rp_emergence_world' };
@@ -3614,7 +3614,7 @@ async function cameraJoin(c, cam) {
 const hasCommand = name => !!ctx().SlashCommandParser?.commands?.[name];
 const run = cmd => ctx().executeSlashCommandsWithOptions(cmd).catch(() => null);
 function cardNamed(c, who, avatar = null) {
-    return c.characters.find(x => avatar && x.avatar === avatar) ?? c.characters.find(x => x.name === who) ?? null;
+    return cardNamedInGroup(c.characters, currentGroup(c)?.members, who, avatar);
 }
 async function enterChar(who, avatar = null, opts = {}) {
     const c = ctx(), group = currentGroup(c);

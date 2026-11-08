@@ -414,6 +414,48 @@ export function openStore(file) {
         return { stored, rejected };
     }
 
+    // 同名多版本卡以群里唯一在用的头像为准；只改这一局的名册，不碰读卡资料。
+    function alignCastToGroup(storyId, members, chatKey = null) {
+        if (!Array.isArray(members) || !members.length) return [];
+        const inGroup = new Set(members.map(m => m?.avatar).filter(a => typeof a === 'string' && a));
+        if (!inGroup.size) return [];
+        const rows = q('select avatar, name, role, hook, priority, bond, call, stranger, gender, is_group, interests, set_by, updated_at from cast where story_id = ?').all(storyId);
+        const byName = new Map();
+        for (const row of rows) {
+            if (!row.name || row.name === CAMERA_LABEL || !/\.(png|webp|jpe?g|gif)$/i.test(row.avatar) || row.avatar.startsWith('face:')) continue;
+            if (!byName.has(row.name)) byName.set(row.name, []);
+            byName.get(row.name).push(row);
+        }
+        const rank = role => ({ '主要': 3, '可能登场': 2, '路过': 1 })[role] ?? 0;
+        const aligned = [];
+        for (const [name, versions] of byName) {
+            if (versions.length < 2) continue;
+            const present = versions.filter(v => inGroup.has(v.avatar));
+            if (present.length !== 1) continue;
+            const current = present[0];
+            const others = versions.filter(v => v !== current);
+            if (current.role === '不用') {
+                const source = others.filter(v => v.role !== '不用').sort((a, b) =>
+                    Number(b.set_by === 'user') - Number(a.set_by === 'user') || rank(b.role) - rank(a.role)
+                    || b.updated_at.localeCompare(a.updated_at) || a.avatar.localeCompare(b.avatar))[0];
+                if (!source) continue;
+                q(`update cast set role = ?, hook = ?, priority = ?, bond = ?, call = ?, stranger = ?, gender = ?, is_group = ?,
+                   interests = case when interests is null or trim(interests) = '' then ? else interests end,
+                   set_by = ?, updated_at = ? where story_id = ? and avatar = ?`)
+                    .run(source.role, source.hook, source.priority, source.bond, source.call, source.stranger, source.gender,
+                        source.is_group, source.interests, source.set_by, now(), storyId, current.avatar);
+            }
+            for (const old of others) {
+                if (old.role === '不用' && old.set_by === 'user') continue;
+                q("update cast set role = '不用', set_by = 'user', updated_at = ? where story_id = ? and avatar = ?")
+                    .run(now(), storyId, old.avatar);
+                log(chatKey, 'cast_group_aligned', { storyId, name, from: old.avatar, to: current.avatar });
+                aligned.push({ name, from: old.avatar, to: current.avatar });
+            }
+        }
+        return aligned;
+    }
+
     // 浏览器报来当前序列（每条的指纹）。缺正文 ⇒ 列出来让它补传；齐了 ⇒ 整体替换该窗口的序列。
     function sync({ chatKey, seq, members = null, anchors = null, force = false }) {
         const chat = requireChat(chatKey);
@@ -499,6 +541,7 @@ export function openStore(file) {
             const live = raw ? liveAnchors(raw, seq.map(x => x.d ?? null)) : null;
             q('update chats set synced_at = ?, members = coalesce(?, members), anchors = coalesce(?, anchors) where key = ?')
                 .run(now(), members ? JSON.stringify(members) : null, live ? JSON.stringify(live) : null, chatKey);
+            alignCastToGroup(chat.story_id, members, chatKey);
             if (change.added || change.removed) log(chatKey, 'sync', { total: newFps.length, ...change, forced: force || undefined });
             if (chat.parent_key && chat.branch_len == null && newFps.length) branchLen(chat, newFps);
             // 接入时自动开了记账的（extract_from＝-1）：第一次同步时，带着一大段旧聊天的只从接入以后记（旧的要不要补记，面板上给估价由用户点，D-100）。
@@ -1441,5 +1484,5 @@ export function openStore(file) {
         };
     }
 
-    return { setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    return { setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

@@ -85,8 +85,15 @@ function context(store, records, chatKey, { present = [], recentUser = '', timel
     const roster = store.getCast?.(chat.story_id) ?? [];
     const relations = store.relationsOf?.(chat.story_id) ?? null;
     const names = roster.map(e => e.name);
-    return { chat, messages, tl, rowAt: rowsOf(tl), roster, relations, names, userName: userOf(messages), present, recentUser,
+    let members = [];
+    try { const parsed = JSON.parse(chat.members ?? '[]'); if (Array.isArray(parsed)) members = parsed; } catch {}
+    return { chat, messages, tl, rowAt: rowsOf(tl), roster, relations, names, members, userName: userOf(messages), present, recentUser,
         board: () => boardFor(store, records, chatKey, { present, recentUser, timeline: tl }) };
+}
+
+function avatarFor(ctx, who, fallback = null) {
+    return ctx.members.find(m => m?.name === who && m.avatar)?.avatar
+        ?? fallback ?? ctx.roster.find(e => sameName(e.name, who, ctx.names))?.avatar ?? null;
 }
 
 /**
@@ -112,7 +119,7 @@ export function knockCandidate(store, records, chatKey, { present = [], timeline
     const way = wayFor(item, plan);
     const origin = ['promise', 'reach'].includes(item.source?.type) ? records?.visible?.(chatKey)?.find(r => r.id === item.source.id) : null;
     const sourceAt = origin ? { pos: origin.pos, fp: origin.fp } : item.source?.type === 'errand' && plan?.fp ? { pos: messages.find(m => m.fp === plan.fp)?.pos, fp: plan.fp } : null;
-    return { who: item.who, avatar: item.avatar ?? null, way, mode: modeOf(way), source: item.source ?? null, sourceAt, label: item.label ?? '' };
+    return { who: item.who, avatar: avatarFor(ctx, item.who, item.avatar), way, mode: modeOf(way), source: item.source ?? null, sourceAt, label: item.label ?? '' };
 }
 
 export function knockNow(store, records, chatKey, { present = [], timeline = null, config = null } = {}) {
@@ -316,9 +323,8 @@ export function turnFor(store, records, chatKey, { present = [], recentUser = ''
     present=present.filter(name=>board ? !excluded.has(name) : !departed.some(e=>e.who===name));
     const d = turnDetail({ text: recentUser || null, messages, board, roster, relations, wants: wantsFor(store, records, chatKey, { messages, timeline: tl }), pace: paceFor(store, chatKey), userName, present,
         stateNotes: store.stateNotesOf?.(chatKey) ?? [], cap: Number(auto.cap) > 0 ? Number(auto.cap) : null, chain: auto.chain ?? null });   // 没填（null）按节奏档，别算成 0；chain 没填按默认
-    const avatarOf = who => roster.find(e => sameName(e.name, who, names))?.avatar ?? null;
     // back：刚走的人被点名，直接叫回来（不走进场那套）——扩展要先取消静音、开区间
-    return { queue: d.queue.map(q => ({ who: q.who, avatar: q.who === '旁白' ? null : avatarOf(q.who), role: q.role, why: q.why, noRepeat: !!q.noRepeat, ...(/叫回来/.test(q.why ?? '') ? { back: true } : {}) })), why: d.why };
+    return { queue: d.queue.map(q => ({ who: q.who, avatar: q.who === '旁白' ? null : avatarFor(ctx, q.who), role: q.role, why: q.why, noRepeat: !!q.noRepeat, ...(/叫回来/.test(q.why ?? '') ? { back: true } : {}) })), why: d.why };
 }
 
 /**

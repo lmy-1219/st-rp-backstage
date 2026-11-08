@@ -52,6 +52,14 @@ export const validDayMark = k => typeof k === 'string' && k !== '' && /^(?:day|s
 // 镜头（N-276）：系统建的"旁白"卡只是让酒馆能生成的载体，它写的消息和 /sys 旁白一样记 narrator——后台不把它当人。
 export const CAMERA_FLAG = 'rp_emergence_camera';
 export const isCamera = ch => !!ch?.data?.extensions?.[CAMERA_FLAG];
+export function cardNamedInGroup(characters, groupAvatars, who, avatar = null) {
+    const inGroup = (groupAvatars ?? []).map(id => characters.find(ch => ch.avatar === id)).filter(Boolean);
+    return inGroup.find(ch => avatar && ch.avatar === avatar)
+        ?? inGroup.find(ch => ch.name === who)
+        ?? characters.find(ch => avatar && ch.avatar === avatar)
+        ?? characters.find(ch => ch.name === who)
+        ?? null;
+}
 // 只关原本开着的条目；保留不等于替用户打开原本关着的条目。
 export function cameraPromptPlan(order, { keep = [], covered = [], hasPhi = false } = {}) {
     const allowed = new Set(['chatHistory', 'worldInfoBefore', 'worldInfoAfter', 'main', ...keep, ...covered]);
