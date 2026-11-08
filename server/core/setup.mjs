@@ -652,7 +652,7 @@ function terms(text) {
 }
 // 一条前事拿去转向量、做字面比对的那段话：事情本身＋确认时配的检索词。
 export const backstoryText = x => `${x.事}\n${(x.keys ?? []).join(' ')}`;
-export function rankBackstory(items, talk) {
+export function rankBackstory(items, talk, { strict = false } = {}) {
     const q = terms(talk);
     // 确认时配的检索词（别人问起这件事会用的说法）一起算：字面对不上的（"怎么死的"对"拦腰打断"）靠它接上。
     const docs = items.map(x => ({ x, t: terms(backstoryText(x)) }));
@@ -664,8 +664,8 @@ export function rankBackstory(items, talk) {
         const hit = [...t].filter(w => q.has(w) && df.get(w) <= cap);
         // 检索词整个出现在话里（"怎么死"对"是怎么死的"）：就是为这种问法配的，直接算有关
         const keyHits = (x.keys ?? []).filter(k => String(k).length >= 2 && said.includes(k));
-        // 只撞上一个两字组：多半是碰巧（"东西""年前"一类），不算有关
-        if (!keyHits.length && !(hit.length >= 2 || hit.some(w => w.length >= 3))) return { r: { x }, score: 0 };
+        // 默认只撞上一个两字组不算有关；严格兜底时，两字组再多也不算。
+        if (!keyHits.length && !(hit.some(w => w.length >= 3) || (!strict && hit.length >= 2))) return { r: { x }, score: 0 };
         const score = hit.reduce((s, w) => s + Math.log(1 + n / df.get(w)), 0) + keyHits.length * Math.log(1 + n);
         return { r: { x }, score: score / Math.sqrt(1 + x.事.length / 60) };
     }).filter(h => h.score > 0).sort((a, b) => b.score - a.score);
@@ -720,8 +720,10 @@ export function slotLines(data, { name, present = [], talk = '', roster = [], pi
     if (open.length) lines.push(`${name}知道、但还没弄清的事（写着的照样算数，别和它相反；没弄清的那一截${personWord(name)}也不知道，别替${personWord(name)}补上答案；${personWord(name)}在意的话，会想问、想弄明白）：`, ...open.map(x => `· ${x.事}${whose(x)}`));
     if (only === 'recall') lines.length = 0;
     const rest = knows.filter(x => !x.常驻 && !held(x));
-    const hits = only === 'base' || !String(talk).trim() ? []
+    const noRecall = only === 'base' || !String(talk).trim();
+    let hits = noRecall ? []
         : (pick ? pick(rest.map(x => ({ x, text: x.事, quotes: [] })), talk) : rankBackstory(rest, talk)).filter(h => h.score > 0).slice(0, 2);
+    if (!noRecall && pick && !hits.length) hits = rankBackstory(rest, talk, { strict: true }).slice(0, 2);
     // 前史是开场之前的事：里面说的"还没见过面""以为他死了"只对开场那一刻成立，之后以聊天里发生的为准（实测：几百条之后还递"两人还没直接见过面"）。
     if (hits.length) lines.push(`${name}知道的前事（开场之前的事，之后变了的以聊天里发生的为准；和眼下的话有关；只是${name}知道的这一版）：`, ...hits.map(({ r: { x } }) => `· ${x.事}${whose(x)}${secretKeepNote(x) ? `；${secretKeepNote(x)}` : ''}`));
     return lines;
