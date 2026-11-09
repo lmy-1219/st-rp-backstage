@@ -2,7 +2,7 @@
 // ① 接入的窗口里，消息一有变化就把"当前序列"增量同步给后台（只传指纹，后台缺哪条正文才补传哪条）；
 // ② 每次某个角色要发言前，向后台要"只给他的那一格"，临时塞进这次请求，用完即清；
 // ③ 设置面板里的开关与状态。后台连不上时什么都不做，ST 照常。
-import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStaleOn, guideClosed, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, isolateLeaveSupportsIndex, closeIsolationAt, runLeaveAttempt, resetLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
+import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStaleOn, guideClosed, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, classify, openSegment, closeSegment, residentFromStart, ensureCameraPresence, repairResidentSegment, restoreSegment, runLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 
 const MODULE = 'rp_emergence';
@@ -1899,7 +1899,9 @@ async function onChatChanged() {
     clearPrompts();
     Object.assign(state, { chatKey: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
     Object.assign(auto, { on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null });
-    state.memberBase = memberSnapshot();   // 换了窗口：群成员名单的基线重记（不触发），不拿上一个窗口的名单比
+    state.memberBase = memberSnapshot();
+    state.firstMemberSnapshot = state.memberBase && !(ctx().chat??[]).some(m=>m.is_user) ? {...state.memberBase,at:0} : null;   // 开局第一次群快照
+    // 换了窗口：群成员名单的基线重记（不触发），不拿上一个窗口的名单比
     arrivals.cancel();   // 拉进群攒着的那批（T070 二）作废
     dayLabels = []; boardLabels = []; state.boardCast = [];
     drawDays();
@@ -2401,9 +2403,10 @@ function mountPanel() {
             : `已接入${st.enabled ? '' : '（已暂停）'}。后台记着这个窗口的 ${st.total} 条消息${st.syncedAt ? `，最近同步 ${new Date(st.syncedAt).toLocaleTimeString()}` : ''}。`;
         if(s.enabled && state.chatKey && st?.leaveUnjudged>0) $('[data-role="status"]').textContent += ` ${st.leaveUnjudged} 人离场待判`;
         const leaveRetry=leaveRetryView(ctx().chatMetadata?.rpeLeaveRetries,escapeHtml);
+        const residentIssues=presenceResidentIssues(ctx());
         if(s.enabled && state.chatKey && leaveRetry.message) $('[data-role="status"]').textContent += ` ${leaveRetry.message}`;
         if (s.enabled && state.chatKey && st?.planning?.message) $('[data-role="status"]').textContent += ` ${st.planning.message}`;
-        $('[data-role="leave-retries"]').innerHTML=s.enabled&&state.chatKey?leaveRetry.html:'';
+        $('[data-role="leave-retries"]').innerHTML=s.enabled&&state.chatKey&&(leaveRetry.html||residentIssues.length)?'<button type="button" class="menu_button rpe-presence-check" title="核对并修正在场，建议先看预览。">核对在场</button>':'';
         $('[data-role="note"]').textContent = state.note;
         const joinedNow = !!state.chatKey && s.enabled;
         const openChat = chatIds(ctx()).stChatId;
@@ -3147,9 +3150,9 @@ async function importOpeningPack(pathIn, say, { overwrite = false, together = nu
         say(`开场白：留了 ${kept.length} 条（${[...new Set(kept.map(m => m.name))].join('、')}）`);
         // 同场的人从同场那几段开场白起才看得见（别处那几段——春和堂、客院——他们不在）：上下文隔离扩展记的在场区间
         const firstNear = kept.findIndex(m => near.includes(m.name));
-        const isolateNear = async () => { for (const n of near) await run(`/isolate ${n} ${firstNear}`); };
-        const isolated = () => near.every(n => { const av = byName.get(n)?.avatar; return !!ctx().chatMetadata?.contextIsolation?.anchors?.[av]?.segments?.length; });
-        if (firstNear > 0 && near.length && hasCommand('isolate')) {
+        const isolateNear = async () => { for (const n of near) { const ch=byName.get(n); if(ch) await openSegment(ctx(),{avatar:ch.avatar,name:ch.name,at:firstNear}); } };
+        const isolated = () => near.every(n => { const av = byName.get(n)?.avatar; return (ctx().chatMetadata?.contextIsolation?.anchors?.[av]?.segments??[]).some(s=>s.from===firstNear&&s.to==null); });
+        if (firstNear > 0 && near.length) {
             await isolateNear();
             await ctx().saveMetadata();
             await verifyOpeningChat(group, openingMessageStamp(kept));
@@ -3176,10 +3179,10 @@ async function importOpeningPack(pathIn, say, { overwrite = false, together = nu
         for (const b of r.books.filter(x => x.bind === '全局')) { try { await ctx().executeSlashCommandsWithOptions(`/world ${b.name}`); say(`全局书：开了「${b.name}」`); } catch {} }
         if (r.stPreset) { try { await stJson('/api/presets/save', { name: r.stPreset.name, preset: JSON.parse(r.stPreset.text), apiId: 'openai' }); await ctx().executeSlashCommandsWithOptions(`/preset ${r.stPreset.name}`); say(`ST 预设：${r.stPreset.name}`); } catch (error) { say(`ST 预设没选上：${error.message}`); } }
         // 在场区间再核一遍（中间几次存元数据有没有把它盖掉）：没有就补记
-        if (firstNear > 0 && near.length && hasCommand('isolate') && !isolated()) {
+        if (firstNear > 0 && near.length && !isolated()) {
             await isolateNear();
             await ctx().saveMetadata();
-            say(isolated() ? '在场区间：补记上了' : `在场区间：没记上，你可以手动 /isolate 名字 ${firstNear}`);
+            say(isolated() ? '在场区间：补记上了' : '在场区间：没记上，请点核对在场');
         }
         await verifyOpeningChat(group, openingMessageStamp(kept));
         await syncNow(true).catch(() => {});
@@ -3234,7 +3237,7 @@ function automodeHint() {
     globalThis.toastr?.warning('这个群开着 ST 自带的“自动模式”：ST 会每隔几秒自己随便叫一个人说话，和后台排的谁接话抢。建议在群设置里关掉“自动模式”。', 'RP：幕后', { timeOut: 15000 });
 }
 // 开没开、谁候着、谁刚作废：打开窗口时问一次；关着时每条之后也问一下（便宜，纯程序），开了就立刻跟上
-async function autoPeek({ onlyUndo = false } = {}) {
+async function autoPeek({ onlyUndo = false, returnReply = false } = {}) {
     if (!state.chatKey || !settings().enabled) return false;
     const chatKey = state.chatKey, epoch = state.epoch;
     let r = null;
@@ -3246,8 +3249,8 @@ async function autoPeek({ onlyUndo = false } = {}) {
         if (await autoApply({ ...r, left: undo, lapsed: [] }) === false) throw new Error('离场撤销尚未落实');
         return true;
     }
-    await autoApply(r);
-    return !!r.enabled;
+    const applied=await autoApply(r);
+    return returnReply ? r : applied===false ? false : !!r.enabled;
 }
 // 后台答的里头：开没开（变了就改群策略）、候着的那一个（画按钮）、谁作废了（关区间、静音）
 async function autoApply(r) {
@@ -3264,7 +3267,7 @@ async function autoApply(r) {
     if (auto.on===false && was!==false) refreshDoor().catch(() => {});
     let applied = true;
     for (const l of [...(r?.left??[]),...(r?.lapsed??[])]) {
-        try { await autoClose(l,l.id?'走了':'作废'); }
+        try { if(await autoClose(l,l.id?'走了':'作废')===false) applied=false; }
         catch(error) { applied = false; console.warn('[RP：幕后] 离场未落实，将重试',l.who,error); }
     }
     render();
@@ -3300,7 +3303,7 @@ async function autoDrive(type) {
         catch { if (state.epoch === epoch && state.chatKey === chatKey) { auto.unavailable=true;render(); } return false; }
         if (!current()) return false;
         console.log('[RP：幕后] 谁接', JSON.stringify({ queue: r.queue, knock: r.knock, waiting: r.waiting, left: r.left, lapsed: r.lapsed, why: r.why }));
-        await autoApply(r);
+        if (await autoApply(r)===false) return false;
         if (!current()) return false;
         if (!auto.on) return 'off';
         auto.lastTurn = key;
@@ -3331,7 +3334,7 @@ async function autoSpeak(q) {
             const g = currentGroup(ctx()), i = g?.members.indexOf(ch.avatar) ?? -1;
             if (i < 0) return false;
             if (g.disabled_members?.includes(ch.avatar)) await run(`/member-enable ${i}`);
-            if (hasCommand('isolate')) await run(`/isolate ${ch.name} ${q.enter.at}`);
+            await openPresence(ch,q.enter.at);
             auto.noRepeat = q.noRepeat ? ch.avatar : null;
             await c.executeSlashCommandsWithOptions(`/trigger await=true ${i}`);
             return true;
@@ -3346,7 +3349,7 @@ async function autoSpeak(q) {
         state.entering.add(ch.avatar);
         try {
             await run(`/member-enable ${at}`);
-            if (hasCommand('isolate')) await run(`/isolate ${ch.name}`);
+            await openPresence(ch);
         } finally { state.entering.delete(ch.avatar); followBase(); }
     }
     auto.noRepeat = q.noRepeat ? ch.avatar : null;
@@ -3364,7 +3367,7 @@ async function autoKnock(k) {
         const g = currentGroup(ctx()), at = g?.members.indexOf(ch.avatar) ?? -1;
         if (at < 0) return false;
         if (g.disabled_members?.includes(ch.avatar)) { await run(`/member-enable ${at}`); tick('叩门:取消静音', performance.now() - t0, ch.name); t0 = performance.now(); }
-        if (hasCommand('isolate')) { await run(`/isolate ${ch.name}`); tick('叩门:开区间', performance.now() - t0, ch.name); }
+        await openPresence(ch); tick('叩门:开区间', performance.now() - t0, ch.name);
         auto.pending.set(ch.avatar, { who: ch.name, way: k.way });
         auto.closed.delete(`${ch.name}:${k.at}`);
         await ctx().executeSlashCommandsWithOptions(`/trigger await=true ${at}`);
@@ -3376,13 +3379,19 @@ async function autoKnock(k) {
     }
 }
 // 他走了（后台已经记了去向）、这次叩门作废了（他没进过场）：关区间、静音，不移出群
+const ackLeave=(chatKey,receipt)=>api('leave-ack',{chatKey,receipts:[receipt]});
 async function autoClose(l, why) {
     const chatKey=state.chatKey, jobs=auto.jobs, key=l.id??`${l.who}:${l.at}`;
     if(jobs.has(key)) return jobs.get(key);
     const c=ctx(),failures=c.chatMetadata.rpeLeaveRetries??={};
+    if(l.action!=='undo'&&failures[key]?.count>=3){
+        const ch=cardNamed(c,l.who,l.avatar),segs=c.chatMetadata?.contextIsolation?.anchors?.[ch?.avatar]?.segments;
+        const decision=classify({kind:'close',segments:segs??[],at:l.at,disabled:!!currentGroup(c)?.disabled_members?.includes(ch?.avatar),resident:ch?residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot}):false});
+        if(decision.status==='superseded'||decision.status==='achieved'&&!decision.needsMute)delete failures[key];
+    }
     const task=runLeaveAttempt({failures,key,event:l,attempt:()=>applyAutoClose(l,why,chatKey),save:async()=>{if(state.chatKey!==chatKey||ctx().chat!==c.chat)throw Error('聊天已切换');await c.saveMetadata();}});
     jobs.set(key,task);
-    try {await task;} finally {jobs.delete(key);}
+    try {return await task;} finally {jobs.delete(key);}
 }
 async function applyAutoClose(l,why,chatKey) {
     const c=ctx(),group=currentGroup(c),ch=cardNamed(c,l.who,l.avatar);
@@ -3390,12 +3399,27 @@ async function applyAutoClose(l,why,chatKey) {
     const at=l.id?l.at:(l.lapsed?.pos??l.at);
     const key=l.id??`lapsed:${ch.avatar}:${at}`;
     const journal=c.chatMetadata.rpeLeaveEvents??={};
-    const guard=()=>{if(state.chatKey!==chatKey || ctx().chat!==c.chat) throw new Error('聊天已切换');};
+    const epoch=state.epoch;
+    const guard=()=>{if(state.chatKey!==chatKey || state.epoch!==epoch || ctx().chat!==c.chat) throw new Error('聊天已切换');};
     const save=async()=>{guard();await c.saveMetadata();};
     const anchor=()=>c.chatMetadata.contextIsolation?.anchors?.[ch.avatar];
     const copy=x=>x==null?null:JSON.parse(JSON.stringify(x));
-    const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
     const receipt=journal[key];
+    guard();
+    if(l.action!=='undo') {
+        if(!Number.isInteger(at)||!c.chat[at]) throw Error('来源条号无效');
+        if(l.id&&fingerprintMessage(c.chat[at],speakerOf(c.chat[at],fallbackAvatar(c)))!==l.fp) throw Error('来源消息已改变');
+        const decision=classify({kind:'close',segments:anchor()?.segments??[],at,
+            disabled:!!group.disabled_members?.includes(ch.avatar),
+            resident:residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot})});
+        if(decision.status==='correction') throw Error(decision.reason);
+        if(decision.status==='superseded') {
+            journal[key]={...(receipt??{}),avatar:ch.avatar,status:'superseded',observed:true};
+            await save();
+            if(l.id) await ackLeave(chatKey,{id:l.id,version:l.version,action:l.action,result:'superseded'});
+            return;
+        }
+    }
     // 本次事件的重试复用最初的快照，刷新页面后也一样。
     if(l.action!=='undo' && (!receipt || receipt.undone)) {
         guard();
@@ -3409,23 +3433,18 @@ async function applyAutoClose(l,why,chatKey) {
     await applyLeaveEvent(l,{
         close:async()=>{
             guard();
-            if(rec.closed) return;
-            if(!Number.isInteger(at)||!c.chat[at]) throw new Error('来源条号无效');
-            if(l.id && fingerprintMessage(c.chat[at],speakerOf(c.chat[at],fallbackAvatar(c)))!==l.fp) throw new Error('来源消息已改变');
-            if(!hasCommand('isolate-leave')) throw new Error('缺少 isolate-leave');
-            // 只读注册说明来识别能力；不向原版试发带条号命令。
-            const indexed=isolateLeaveSupportsIndex(c.SlashCommandParser?.commands?.['isolate-leave']);
-            rec.boundaryMethod=indexed?'command':'metadata';
-            try {
-                if(indexed) await c.executeSlashCommandsWithOptions(`/isolate-leave ${ch.name} ${at}`);
-                else await closeIsolationAt(c,{avatar:ch.avatar,name:ch.name,at});
-            }
-            finally {
-                const segments=anchor()?.segments;
-                const seg=Array.isArray(segments)?segments.findLast(x=>x.to===at+1):null;
-                if(seg && !segments.some(x=>x.to==null)) {rec.after=copy(seg);rec.closed=true;await save();}
-            }
-            if(!rec.closed) throw new Error('隔离区间未按来源关闭');
+            if(!Number.isInteger(at)||!c.chat[at]) throw Error('来源条号无效');
+            if(l.id&&fingerprintMessage(c.chat[at],speakerOf(c.chat[at],fallbackAvatar(c)))!==l.fp) throw Error('来源消息已改变');
+            const r=await closeSegment(c,{avatar:ch.avatar,name:ch.name,at,
+                resident:residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot}),
+                disabled:!!currentGroup(c)?.disabled_members?.includes(ch.avatar)});
+            if(r.status==='superseded') throw Error('离场已被后来进场取代，请重新核对');
+            rec.boundaryMethod='metadata';
+            rec.status=r.status;
+            rec.after=copy(r.segment);
+            if(r.status==='applied') rec.closed=true;
+            else rec.observed=true;
+            await save();
         },
         mute:async()=>{
             guard();
@@ -3437,16 +3456,7 @@ async function applyAutoClose(l,why,chatKey) {
         reopen:async()=>{
             guard();
             if(!rec || rec.undone || !rec.closed) return;
-            const segs=anchor()?.segments;
-            const i=segs?.findIndex(x=>same(x,rec.after))??-1;
-            if(i>=0 && !rec.before?.segments?.some(x=>same(x,rec.after))) {
-                const before=rec.before?.segments?.findLast(x=>x.to==null);
-                const later=laterClose();
-                if(before) segs[i]={...copy(before),...(later?{to:later.to,toDate:later.toDate}:{})};
-                else if(later && !rec.before) segs[i]={from:0,fromDate:'',to:later.to,toDate:later.toDate};
-                else segs.splice(i,1);
-                await save();
-            }
+            await restoreSegment(c,{avatar:ch.avatar,after:rec.after,before:rec.before,later:laterClose()});
         },
         unmute:async()=>{
             guard();
@@ -3457,7 +3467,7 @@ async function applyAutoClose(l,why,chatKey) {
             if((rec.muted||rec.muting) && !rec.wasDisabled && !laterClose() && i>=0 && currentGroup(ctx())?.disabled_members?.includes(ch.avatar)) throw new Error('角色未取消静音');
             rec.undone=true;await save();
         },
-        ack:receipt=>api('leave-ack',{chatKey,receipts:[receipt]})
+        ack:receipt=>ackLeave(chatKey,{...receipt,result:rec.status??'applied'})
     });
     if(l.action!=='undo') {if(state.remote?.avatar===ch.avatar)state.remote=null;auto.remote.delete(ch.avatar);}
 }
@@ -3470,6 +3480,70 @@ async function autoAnswer(who, answer) {
     globalThis.toastr?.info(r.forced === '作废' ? `${who}这次没进场。` : `${who}进场了：你写一句${who}就接。`, 'RP：幕后', { timeOut: 6000 });
 }
 
+function presenceResidentIssues(c) {
+    return (c.characters??[]).filter(ch=>{
+        const seg=c.chatMetadata?.contextIsolation?.anchors?.[ch.avatar]?.segments?.[0];
+        return seg?.from>0&&residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot});
+    });
+}
+function presenceWords(segments=[]) {
+    if(!segments.length)return '从头在场（未另记区间）';
+    return segments.map(s=>s.from===0?(s.to==null?'从头在场':'从头在场，至第 '+s.to+' 条'):s.to==null?'第 '+s.from+' 条起在场':'第 '+s.from+'–'+s.to+' 条在场').join('、');
+}
+async function pickPresence() {
+    const c=ctx(),chatKey=state.chatKey,epoch=state.epoch;
+    const pending=await autoPeek({returnReply:true}); // 已达成或被后来取代的旧待办先自动结清。
+    if(!pending||state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==c.chat)return;
+    const residents=presenceResidentIssues(c);
+    const issues=Object.entries(c.chatMetadata?.rpeLeaveRetries??{}).filter(([,r])=>r?.count>=3).map(([key,r])=>{
+        const event=(pending?.left??[]).find(e=>e.id===key);
+        const ch=(c.characters??[]).find(x=>x.avatar===event?.avatar)||null;
+        const segs=c.chatMetadata?.contextIsolation?.anchors?.[ch?.avatar]?.segments??[];
+        return event&&ch?{key,event,ch,segs:structuredClone(segs),candidate:segs.filter(x=>x?.to!=null&&x.to>x.from).at(-1)??null}:null;
+    }).filter(Boolean);
+    const rows=[
+        ...residents.map(ch=>{
+            const before=c.chatMetadata.contextIsolation.anchors[ch.avatar].segments;
+            return '<tr><td>'+escapeHtml(ch.name)+'</td><td>'+escapeHtml(presenceWords(before))+'</td><td>'+escapeHtml(presenceWords([{...before[0],from:0},...before.slice(1)]))+'</td></tr>';
+        }),
+        ...issues.map((x,i)=>{
+            const after=x.candidate?'确认最后一段已封（'+presenceWords([x.candidate])+'），补静音并结清':'补一段从头到指定离场条号的在场区间，静音并结清';
+            return '<tr><td>'+escapeHtml(x.ch.name)+'</td><td>'+escapeHtml(presenceWords(x.segs))+'</td><td>'+escapeHtml(after)+'<br>离场条号 <input type="number" min="0" max="'+(c.chat.length-1)+'" value="'+x.event.at+'" data-presence-index="'+i+'"></td></tr>';
+        })
+    ];
+    if(!rows.length){render();return;}
+    const html='<h3>核对在场</h3><table><thead><tr><th>名字</th><th>现在</th><th>建议改成</th></tr></thead><tbody>'+rows.join('')+'</tbody></table><p>核对条号和区间后再确认；后续段保留。</p>';
+    const chosen=new Map();
+    const ok=await c.callGenericPopup(html,c.POPUP_TYPE.CONFIRM,'',{okButton:'照这样改',cancelButton:'关闭',
+        onClosing:popup=>{for(const input of popup.dlg.querySelectorAll('[data-presence-index]'))chosen.set(Number(input.dataset.presenceIndex),Number(input.value));return true;}});
+    const guard=()=>{if(state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==c.chat)throw Error('聊天已切换');};
+    if(!ok)return;
+    guard();
+    for(const ch of residents){guard();await repairResidentSegment(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot});}
+    for(let i=0;i<issues.length;i++){
+        guard();
+        const x=issues[i],at=chosen.get(i),source=x.event;
+        if(!Number.isInteger(at)||at<0||at>=c.chat.length)throw Error('离场条号无效');
+        if(fingerprintMessage(c.chat[source.at],speakerOf(c.chat[source.at],fallbackAvatar(c)))!==source.fp)throw Error('来源消息已改变');
+        const now=c.chatMetadata?.contextIsolation?.anchors?.[x.ch.avatar]?.segments??[];
+        if(JSON.stringify(now)!==JSON.stringify(x.segs))throw Error('在场区间已改变，请重新核对');
+        const g=currentGroup(c),member=g?.members.indexOf(x.ch.avatar)??-1,wasDisabled=!!g?.disabled_members?.includes(x.ch.avatar);
+        const journal=c.chatMetadata.rpeLeaveEvents??={},rec=journal[x.key]??={avatar:x.ch.avatar,before:structuredClone(c.chatMetadata?.contextIsolation?.anchors?.[x.ch.avatar]??null),wasDisabled};
+        if(x.candidate){rec.after=structuredClone(x.candidate);rec.observed=true;rec.status='achieved';}
+        else {const done=await closeSegment(c,{avatar:x.ch.avatar,name:x.ch.name,at,resident:true,disabled:wasDisabled});rec.after=structuredClone(done.segment);rec.closed=true;rec.status='applied';}
+        journal[x.key]=rec;await c.saveMetadata();
+        if(member>=0&&!currentGroup(c)?.disabled_members?.includes(x.ch.avatar)){
+            rec.muting=true;await c.saveMetadata();await c.executeSlashCommandsWithOptions('/member-disable '+member);
+            if(!currentGroup(c)?.disabled_members?.includes(x.ch.avatar))throw Error('角色未静音');
+        }
+        rec.muted=true;await c.saveMetadata();
+        if(await syncNow(true)===false)throw Error('在场区间未同步');
+        await ackLeave(chatKey,{id:source.id,version:source.version,action:source.action,result:rec.status});
+        delete (c.chatMetadata.rpeLeaveRetries??{})[x.key];await c.saveMetadata();
+    }
+    await syncNow(true);
+    render();
+}
 // ---------- 事件 ----------
 
 async function stripDoorMark(id) {
@@ -3486,13 +3560,7 @@ async function stripDoorMark(id) {
 const { eventSource, eventTypes } = ctx();
 const on = (name, fn) => { if (eventTypes[name]) eventSource.on(eventTypes[name], fn); };
 document.addEventListener('click', event => {
-    const retry=event.target?.closest?.('.rpe-leave-retry');
-    if(retry && state.chatKey) {
-        const chatKey=state.chatKey,c=ctx();
-        resetLeaveAttempt(c.chatMetadata.rpeLeaveRetries??={},retry.dataset.leaveKey);
-        c.saveMetadata().then(()=>{if(state.chatKey===chatKey)return autoPeek();}).catch(error=>console.warn('[RP：幕后] 再试离场失败',error));
-        render();return;
-    }
+    if(event.target?.closest?.('.rpe-presence-check')) { pickPresence().catch(e=>globalThis.toastr?.warning(e.message,'核对在场')); return; }
     const guideOpen = event.target?.closest?.('.rpe-guide-open'), guidePicked = event.target?.closest?.('.rpe-guide-pick'), guideWritten = event.target?.closest?.('.rpe-guide-write');
     if (guideOpen) { if (state.guide.open) { state.guide = { open: false, items: [] }; render(); } else askGuide(true); return; }
     if (guidePicked) { guidePick(guidePicked); return; }
@@ -3643,7 +3711,7 @@ async function enterChar(who, avatar = null, opts = {}) {
         if (at < 0) { globalThis.toastr?.warning(`没能把${ch.name}加进群。`, 'RP：幕后'); return false; }
         if (g.disabled_members?.includes(ch.avatar)) await run(`/member-enable ${at}`);
         // 从这一条起在场：之前这里说的话他没听见（没装上下文隔离扩展时，后台只能当他一直在）
-        if (hasCommand('isolate')) await run(`/isolate ${ch.name}`);
+        await openPresence(ch);
         await syncNow(true).catch(() => {});
         globalThis.toastr?.info(`${ch.name}进场中……`, 'RP：幕后', { timeOut: 6000 });
         await arriveNow(ch, opts);
@@ -3679,7 +3747,7 @@ function watchMembers() {
         const ch = (c.characters ?? []).find(x => x.avatar === avatar);
         if (!ch || isCamera(ch)) continue;
         (async () => {
-            if (hasCommand('isolate-leave')) await run(`/isolate-leave ${ch.name}`);
+            await closeCurrentPresence(ch);
             if (state.remote?.avatar === avatar) state.remote = null;
             api('leave', { chatKey: state.chatKey, who: ch.name, avatar }, 240000).catch(() => {});
             globalThis.toastr?.info(`${ch.name}被移出了群，已按离场处理：从这条起${ch.name}不在场。`, 'RP：幕后', { timeOut: 8000 });
@@ -3710,7 +3778,7 @@ function enterAsBefore(ch, doorItem) {
     state.entering.add(avatar);
     (async () => {
         try {
-            if (hasCommand('isolate')) await run(`/isolate ${ch.name}`);
+            await openPresence(ch);
             await syncNow(true).catch(() => {});
             let item = doorItem;
             if (!item) { await refreshDoor().catch(() => {}); item = (state.door?.items ?? []).find(i => i.avatar === avatar || i.who === ch.name) ?? null; }
@@ -3721,20 +3789,27 @@ function enterAsBefore(ch, doorItem) {
             state.entering.delete(avatar);
             refreshDoor().catch(() => {});
         }
-    })().catch(() => {});
+    })().catch(e => globalThis.toastr?.warning(e.message,'在场没落实'));
 }
 // 进场那一步（拉进群判在场、手动取消静音共用）：开区间（since 有就从那条起；早于他上一段在场的末尾就不追，从此刻开），
 // 读回他这一段从第几条起、之前有没有真在场过（零长度的封段不算）。没装上下文隔离扩展：什么都不开，from 为空
 async function openPresence(ch, since = null) {
-    if (!hasCommand('isolate')) return { from: null, since: null, earlier: false };
-    const segsNow = () => ctx().chatMetadata?.contextIsolation?.anchors?.[ch.avatar]?.segments ?? [];
-    const real = s => s && s.to != null && s.to > s.from;
-    const floor = Math.max(0, ...segsNow().filter(real).map(s => s.to));
-    const at = Number.isInteger(since) && since >= floor ? since : null;
-    await run(at != null ? `/isolate ${ch.name} ${at}` : `/isolate ${ch.name}`);
-    const segs = segsNow(), open = segs.find(s => s && s.to == null);
-    const from = Number.isInteger(open?.from) ? open.from : null;
-    return { from, since: at, earlier: from != null && segs.some(s => real(s) && s.from < from) };
+    const c=ctx(),segs=()=>c.chatMetadata?.contextIsolation?.anchors?.[ch.avatar]?.segments??[];
+    const real=s=>s&&s.to!=null&&s.to>s.from;
+    const floor=Math.max(0,...segs().filter(real).map(s=>s.to));
+    const at=Number.isInteger(since)&&since>=floor?since:c.chat.length;
+    const resident=residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot});
+    await openSegment(c,{avatar:ch.avatar,name:ch.name,at,resident});
+    const now=segs(),open=now.find(s=>s?.to==null);
+    const from=Number.isInteger(open?.from)?open.from:resident&&now.length===0?0:null;
+    return{from,since:at===since?since:null,earlier:from!=null&&now.some(s=>real(s)&&s.from<from)};
+}
+async function closeCurrentPresence(ch) {
+    const c=ctx(),at=c.chat?.length-1;
+    if(at<0)return{status:'achieved'};
+    return closeSegment(c,{avatar:ch.avatar,name:ch.name,at,
+        resident:residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot}),
+        disabled:!!currentGroup(c)?.disabled_members?.includes(ch.avatar)});
 }
 const arrivalHow = opts => opts.mode === 'remote' ? (opts.way === '电话' ? '打电话' : '发消息') : null;
 const showArrivalToast = lines => { if (lines.length) globalThis.toastr?.info(lines.map(l => escapeHtml(l)).join('<br>'), 'RP：幕后', { timeOut: ARRIVAL_TOAST_MS, escapeHtml: false }); };
@@ -3834,7 +3909,7 @@ function admitUnmuted(list) {
     const here = () => state.epoch === epoch && state.chatKey === chatKey && memberSnapshot()?.key === snap.key;
     const people = [];
     for (const ch of list) {
-        if (hasCommand('isolate') && (c.chatMetadata?.contextIsolation?.anchors?.[ch.avatar]?.segments ?? []).some(s => s && s.to == null)) { console.log('[RP：幕后] 取消静音：区间本来就开着，不当新进场', ch.name); continue; }
+        if ((c.chatMetadata?.contextIsolation?.anchors?.[ch.avatar]?.segments ?? []).some(s => s && s.to == null)) { console.log('[RP：幕后] 取消静音：区间本来就开着，不当新进场', ch.name); continue; }
         const doorItem = (state.door?.items ?? []).find(i => i.avatar === ch.avatar || i.who === ch.name) ?? null;
         people.push({ avatar: ch.avatar, name: ch.name, doorItem });
     }
@@ -3851,8 +3926,7 @@ async function leaveChar(who) {
     const c = ctx(), group = currentGroup(c);
     const ch = cardNamed(c, who);
     if (!group || !ch || !group.members.includes(ch.avatar)) { globalThis.toastr?.warning(`群里没有「${who}」。`, 'RP：幕后'); return false; }
-    if (hasCommand('isolate-leave')) await run(`/isolate-leave ${ch.name}`);
-    else globalThis.toastr?.warning(`没装上下文隔离扩展：${ch.name}离场以后的事，后台还会当${ch.name}听见了。`, 'RP：幕后', { timeOut: 8000 });
+    await closeCurrentPresence(ch);
     const at = group.members.indexOf(ch.avatar);
     if (!group.disabled_members?.includes(ch.avatar)) await run(`/member-disable ${at}`);
     await syncNow(true).catch(() => {});
@@ -3889,8 +3963,7 @@ async function setUpCamera() {
     if (at >= 0 && !now.disabled_members?.includes(cam.avatar)) await c.executeSlashCommandsWithOptions(`/member-disable ${at}`);
     // 旁白是你的眼睛，看得见你看得见的全部：上下文隔离扩展别因为它刚加进群就只给它加进来以后的那几条（N-292，D 副本实测）
     // 光清掉不够：它头一回开口时隔离扩展会照"名册里新来的"再记一次进场——直接记成从第 0 条起就在
-    if (hasCommand('isolate-clear')) await run(`/isolate-clear ${cam.name}`);
-    if (hasCommand('isolate')) await run(`/isolate ${cam.name} 0`);
+    await ensureCameraPresence(ctx(),{avatar:cam.avatar,name:cam.name});
     globalThis.toastr?.success('旁白在这个群里了（静音）。你一个人的时候它会接；想让它现在写一段，用 /旁白。', 'RP：幕后');
     render();
 }

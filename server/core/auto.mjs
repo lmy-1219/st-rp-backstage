@@ -310,7 +310,7 @@ export function turnFor(store, records, chatKey, { present = [], recentUser = ''
     // 他刚叩的门就是最后一条：停下等玩家，别让屋里的人替玩家接他的话
     if (waiting && waiting.at === messages.at(-1)?.pos) return { queue: [], why: `${waiting.who}刚来联系，等玩家回他` };
     if (board && waiting && waiting.way === '上门') board = { ...board, people: board.people.map(p => (sameName(p.name, waiting.who, names) && p.status === 'present' ? { ...p, status: 'remote', way: '上门' } : p)) };
-    const departed=leaveEvents(store,chatKey).filter(e=>e.action==='leave');
+    const departed=pendingLeaves(store,chatKey).filter(e=>e.action==='leave');
     const came=activeCame(store,chatKey,messages);
     const cameEntered=new Map();
     if(board && came.length) board={...board,people:board.people.map(p=>{
@@ -497,6 +497,12 @@ export function leaveEvents(store, chatKey) {
         const valid=!!source && (!e.basis || e.basis.every(b=>messages.some(m=>m.fp===b.fp&&m.pos===b.pos)));
         const action=valid?'leave':'undo';
         if(e.action!==action) {e.action=action;e.version++;e.state='待落实';}
+        if(action==='leave'&&e.state==='被后来取代') {
+            let anchors={};try{anchors=JSON.parse(store.getMeta?.(`anchors_raw:${chatKey}`)??'{}')??{};}catch{}
+            const segs=anchors[e.avatar]?.segments??[];
+            const came=read(store,AUTO_CAME(chatKey),[]).some(c=>((c.avatar&&c.avatar===e.avatar)||c.who===e.who)&&c.at>e.at&&messages.some(m=>m.pos===c.at&&m.fp===c.fp));
+            if(!segs.some(s=>s?.from>e.at&&s.to!==s.from)&&!came){e.version++;e.state='待落实';}
+        }
         if(source) e.at=source.pos;
         if(action==='undo') {
             const plans=read(store,`away_plan:${chatKey}`,{});
@@ -515,7 +521,7 @@ export function acknowledgeLeaves(store,chatKey,receipts=[]) {
     const events=leaveEvents(store,chatKey);
     for(const r of receipts) {
         const e=events.find(e=>e.id===r.id&&e.version===r.version&&e.action===r.action);
-        if(e) e.state='已落实';
+        if(e) e.state=r.result==='achieved'?'已达成':r.result==='superseded'?'被后来取代':'已落实';
     }
     write(store,LEAVE_EVENTS(chatKey),events);
     return {ok:true,left:pendingLeaves(store,chatKey)};

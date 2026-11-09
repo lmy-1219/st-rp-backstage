@@ -284,7 +284,7 @@ function cacheVersion(store, chat, chatKey, present, recentUser, marks) {
         group: chat.group_id ?? null,
         members: chat.members ?? null,
         cast: (store.getCast?.(chat.story_id) ?? []).map(p => [p.avatar, p.name]),
-        anchors: String(chat.anchors ?? '').length,
+        anchors: createHash('sha256').update(String(chat.anchors ?? '')).digest('hex'),
         arrived,
         arrivals: store.getMeta?.(`arrivals:${chatKey}`) ?? '',
         knocks: store.getMeta?.(`knocks:${chatKey}`) ?? '',

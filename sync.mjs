@@ -521,41 +521,98 @@ export async function applyLeaveEvent(event,{close,mute,reopen,unmute,ack}) {
 }
 
 
-// 只认明确声明零起算、包含来源条的命令说明；识别过程不调用命令。
-export function isolateLeaveSupportsIndex(command) {
-    return typeof command?.helpString==='string'
-        && /\/isolate-leave\s+名字\s+\d+/.test(command.helpString)
-        && command.helpString.includes('包含') && command.helpString.includes('零起算');
-}
-// 原版扩展每次从 chatMetadata 取 anchors，没有另一份区间缓存。
-export async function closeIsolationAt(c,{avatar,name,at}) {
-    if(!Array.isArray(c.chat)||!Number.isInteger(at)||at<0||at>=c.chat.length) throw Error('来源条号无效');
-    const object=v=>v && typeof v==='object' && !Array.isArray(v);
-    const meta=c.chatMetadata;
+// 在场账：读现状、分类、写入并核验。
+const object=v=>v&&typeof v==='object'&&!Array.isArray(v);
+function presenceRecord(c,avatar,name,create=false) {
+    const meta=c?.chatMetadata;
     if(!object(meta)) throw Error('聊天元数据不可用');
-    if(meta.contextIsolation!=null && !object(meta.contextIsolation)) throw Error('隔离元数据格式不符');
-    const isolation=meta.contextIsolation??={};
-    if(isolation.anchors!=null && !object(isolation.anchors)) throw Error('隔离名册格式不符');
-    const anchors=isolation.anchors??={};
-    if(anchors[avatar]!=null && !object(anchors[avatar])) throw Error('角色隔离记录格式不符');
-    const rec=anchors[avatar]??={name,segments:[],brief:''};
-    if(!Array.isArray(rec.segments) || !rec.segments.every(s=>object(s)&&Number.isInteger(s.from)&&s.from>=0&&(s.to==null||Number.isInteger(s.to)))) throw Error('隔离区间格式不符');
-    const end=at+1,date=String(c.chat[at]?.send_date??'');
-    const open=rec.segments.filter(s=>s.to==null);
-    if(open.length>1) throw Error('存在多个开放区间');
-    if(!open.length && rec.segments.some(s=>s.to===end&&s.toDate===date)) {
-        await c.saveMetadata(); // 上次保存失败也必须重试写盘，不能只确认内存。
-    } else {
-        const seg=open[0];
-        if(seg && seg.from>=end) throw Error('来源早于当前进场区间');
-        if(!seg && rec.segments.length) throw Error('当前没有开放的隔离区间');
-        if(seg) {seg.to=end;seg.toDate=date;}
-        else rec.segments.push({from:0,fromDate:'',to:end,toDate:date});
-        await c.saveMetadata();
-    }
-    const saved=c.chatMetadata?.contextIsolation?.anchors?.[avatar]?.segments;
-    if(!Array.isArray(saved)||saved.some(s=>s.to==null)||!saved.some(s=>s.to===end&&s.toDate===date)) throw Error('隔离区间保存后核实失败');
+    if(meta.contextIsolation!=null&&!object(meta.contextIsolation)) throw Error('隔离元数据格式不符');
+    if(meta.contextIsolation?.anchors!=null&&!object(meta.contextIsolation.anchors)) throw Error('隔离名册格式不符');
+    const r=meta.contextIsolation?.anchors?.[avatar];
+    if(r!=null&&!object(r)) throw Error('角色隔离记录格式不符');
+    if(r&&(!Array.isArray(r.segments)||!r.segments.every(s=>object(s)&&Number.isInteger(s.from)&&s.from>=0&&(s.to==null||Number.isInteger(s.to)&&s.to>=s.from)))) throw Error('隔离区间格式不符');
+    if(r||!create)return r??null;
+    return ((meta.contextIsolation??={anchors:{}}).anchors??={})[avatar]={name,segments:[],brief:'',keepBefore:1};
 }
+export function residentFromStart(c,{avatar,name,firstSnapshot}={}) {
+    const chat=c?.chat??[],first=chat.findIndex(m=>m?.is_user),limit=first<0?chat.length:first;
+    return chat.slice(0,limit).some(m=>!m?.is_user&&!m?.is_system&&(m.original_avatar?m.original_avatar===avatar:m.name===name))
+        ||!!(firstSnapshot?.at===0&&firstSnapshot.members?.includes(avatar)&&!firstSnapshot.disabled?.includes(avatar));
+}
+export function classify({kind,segments=[],at,disabled=false,resident=false,sourceValid=true}={}) {
+    if(!Array.isArray(segments))return{status:'correction',reason:'隔离区间格式不符'};
+    if(!sourceValid||!Number.isInteger(at)||at<0)return{status:'correction',reason:'来源或区间不明确'};
+    const open=segments.filter(s=>s?.to==null);
+    if(open.length>1)return{status:'correction',reason:'存在多个开放区间'};
+    if(kind==='open'){
+        if(open[0])return resident&&segments.length===1&&open[0].from>0?{status:'correction',reason:'常驻角色有晚起点首段'}:open[0].from<=at?{status:'achieved',segment:open[0]}:{status:'correction',reason:'已有更晚起点的开放区间'};
+        if(!segments.length&&resident)return{status:'achieved',resident:true};
+        if(segments.some(s=>s?.to>s.from&&s.to>at))return{status:'correction',reason:'进场起点与已有区间重叠'};
+        return{status:'apply'};
+    }
+    if(kind!=='close')return{status:'correction',reason:'操作不明确'};
+    const later=segments.find(s=>s?.from>at&&(s.to==null||s.to>s.from));
+    if(later)return{status:'superseded',segment:later};
+    const owners=segments.filter(s=>s?.from<=at&&(s.to==null||s.to>=at));
+    if(owners.length>1)return{status:'correction',reason:'来源同时贴着多个在场区间'};
+    const own=owners[0];
+    if(own?.to!=null)return{status:'achieved',segment:own,needsMute:!disabled};
+    if(own?.to==null)return{status:'apply',segment:own};
+    if(segments.every(s=>s?.to===s?.from)&&resident)return{status:'apply',resident:true};
+    return{status:'correction',reason:'找不到这次离场所属的在场区间'};
+}
+async function saved(c,avatar,check){await c.saveMetadata();if(!check(presenceRecord(c,avatar)))throw Error('隔离区间保存后核实失败');}
+export async function openSegment(c,{avatar,name,at,resident=false}={}){
+    if(!Array.isArray(c?.chat)||!Number.isInteger(at)||at<0||at>c.chat.length)throw Error('进场条号无效');
+    const r=presenceRecord(c,avatar),v=classify({kind:'open',segments:r?.segments??[],at,resident});
+    if(v.status==='correction')throw Error(v.reason);
+    if(v.status==='achieved')return v;
+    const seg={from:at,fromDate:at?String(c.chat[at-1]?.send_date??''):'',to:null,toDate:''};
+    const target=presenceRecord(c,avatar,name,true);target.name=name;target.segments.push(seg);
+    await saved(c,avatar,r=>r?.segments?.some(s=>s.from===at&&s.to==null));
+    return{status:'applied',segment:seg};
+}
+export async function closeSegment(c,{avatar,name,at,resident=false,disabled=false}={}){
+    if(!Array.isArray(c?.chat)||!Number.isInteger(at)||at<0||at>=c.chat.length)throw Error('来源条号无效');
+    const r=presenceRecord(c,avatar),v=classify({kind:'close',segments:r?.segments??[],at,resident,disabled});
+    if(v.status==='correction')throw Error(v.reason);
+    if(v.status==='superseded')return v;
+    if(v.status==='achieved'){await saved(c,avatar,r=>r?.segments?.some(s=>s.from===v.segment.from&&s.to===v.segment.to));return v;}
+    const target=presenceRecord(c,avatar,name,true),seg=v.segment??{from:0,fromDate:'',to:null,toDate:''};
+    if(!v.segment)target.segments.push(seg);
+    const end=at+1,date=String(c.chat[at]?.send_date??'');seg.to=end;seg.toDate=date;
+    await saved(c,avatar,r=>r?.segments?.some(s=>s.from===seg.from&&s.to===end&&s.toDate===date));
+    return{status:'applied',segment:seg};
+}
+
+export async function restoreSegment(c,{avatar,after,before,later}={}){
+    const rec=presenceRecord(c,avatar),segs=rec?.segments;
+    const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+    const i=segs?.findIndex(s=>same(s,after))??-1;
+    if(i<0||before?.segments?.some(s=>same(s,after)))return false;
+    const prior=before?.segments?.findLast(s=>s.to==null);
+    if(prior)segs[i]={...structuredClone(prior),...(later?{to:later.to,toDate:later.toDate}:{})};
+    else if(later&&!before)segs[i]={from:0,fromDate:'',to:later.to,toDate:later.toDate};
+    else segs.splice(i,1);
+    await saved(c,avatar,r=>JSON.stringify(r?.segments)===JSON.stringify(segs));
+    return true;
+}
+export async function ensureCameraPresence(c,{avatar,name}){
+    const r=presenceRecord(c,avatar,name,true);
+    const first=r.segments[0];
+    if(!first){r.segments.push({from:0,fromDate:'',to:null,toDate:''});}
+    else {first.from=0;first.fromDate='';first.to=null;first.toDate='';r.segments.splice(1);}
+    await saved(c,avatar,x=>x?.segments?.length===1&&x.segments[0].from===0&&x.segments[0].to==null);
+}
+export async function repairResidentSegment(c,{avatar,name,firstSnapshot=null}){
+    const r=presenceRecord(c,avatar);
+    if(!r?.segments?.length||r.segments[0].from===0) return false;
+    if(!residentFromStart(c,{avatar,name,firstSnapshot})) throw Error('没有从头在场的证据');
+    r.segments[0].from=0;r.segments[0].fromDate='';
+    await saved(c,avatar,x=>x?.segments?.[0]?.from===0);
+    return true;
+}
+export const closeIsolationAt=closeSegment;
 export async function runLeaveAttempt({failures,key,event,attempt,save}) {
     const version=`${event.version??0}:${event.action??'leave'}`;
     if(failures[key]?.version===version && failures[key].count>=3) return false;
@@ -573,6 +630,6 @@ export function leaveRetryView(failures={},escape=s=>String(s??'')) {
     const blocked=Object.entries(failures).filter(([,r])=>r?.count>=3);
     return {
         message:blocked.map(([,r])=>`${r.who}离场没落实：${r.reason}`).join('；'),
-        html:blocked.map(([key,r])=>`<button type="button" class="menu_button rpe-leave-retry" data-leave-key="${escape(key)}">${escape(r.who)}：再试</button>`).join('')
+        html:blocked.map(([key,r])=>`<button type="button" class="menu_button rpe-leave-check" data-leave-key="${escape(key)}">${escape(r.who)}：核对在场</button>`).join('')
     };
 }

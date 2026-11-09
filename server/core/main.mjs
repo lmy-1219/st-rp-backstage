@@ -2117,6 +2117,7 @@ async function judgeKnock({ chatKey, who, way, knock, text }) {
     }
 }
 // 同步之后：候着的那条写出来了没有、每次叩门走到哪一步（进场／作废）
+const pendingLeftLog = new Map();
 const autoBusy = new Map();   // chatKey → 正在跑的那一次（同步钩子起的；扩展问"谁接"时先等它跑完，别拿到作废前的旧账）
 async function autoRun({ chatKey }) {
     const cfg = getConfig();
@@ -2158,6 +2159,9 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
     if(found.length) markLeft(store,chatKey,found);
     for(const l of found) leave({chatKey,who:l.who,avatar:l.avatar,anchor:l,how:l.how}).catch(error=>log(`leave plan failed: ${error.message}`));
     const left=takePendingLeft(store,chatKey);
+    const old=left.filter(e=>!found.some(f=>f.at===e.at&&f.fp===e.fp&&f.avatar===e.avatar));
+    const pendingState=old.map(e=>`${e.id}:${e.version}:${e.action}:${e.state}`).sort().join('|');
+    if(pendingLeftLog.get(chatKey)!==pendingState){pendingLeftLog.set(chatKey,pendingState);if(old.length)log(`auto ${chatKey}: 旧待落实 ${old.length} 件`);}
     const t = turnFor(store, records, chatKey, { present, recentUser, config: cfg });
     let knock = pendingKnock(store, chatKey);
     // 叩门的时机（空当：承接的一句、刚换时段、旁白刚写完、身边没人）到了就先叩，屋里的人"顺着接一手"那类弱由头让位；玩家点了名的那一句照样先答
@@ -2175,7 +2179,7 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
     const first = t.queue.find(q => q.avatar);
     if (first && recentUser) try { prefetchFor(store, records, { assembler, keyMaker }, { chatKey, recentUser, present, only: [first.avatar] }); } catch {}
     const out = { queue: t.queue, why: t.why, knock: knock ? { who: knock.who, avatar: knock.avatar, way: knock.way, at: knock.at, label: knock.label ?? '' } : null, left, ...tail() };
-    log(`turn ${chatKey}: [${out.queue.map(q => `${q.who}·${q.role}${q.back ? '·叫回来' : ''}`).join(' ')}]${out.knock ? ` 叩门 ${out.knock.who}（${out.knock.way}）` : ''}${out.waiting ? ` 候着 ${out.waiting.who}` : ''}${out.lapsed.length ? ` 作废 ${out.lapsed.map(l => l.who).join(' ')}` : ''}${out.left.length ? ` 走了 ${out.left.map(l => l.who).join(' ')}` : ''}${!out.queue.length ? ` — ${out.why}` : ''}`);
+    log(`turn ${chatKey}: [${out.queue.map(q => `${q.who}·${q.role}${q.back ? '·叫回来' : ''}`).join(' ')}]${out.knock ? ` 叩门 ${out.knock.who}（${out.knock.way}）` : ''}${out.waiting ? ` 候着 ${out.waiting.who}` : ''}${out.lapsed.length ? ` 作废 ${out.lapsed.map(l => l.who).join(' ')}` : ''}${found.length ? ` 新判定走了 ${found.map(l => l.who).join(' ')}` : ''}${!out.queue.length ? ` — ${out.why}` : ''}`);
     return out;
 }
 // 打字时预跑问"这句之后谁会开口"（server /v1/prefetch）：排到的人、门上该叩的那位；关着返回 null（照旧替在场的人都预跑）
