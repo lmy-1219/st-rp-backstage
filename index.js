@@ -3323,6 +3323,20 @@ async function autoSpeak(q) {
         return true;
     }
     const ch = cardNamed(c, q.who, q.avatar);
+    if (!ch) return false;
+    if (q.enter) {
+        state.entering.add(ch.avatar);
+        try {
+            if (!group.members.includes(ch.avatar)) await run(`/member-add ${ch.avatar}`);
+            const g = currentGroup(ctx()), i = g?.members.indexOf(ch.avatar) ?? -1;
+            if (i < 0) return false;
+            if (g.disabled_members?.includes(ch.avatar)) await run(`/member-enable ${i}`);
+            if (hasCommand('isolate')) await run(`/isolate ${ch.name} ${q.enter.at}`);
+            auto.noRepeat = q.noRepeat ? ch.avatar : null;
+            await c.executeSlashCommandsWithOptions(`/trigger await=true ${i}`);
+            return true;
+        } finally { state.entering.delete(ch.avatar); followBase(); }
+    }
     const at = ch ? group.members.indexOf(ch.avatar) : -1;
     if (at < 0) return false;
     if (group.disabled_members?.includes(ch.avatar)) {

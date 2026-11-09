@@ -32,7 +32,7 @@ export function stageOfSpeaker(speaker) {
     if (s === '(规划)') return 'plan';
     if (s.startsWith('(离开推演')) return 'away';   // 含"按玩家改"那一次
     if (s === '(结算)') return 'scene';
-    if (s === '(镜头外回话)') return 'scene';
+    if (s === '(镜头外回话)' || s === '(知会)') return 'scene'; // T106 知会，同镜头外回话一档
     if (s === '(局势)' || s === '(持续的事)') return 'situation';
     if (s.startsWith('(参谋')) return 'advisor';
     if (s.startsWith('(开局单')) return 'setup';

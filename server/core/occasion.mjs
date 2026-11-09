@@ -12,6 +12,8 @@ const isNarrator = m => !!m && !m.is_user && (m.speaker === CAMERA || m.name ===
 // 腰只认有人碰腰（弯腰、腰封、腰包不算）；埋进/埋在要接怀颈胸肩发。被子里仍算强信号：日常里很少说钻进被子里而不带别的。
 const STRONG_CLOSE = /吻|亲上|亲了|呻吟|喘息|被子里|解开[^，。；！？]{0,4}(?:衣|扣|裤|裙|胸|领)|脱(?:下|掉|去|了)[^，。；！？]{0,4}(?:衣|裤|裙|衬|外套|内)|褪(?:下|去|到)|舌头|舌尖|伸舌|舌吻|唇舌|胯|大腿根|交缠|缠在一起|动情|情动|欲望|唇齿|啃咬|咬住[^，。；！？]{0,3}(?:唇|耳|颈|肩)|含住|吮/;
 const SOFT_CLOSE = /抱紧|搂紧|搂住|搂进|贴着|贴上|贴紧|体温|耳垂|后颈|锁骨|喉结|发烫|滚烫|发颤|轻颤|气息|鼻息|呼吸(?:乱|急|重|滚)|额头抵|抵着|唇|嘴唇|舔|压在|压上|压住|床上|(?:搂|揽|环|掐|箍)(?:住|着|紧)?[^，。；！？]{0,2}腰|(?:手|指|掌)[^，。；！？]{0,3}腰间|胸口|指尖|指腹|掌心|耳边|颈侧|脖颈|埋(?:进|在)[^，。；！？]{0,3}(?:怀|颈|胸|肩|发)/;
+const SOFT_PART = /耳垂|后颈|锁骨|喉结|胸口|指尖|指腹|掌心|耳边|颈侧|脖颈/;
+const SOFT_CLOSE_ACTION = /抱紧|搂紧|搂住|搂进|贴着|贴上|贴紧|体温|发烫|滚烫|发颤|轻颤|气息|鼻息|呼吸(?:乱|急|重|滚)|额头抵|抵着|唇|嘴唇|舔|压在|压上|压住|床上|(?:搂|揽|环|掐|箍)(?:住|着|紧)?[^，。；！？]{0,2}腰|(?:手|指|掌)[^，。；！？]{0,3}腰间|埋(?:进|在)[^，。；！？]{0,3}(?:怀|颈|胸|肩|发)/;
 const STRONG_TENSE = /开火|开枪|子弹|射击|瞄准|扳机|枪口|中弹|爆炸|炸开|砍|捅|刺进|(?<!狗)血(?:流|涌|溅|泊|淋)|追上来|追了上来|包围|埋伏|警笛|警报|持枪|枪声|交火|打起来|扭打|撕打/;
 const SOFT_TENSE = /枪|(?<!菜|水果|餐|削[^，。；！？]{0,3})刀(?!鞘|叉|具)|血|撞|(?<!油|煎|酥|干)炸(?!鸡|肉|面|串|薯|酱|糕|饼|丸|虾|鱼|排|[^，。；！？]{0,3}肉)|追|逃|跑|扑|揍|拳|踹|吼|喊|尖叫|威胁|逼近|退后|躲|(?<!灯[^，。；！？]{0,6})(?<!一闪一)闪(?!烁|光|着光|一闪)|摔|砸|撞开|踢开|冲出|冲进|压低身|趴下|掩体|拔出|掏出/;
 const count = (text, re) => (String(text ?? '').match(new RegExp(re.source, 'g')) ?? []).length;
@@ -40,7 +42,12 @@ export function occasionStrict(messages = [], { except = null, window = WINDOW }
     const rows = messages.filter(m => m && !(except && (m.name === except || m.speaker === except))).slice(-window);
     const closeRows = closeCountsByMessage(rows, { window });
     const strongClose = closeRows.reduce((n, r) => n + r.strong, 0);
-    const close = strongClose >= 1 || closeRows.some(r => r.soft >= 3);
+    const close = strongClose >= 1 || rows.some(m => {
+        if (isNarrator(m)) return false;
+        const nar = narrationOf(m.text) ?? '';
+        const parts = count(nar, SOFT_PART), actions = count(nar, SOFT_CLOSE_ACTION);
+        return parts + actions >= 3 && actions >= 2;
+    });
     const strongTense = tenseStrongCount(rows, { window });
     const tense = strongTense >= 1;
     if (close && !tense) return '亲密';

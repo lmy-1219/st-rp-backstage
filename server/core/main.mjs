@@ -41,13 +41,13 @@ import { SETTLE_SYSTEM, settlePrompt, parseSettle } from './settle.mjs';
 import { crewOf, crewEntry, latestNode, crewPushDue, pushedMeta, pushKey, pushText } from './crew.mjs';
 import { secretCandidates, recordSecretLeaks, activeLeaks, secretLeakLines } from './held.mjs';
 import { bodyGate, holdBodyContact, heldContactText } from './body.mjs';
-import { ASK_SYSTEM, askPrompt, parseAsk, knownFor, exchangeRecords } from './offstage.mjs';
+import { ASK_SYSTEM, askPrompt, parseAsk, knownFor, exchangeRecords, INFORM_SYSTEM, informPrompt, parseInform } from './offstage.mjs';
 import { lifeSheet, homeChanged } from './life.mjs';
 import { boardFor } from './board.mjs';
 import { awayPlansOf } from './opening.mjs';
 import { unansweredLine, promisesFor, pullOf, placeNow } from './waiting.mjs';
 import { doorFor } from './door.mjs';
-import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFor, autoLeave, markLeft, waitingKnock, pendingKnock, knocksOf, sourceStep, recentLapsed, leaveDoubts, answerLeaves, takePendingLeft, acknowledgeLeaves, KNOCK_JUDGE_SYSTEM, knockJudgePrompt, parseKnockJudge } from './auto.mjs';   // 自动进离场与调度（D-201）
+import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFor, autoLeave, markLeft, waitingKnock, pendingKnock, knocksOf, sourceStep, recentLapsed, leaveDoubts, answerLeaves, cameDoubts, answerCame, takePendingLeft, acknowledgeLeaves, KNOCK_JUDGE_SYSTEM, knockJudgePrompt, parseKnockJudge } from './auto.mjs';   // 自动进离场与调度（D-201）
 import { pendingFor } from './pending.mjs';
 import { planBrief, planningView, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimateSetup, intimatePlanOptions } from './slot.mjs';
 import { AWAY_SYSTEM, AWAY_REVISE_SYSTEM, parseAway, awayPrompt, revisePrompt, pinNames, actualDaysOf } from './away.mjs';
@@ -721,14 +721,15 @@ async function runGlance({ chatKey }) {
     const cfg = getConfig();
     const merged = cfg.glance?.enabled !== false;
     if (!merged) await Promise.all([runState({ chatKey }).catch(() => {}), runScene({ chatKey }).catch(() => {})]);
-    let st = null, sc = null, doubts = [];
+    let st = null, sc = null, doubts = [], came = [];
     try { if (merged) st = prepareState({ chatKey }); } catch (error) { log(`state ${chatKey} failed: ${error.message}`); }
     try { if (merged) sc = prepareScene({ chatKey }); } catch (error) { log(`scene ${chatKey} failed: ${error.message}`); }
     // 第三眼：自动离场拿不准的那几位（auto.leaveDoubts），顺着这一次问；两眼都不用看时单独小问一次
     try { if (cfg.auto?.enabled && cfg.auto.leave) doubts = leaveDoubts(store, records, chatKey, { config: cfg }); } catch (error) { log(`leave doubts ${chatKey} failed: ${error.message}`); }
-    if (!st && !sc && !doubts.length) return;
-    if (!st && !doubts.length) return runScene({ chatKey, prepared: sc });
-    if (!sc && !doubts.length) return runState({ chatKey, prepared: st });
+    try { if (cfg.auto?.enabled && cfg.auto.turn) came = cameDoubts(store, records, chatKey, { config: cfg }); } catch (error) { log(`came doubts ${chatKey} failed: ${error.message}`); }
+    if (!st && !sc && !doubts.length && !came.length) return;
+    if (!st && !doubts.length && !came.length) return runScene({ chatKey, prepared: sc });
+    if (!sc && !doubts.length && !came.length) return runState({ chatKey, prepared: st });
     const s = cfg.stages.scene;
     if (!s?.baseUrl || !s.apiKey || !s.model || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return;
     if (st) stateBusy.add(chatKey);
@@ -737,7 +738,7 @@ async function runGlance({ chatKey }) {
     const msgs = store.currentMessages(chatKey).filter(m => !m.hidden);
     const userName = [...msgs].reverse().find(m => m.is_user)?.name ?? '玩家';
     try {
-        const r = await completeGlance({ config: cfg, spentToday: records.spentToday(), state: st?.user ?? null, scene: sc?.user ?? null, doubts, messages: msgs, userName,
+        const r = await completeGlance({ config: cfg, spentToday: records.spentToday(), state: st?.user ?? null, scene: sc?.user ?? null, doubts, came, messages: msgs, userName,
             complete: prompt => createModelClient({ ...s, maxOutputTokens: 8000 }).complete({ ...prompt, system: renderPronouns(extractSystem(prompt.system, promptOptionsFor(store, chatKey, cfg)), playerContext(store, chatKey)) }) });
         if (!r) return;
         const costUsd = ((r.usage?.input ?? 0) * s.priceInPerM + (r.usage?.output ?? 0) * s.priceOutPerM) / 1e6;
@@ -757,6 +758,10 @@ async function runGlance({ chatKey }) {
                 for (const g of gone) { log(`auto ${chatKey}: ${g.who} 走了（看一眼：${g.why}）`); leave({ chatKey, who: g.who, avatar: g.avatar, anchor: g, how: g.how }).catch(() => {}); }
                 if (!gone.length) log(`auto ${chatKey}: 本次没有确认离场，没判的保留复核`);
             } else log(`auto ${chatKey}: glance_left_bad_json`);
+        }
+        if (came.length) {
+            if (got.came) for (const c of answerCame(store, chatKey, came, got.came)) log(`auto ${chatKey}: ${c.who} 来了（看一眼：${c.quote}）`);
+            else log(`auto ${chatKey}: glance_came_bad_json`);
         }
     } catch (error) {
         records.logAssemble({ chatKey, speaker: '(看一眼)', model: s.model, status: 'failed', usage: error.usage ?? null, ms: Date.now() - started, error: error.message });
@@ -1026,6 +1031,38 @@ async function askAway({ chatKey, pos, fp, asker, askerAvatar, target, targetAva
     } catch (error) {
         records.logAssemble({ chatKey, speaker: '(镜头外回话)', model: s.model, status: 'failed', usage: error.usage ?? null, ms: Date.now() - started, error: error.message });
         log(`askAway ${chatKey} failed: ${error.message}`);
+        return { ok: false };
+    }
+}
+
+// 不在场的有卡人牵扯进约定或安排：后台按批判定他照常理会事先听到哪部分。
+async function informAway({ chatKey, candidates }) {
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
+    const cfg = getConfig(), s = cfg.stages.scene;
+    if (!cfg.offstage?.enabled || !s?.baseUrl || !s.apiKey || !s.model || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return { ok: true, skipped: true };
+    const chat = store.requireChat(chatKey);
+    const live = records.visible(chatKey);
+    const batch = candidates.filter(c => live.some(r => r.id === c.source && r.fp === c.fp && !r.closed_by && !r.superseded_by));
+    if (!batch.length) return { ok: true, skipped: true };
+    const started = Date.now();
+    try {
+        const r = await createModelClient({ ...s, maxOutputTokens: 1200 }).complete({ system: INFORM_SYSTEM, user: informPrompt(batch) });
+        const costUsd = ((r.usage?.input ?? 0) * s.priceInPerM + (r.usage?.output ?? 0) * s.priceOutPerM) / 1e6;
+        const made = parseInform(r.text, batch);
+        records.logAssemble({ chatKey, speaker: '(知会)', model: s.model, servedModel: r.servedModel, status: made ? 'done' : 'failed', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text, error: made ? null : '知会 JSON 无效' });
+        if (!made) { log(`offstage ${chatKey}: 知会 JSON 无效`); return { ok: false }; }
+        const current = records.visible(chatKey);
+        const counts = new Map();
+        for (const d of made) {
+            if (!current.some(x => x.id === d.source && x.fp === d.fp && !x.closed_by && !x.superseded_by)) continue;
+            records.addDerived({ storyId: chat.story_id, ...d });
+            counts.set(d.holderName, (counts.get(d.holderName) ?? 0) + 1);
+        }
+        for (const [who, n] of counts) log(`offstage ${chatKey}: ${who} 知会 ${n} 件`);
+        return { ok: true, count: [...counts.values()].reduce((a, b) => a + b, 0) };
+    } catch (error) {
+        records.logAssemble({ chatKey, speaker: '(知会)', model: s.model, status: 'failed', usage: error.usage ?? null, ms: Date.now() - started, error: error.message });
+        log(`offstage ${chatKey} inform failed: ${error.message}`);
         return { ok: false };
     }
 }
@@ -2159,7 +2196,7 @@ async function autoAnswer({ chatKey, who, answer }) {
 const settings = () => {
     const config = loadConfig(home);
     const split = { ...config.extractor, ...config.stages.setup };
-    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, guide: config.guide, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, onStall: stallSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, seeds: chatKey => packOf(chatKey)?.seeds ?? [], prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation: config.situation.enabled ? situation : null }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null } };
+    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, guide: config.guide, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, onStall: stallSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, seeds: chatKey => packOf(chatKey)?.seeds ?? [], prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation: config.situation.enabled ? situation : null }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null, inform: informAway } };
 };
 const server = createServer(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
 server.on('error', error => {

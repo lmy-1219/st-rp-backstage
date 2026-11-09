@@ -43,7 +43,7 @@ import { timeline, clockNow, dateIn, dayNumber, weekdayIndex, PARTS, withNoteMar
 import { scaleOf, DAY } from './timescale.mjs';
 import { paceOf } from './tempo.mjs';
 import { promiseOf, stageOf, promiseLines, relatedTo, retime, partyOf, LAPSED, settledTwins, settledByDoing, dueOf } from './promises.mjs';
-import { offstageFacts, reachDeliveries, asksAway, replyLines } from './offstage.mjs';
+import { offstageFacts, reachDeliveries, informCandidates, asksAway, replyLines } from './offstage.mjs';
 import { matchFacts, factLines, planFactLines } from './facts.mjs';
 import { driftItems, longGive, activeLong } from './drift.mjs';
 import { episodeLines, asksPast, EPISODE_CHARS } from './episodes.mjs';
@@ -1805,6 +1805,16 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             for (const d of made) if (!all.some(r => r.fp === d.fp && r.holder_name === d.holderName && r.text === d.text)) records.addDerived({ storyId, ...d });
             const maxId = Math.max(since, ...all.map(r => r.id));
             if (first || maxId > since) store.setMeta?.(key, String(maxId));
+            // 第一次把仍开着的旧约定也看一遍；往后按记录号前进。同一条、同一人只问一次。
+            if (typeof offstage?.inform === 'function') {
+                const informKey = `inform_since:${chatKey}`;
+                const informFirst = store.getMeta?.(informKey) == null;
+                const informSince = Number(store.getMeta?.(informKey) ?? 0) || 0;
+                const candidates = informCandidates({ visible: all, since: informSince, first: informFirst, roster, rel, player, userName });
+                for (let i = 0; i < candidates.length; i += 4) offstage.inform({ chatKey, candidates: candidates.slice(i, i + 4) })?.catch?.(() => {});
+                const informMax = Math.max(informSince, ...all.map(r => r.id));
+                if (informFirst || informMax > informSince) store.setMeta?.(informKey, String(informMax));
+            }
             // 问不在场的人：最近两条里还没看过的（看到哪了连指纹记着，删回去、换分支就重看）
             if (typeof offstage?.ask === 'function') {
                 const offstageKey = `offstage_seen:${chatKey}`;

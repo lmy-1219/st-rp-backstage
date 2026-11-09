@@ -83,6 +83,61 @@ export function reachDeliveries({ visible = [], since = 0, roster = [] } = {}) {
     return out;
 }
 
+// ④ 约定或安排牵扯到不在场的有卡人：先挑出有可能该知会的人，再让模型判哪部分会告诉他。
+export function informCandidates({ visible = [], since = 0, first = false, roster = [], rel = null, player = [], userName = null } = {}) {
+    const carded = cardedOf(roster);
+    const names = roster.map(e => e.name);
+    const isPlayer = n => !!n && [userName, ...player].filter(Boolean).some(p => sameName(p, n, names));
+    const out = [], seen = new Set();
+    for (const r of visible) {
+        if (!first && !(r.id > since)) continue;
+        // 首次回溯也只补还开着的事；已经了结或改掉的约定不再提前知会。
+        if ((!r.todo && !r.promise && r.type !== '协议') || !['将来', '现在'].includes(r.tense) || r.fabricated || r.guess || r.closed_by || r.superseded_by) continue;
+        for (const e of carded) {
+            if (isPlayer(e.name)) continue;
+            const p = personOf(rel, e.name, names);
+            const called = [e.name, ...(p?.又名 ?? [])].filter(Boolean);
+            const place = String(p?.地盘 ?? '').trim();
+            if (!called.some(n => String(r.text ?? '').includes(n)) && !(place.length >= 2 && String(r.text ?? '').includes(place))) continue;
+            const same = n => !!n && [e.name, ...(p?.又名 ?? [])].some(a => sameName(a, n, names));
+            if (same(r.holder_name) || (r.audience ?? []).some(same)) continue;
+            const key = `${r.id}:${e.name}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ source: r.id, fp: r.fp, text: r.text, who: e.name, avatar: e.avatar, keys: r.keys ?? [], holderName: r.holder_name, audience: r.audience ?? [] });
+        }
+    }
+    return out;
+}
+
+export const INFORM_SYSTEM = [
+    '这些约定或安排牵扯到当时不在场的人。照常理，办事的人会事先让这个人知道哪些部分？只写会被告知的，例如要送来什么、什么时候、谁来、要准备什么。',
+    '没听见且没人会特意告诉他的谈价、垫钱、威胁、算计，不要写。突袭、瞒着他、只是提到名字等照常理不会提前知会的，不列出。',
+    '只输出 JSON 数组：[{"编号": 记录号, "谁": "名字", "知道": "一句，以这个人为主语", "谁告诉的": "名字"}]。不会知道的项不要列出。每个编号和人只写一次。'
+].join('\n');
+export function informPrompt(candidates = []) {
+    return candidates.map(c => `【编号 ${c.source}；不在场的人 ${c.who}】当时知道的人：${[c.holderName, ...c.audience].filter(Boolean).join('、') || '未记下'}\n${c.text}`).join('\n\n');
+}
+export function parseInform(text, candidates = []) {
+    const s = String(text ?? ''), a = s.indexOf('['), b = s.lastIndexOf(']');
+    if (a < 0 || b <= a) return null;
+    let rows;
+    try { rows = JSON.parse(s.slice(a, b + 1)); } catch { return null; }
+    if (!Array.isArray(rows)) return null;
+    const out = [], seen = new Set();
+    for (const row of rows) {
+        if (!row || !Number.isInteger(row['编号'])) continue;
+        const c = candidates.find(x => x.source === row['编号'] && x.who === row['谁']);
+        if (!c) continue;
+        const known = String(row['知道'] ?? '').trim(), teller = String(row['谁告诉的'] ?? '').trim();
+        const key = `${c.source}:${c.who}`;
+        if (known.length < 8 || known.length > 120 || !teller || teller.length > 40 || seen.has(key)) continue;
+        seen.add(key);
+        out.push({ source: c.source, fp: c.fp, type: '说', text: `${c.who}事先听${teller}说了：${known}`, holder: c.avatar, holderName: c.who, audience: [c.who], about: c.who, keys: c.keys, links: [{ to: c.source, kind: TOLD_LINK }] });
+    }
+    return out;
+}
+
 // ③ 在场的有卡的人隔着消息、电话问不在场的有卡的人。messages：最近几条（已经看过的不算）；absent(name)：他这会儿不在场（场面表）
 // 叙述（括号里）点了那个人的名，又写着发消息、打电话、联系、问他；他说出口的话（括号外）就是问的内容，没有就取那一段叙述
 const NOT_CONTACT = /要不要|要不(?!是)|不如|还是先|打算|准备|想给|想去|改天|回头再|等会儿再|还没|没给|没有给|没打|没拨|没发|别给|不用给|先别/;

@@ -311,6 +311,14 @@ export function turnFor(store, records, chatKey, { present = [], recentUser = ''
     if (waiting && waiting.at === messages.at(-1)?.pos) return { queue: [], why: `${waiting.who}刚来联系，等玩家回他` };
     if (board && waiting && waiting.way === '上门') board = { ...board, people: board.people.map(p => (sameName(p.name, waiting.who, names) && p.status === 'present' ? { ...p, status: 'remote', way: '上门' } : p)) };
     const departed=leaveEvents(store,chatKey).filter(e=>e.action==='leave');
+    const came=activeCame(store,chatKey,messages);
+    const cameEntered=new Map();
+    if(board && came.length) board={...board,people:board.people.map(p=>{
+        const c=came.filter(c=>(c.avatar&&c.avatar===p.avatar)||c.who===p.name).at(-1);
+        if(!c || p.status==='present' || (['away','absent','never'].includes(p.status) && p.since!=null && p.since!=='' && Number(p.since)>=c.at)) return p;
+        cameEntered.set(p.name,c.at);
+        return {...p,status:'present',since:c.at};
+    })};
     const lastUser=messages.findLast(m=>m.is_user)?.pos ?? -1;
     const excluded=new Set();
     if(board) board={...board,people:board.people.map(p=>{
@@ -324,16 +332,75 @@ export function turnFor(store, records, chatKey, { present = [], recentUser = ''
     const d = turnDetail({ text: recentUser || null, messages, board, roster, relations, wants: wantsFor(store, records, chatKey, { messages, timeline: tl }), pace: paceFor(store, chatKey), userName, present,
         stateNotes: store.stateNotesOf?.(chatKey) ?? [], cap: Number(auto.cap) > 0 ? Number(auto.cap) : null, chain: auto.chain ?? null });   // 没填（null）按节奏档，别算成 0；chain 没填按默认
     // back：刚走的人被点名，直接叫回来（不走进场那套）——扩展要先取消静音、开区间
-    return { queue: d.queue.map(q => ({ who: q.who, avatar: q.who === '旁白' ? null : avatarFor(ctx, q.who), role: q.role, why: q.why, noRepeat: !!q.noRepeat, ...(/叫回来/.test(q.why ?? '') ? { back: true } : {}) })), why: d.why };
+    return { queue: d.queue.map(q => ({ who: q.who, avatar: q.who === '旁白' ? null : avatarFor(ctx, q.who), role: q.role, why: q.why, noRepeat: !!q.noRepeat,
+        ...(cameEntered.has(q.who) ? { enter: { at: cameEntered.get(q.who) } } : {}),
+        ...(/叫回来/.test(q.why ?? '') ? { back: true } : {}) })), why: d.why };
 }
 
 /**
  * 谁走了（场面表上在场、远程的人逐个看；拿得准的才算）：返回还没记过的 [{ who, avatar, how, at, fp, why }]；记过的（markLeft）那条还在就不再报，删了就重新算
  */
 export const LEAVE_ASK = chatKey => `leave_ask:${chatKey}`;
+export const CAME_ASK = chatKey => `came_ask:${chatKey}`;
+export const AUTO_CAME = chatKey => `auto_came:${chatKey}`;
 export const LEFT_PENDING = chatKey => `auto_left_pending:${chatKey}`;
 const squashQuote = t => String(t??'').replace(/[\p{P}\s]/gu,'');
 const isOwn = (m,p) => !m.is_user && (m.name===p.name || (!!p.avatar && m.speaker===p.avatar));
+// 正文已把有卡的人带到场面：先按名册叫法挑候选，模型只复核这些人。
+export function cameDoubts(store, records, chatKey, { present = [], config = null } = {}) {
+    if (config?.auto?.enabled === false || config?.auto?.turn === false) return [];
+    let ctx, board;
+    try { ctx = context(store, records, chatKey, { present }); board = ctx.board(); } catch { return []; }
+    const { messages, roster, names, relations } = ctx;
+    const userAt = messages.findLastIndex(m => m.is_user);
+    if (userAt < 0) return [];
+    const asked = read(store, CAME_ASK(chatKey), []).filter(a => messages.some(m => m.pos === a.at && m.fp === a.fp));
+    const arrived = activeCame(store, chatKey, messages);
+    const rel = relations ? normalizeRelations(relations) : null;
+    const out = [];
+    for (const entry of roster.filter(hasCard)) {
+        if (entry.role === '不用') continue;
+        const p = board.people.find(p => sameName(p.name, entry.name, names));
+        if (p && ['present', 'remote'].includes(p.status)) continue;
+        if (arrived.some(a => (a.avatar && a.avatar === entry.avatar) || a.who === entry.name)) continue;
+        const aliases = callsOf(entry.name, { rel, names });
+        const hit = messages.slice(userAt).findLast(m => aliases.some(n => n && String(m.text ?? '').includes(n)));
+        if (!hit || asked.some(a => a.who === entry.name && a.at === hit.pos && a.fp === hit.fp)) continue;
+        out.push({ who: entry.name, avatar: entry.avatar ?? null, aliases, at: hit.pos, fp: hit.fp,
+            through: messages.at(-1).pos, throughFp: messages.at(-1).fp });
+    }
+    return out;
+}
+export function activeCame(store, chatKey, messages = live(store.currentMessages(chatKey))) {
+    const departed = leaveEvents(store, chatKey).filter(e => e.action === 'leave');
+    return read(store, AUTO_CAME(chatKey), []).filter(c => messages.some(m => m.pos === c.at && m.fp === c.fp)
+        && !departed.some(e => ((c.avatar && e.avatar === c.avatar) || e.who === c.who) && e.at > c.at));
+}
+export function answerCame(store, chatKey, doubts, verdicts) {
+    const messages = live(store.currentMessages(chatKey));
+    const asked = read(store, CAME_ASK(chatKey), []).filter(a => messages.some(m => m.pos === a.at && m.fp === a.fp));
+    const came = read(store, AUTO_CAME(chatKey), []).filter(c => messages.some(m => m.pos === c.at && m.fp === c.fp));
+    const userAt = messages.findLastIndex(m => m.is_user);
+    const accepted = [];
+    for (const d of doubts) {
+        const anchor = messages.find(m => m.pos === d.at && m.fp === d.fp);
+        const last = messages.find(m => m.pos === d.through && m.fp === d.throughFp);
+        const v = verdicts?.[d.who];
+        if (!anchor || !last || !v || !['到了', '没到'].includes(v['结果'])) continue;
+        const evidenceIndex = messages.findIndex(m => Number.isInteger(v['条']) && m.pos === v['条']);
+        const evidence = messages[evidenceIndex];
+        if (!evidence || evidenceIndex < Math.max(0, userAt - 3) || evidence.pos > last.pos
+            || typeof v['引'] !== 'string' || [...v['引']].length > 20 || !squashQuote(v['引'])
+            || !squashQuote(evidence.text).includes(squashQuote(v['引']))) continue;
+        asked.push({ who: d.who, at: d.at, fp: d.fp });
+        if (v['结果'] !== '到了') continue;
+        const item = { who: d.who, avatar: d.avatar ?? null, at: evidence.pos, fp: evidence.fp, quote: v['引'] };
+        if (!came.some(c => c.who === item.who && c.at === item.at && c.fp === item.fp)) { came.push(item); accepted.push(item); }
+    }
+    write(store, CAME_ASK(chatKey), asked.slice(-60));
+    if (accepted.length) write(store, AUTO_CAME(chatKey), came.slice(-60));
+    return accepted;
+}
 function reviewsOf(store, chatKey, messages) {
     return read(store,LEAVE_ASK(chatKey),[]).filter(r => messages.some(m=>m.pos===r.at && m.fp===r.fp)
         && (r.evidenceAt==null || messages.some(m=>m.pos===r.evidenceAt&&m.fp===r.evidenceFp))
