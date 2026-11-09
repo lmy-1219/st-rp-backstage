@@ -167,26 +167,34 @@ export const WORLD = '世界';
 // 玩家的角色提了新想法时看一眼（便宜模型）：是不是认真要长期去做的新方向、对不对得上这一局备着的哪条线。是就重新规划（N-72：当引力，不当轨道）。
 export const TURN_CHECK_SYSTEM = [
     '下面是一部长篇角色扮演眼下这个阶段的规划、这一局备着的几条线，以及玩家的角色刚提出的想法、刚说的话。',
-    '判断下面七件事：',
+    '判断下面八件事：',
     '一、有没有玩家认真提出的、要长期去做的新方向——不是随口一说、不是气话玩笑、不是眼前的小事，也不在眼下这个阶段的规划里（转向）。',
     '二、玩家有没有明确不要眼下这个阶段里的某件事、某条线了——拒绝、放弃、推给别人、翻脸、毁掉（弄断）。随口抱怨、犹豫、"再说吧"不算。',
     '三、别的角色（不是玩家）有没有认真起了一个要长期去做的新念头（念头）——比如要去找一个人、要换个活法、要了结一桩旧事；眼下这个阶段的规划里没有它。随口一说、气话、眼前的小事不算。',
     '四、刚发生的变化有没有让这个阶段规划时设想的局面不成立了（变了）——关系、人员、秘密发生变化，或某件事、某条支线提前办成，以致规划里的线、关系、往后的打算有一截对不上。整段收束标志达成归第七问算成；只是往规划方向走了一步，不算变了。',
     '五、刚发生的事里有没有会在外头发酵的（闹大了）——当众亮了身份、报了名号；动了手、伤了人、死了人；得罪了有来头的人或一伙人；放了狠话；大笔钱进出；被不该看见的人看见了；有人说要把话传出去。会有人听说、会有人找上门、会引来反应的才算；两个人关起门说的话、日常小事不算。',
     '六、刚发生的事有没有让【还等着的事和它们的前提】里哪几件的前提不成立了（前提没了）——它写着"还没"的已经发生了、它靠着的人或东西已经不在那儿了、它要办的事已经办了或者换了办法。只是还没到时候、还没轮到，不算；没给这一段就不用管。',
-    '七、这一段的收束标志已经在正文里发生了吗（算成）？逐字对照【怎样算成】和已发生的事实；打算、承诺、候选不算，只有一条支线办成不等于整段算成。拿不准就算没有。',
-    '只按原话判断，不猜；拿不准就算没有。只输出一个 JSON：{"算成": true 或 false, "算成依据": "一句，引已经发生的事实", "转向": true 或 false, "弄断": true 或 false, "变了": true 或 false, "发酵": true 或 false, "发酵的": [闹大了的那几条的编号], "发酵依据": "一句", "前提没了": [前提不成立的那几件的编号，"事"后面的数字], "前提依据": "一句","对得上": "转向时对得上备着的哪条线；弄断时是眼下阶段的哪条线；没有就空着", "依据": "一句，引原话；变了时再说规划里哪一截对不上了",',
+    '七、【各人心里的缘由】里哪条出发点已经被刚发生的事或聊天里已发生的事带过去了（缘由过了）？例如说“还没”“不肯”“气对方不来”的那件事已经当面说开、问过答过或办了；只是仍挂在心上、还没解决的不算，拿不准就算没过。',
+    '八、这一段的收束标志已经在正文里发生了吗（算成）？逐字对照【怎样算成】和已发生的事实；打算、承诺、候选不算，只有一条支线办成不等于整段算成。拿不准就算没有。',
+    '只按原话判断，不猜；拿不准就算没有。只输出一个 JSON：{"算成": true 或 false, "算成依据": "一句，引已经发生的事实", "转向": true 或 false, "弄断": true 或 false, "变了": true 或 false, "发酵": true 或 false, "发酵的": [闹大了的那几条的编号], "发酵依据": "一句", "前提没了": [前提不成立的那几件的编号，"事"后面的数字], "前提依据": "一句", "缘由过了": ["心1"], "缘由依据": "一句", "对得上": "转向时对得上备着的哪条线；弄断时是眼下阶段的哪条线；没有就空着", "依据": "一句，引原话；变了时再说规划里哪一截对不上了",',
     ' "念头": {"谁": "起念头的角色", "什么": "一句"} 或 null}',
 ].join('\n');
 // waiting：还等着的事（排着的、在口袋里的）连前提——转向检查本来就要跑时顺带看一眼前提还在不在（章程 F1：不另加调用）
+export function mindReasons(node) {
+    return [...(Array.isArray(node?.主角团) ? node.主角团 : []), ...(Array.isArray(node?.要紧的人) ? node.要紧的人.slice(0, 2) : [])]
+        .filter(x => x && typeof x === 'object' && String(x.谁 ?? '').trim() && String(x.心思?.出发点 ?? '').trim())
+        .map((x, i) => ({ id: i + 1, who: String(x.谁).trim(), why: x.心思.出发点 }));
+}
 export function turnCheckPrompt({ node = null, reserve = [], main = [], ideas = [], others = [], changes = [], acts = [], outside = [], waiting = [], completed = [] }) {
     const cut = (t, n) => (String(t ?? '').length > n ? `${String(t).slice(0, n)}…` : String(t ?? ''));
+    const reasons = mindReasons(node);
     return [
         '【眼下这个阶段】', node?.目标 ? `目标：${node.目标}` : '（还没有阶段规划）', ...(node?.线 ?? []).map(l => `· ${l.名}：${l.走向}`),
         ...(node?.算成 ? [`【怎样算成】${node.算成}`, '【这一段已发生的事实】', ...completed.slice(-60).map(t => cut(t, 240))] : []),
         ...(node?.局面 ? [`规划时看的局面：${cut(node.局面, 500)}`] : []),
         ...(node?.关系?.length ? ['规划时各人的关系：', ...node.关系.map(r => `· ${r.谁}对${r.对谁}：${cut(r.现在, 120)}`)] : []),
         ...(node?.往后?.length ? ['规划时想的往后：', ...node.往后.map(x => `· ${cut(x, 120)}`)] : []),
+        ...(reasons.length ? ['', '【各人心里的缘由】', ...reasons.map(r => `· [心${r.id}] ${r.who}：${cut(r.why, 120)}`)] : []),
         '', '【这一局备着的线】', ...(reserve.length ? reserve.map(x => `· ${x.名}：${String(x.内容 ?? '').slice(0, 160)}`) : ['（没有）']),
         ...(main.length ? ['', '【主线（只当主题）】', ...main.map(x => `· ${x.名}：${String(x.内容 ?? '').slice(0, 120)}`)] : []),
         '', '【玩家刚提出的想法、刚说的话】', ...(ideas.length ? ideas.map(r => `· [${r.id}] ${r.text}${r.quotes?.length ? `（原话：${r.quotes.join('……')}）` : ''}`) : ['（没有）']),
@@ -227,7 +235,13 @@ export function parseTurnCheck(text) {
     // 前提没了（第六问）：编号写成"事12""#12"或 {"编号": 12} 都认
     const goneIds = [...new Set((Array.isArray(raw?.['前提没了']) ? raw['前提没了'] : []).map(n => Number(String(n && typeof n === 'object' ? n['编号'] ?? '' : n).replace(/^\D+/, ''))).filter(n => Number.isInteger(n) && n > 0))];
     const gone = goneIds.length ? { ids: goneIds, why: typeof raw?.['前提依据'] === 'string' ? raw['前提依据'].slice(0, 200) : '' } : null;
-    return { done: strict?.['算成'] === true && !!doneWhy, doneWhy, turn: raw?.['转向'] === true, broke: raw?.['弄断'] === true, shift: raw?.['变了'] === true, thread: typeof raw?.['对得上'] === 'string' ? raw['对得上'].slice(0, 40) : '', why: typeof raw?.['依据'] === 'string' ? raw['依据'].slice(0, 300) : '', idea, loud, ...(gone ? { gone } : {}) };
+    const staleIds = [...new Set((Array.isArray(raw?.['缘由过了']) ? raw['缘由过了'] : []).map(n => {
+        const value = n && typeof n === 'object' ? n['编号'] : n;
+        const match = String(value ?? '').trim().match(/^(?:心)?(\d+)$/);
+        return match ? Number(match[1]) : 0;
+    }).filter(n => Number.isSafeInteger(n) && n > 0))];
+    const stale = staleIds.length ? { ids: staleIds, why: typeof raw?.['缘由依据'] === 'string' ? raw['缘由依据'].trim().slice(0, 200) : '' } : null;
+    return { done: strict?.['算成'] === true && !!doneWhy, doneWhy, turn: raw?.['转向'] === true, broke: raw?.['弄断'] === true, shift: raw?.['变了'] === true, thread: typeof raw?.['对得上'] === 'string' ? raw['对得上'].slice(0, 40) : '', why: typeof raw?.['依据'] === 'string' ? raw['依据'].slice(0, 300) : '', idea, loud, ...(gone ? { gone } : {}), ...(stale ? { stale } : {}) };
 }
 
 // 转向检查里列给它看的"还等着的事"（排着的、在口袋里的、写了前提的），至多 20 件；它答"前提没了"的编号对上这里的才撤（premiseVoids）

@@ -52,10 +52,10 @@ export function keyPersonEntry(node, who, same = (a, b) => a === b) {
 // 没到时间点的不递（T073，用户 10/25："提前泄露认知和所有事全让前台在一轮里丢出来都玩得很难受"）：规划写的"打算"那截常带具体日子和步骤
 // （"第 5 天一早……"），前台拿到就一轮说完——只递"想……，因为……"；打算、先别让人知道留在规划（他出手的那几拍照样落成事件，到点了才到前台）。
 // 小心思（示弱、激将一类）的手法本来就只在"打算"里，这下一律不递，出发点空着也只有"想……"
-export function mindLine(mind, { keep = () => true } = {}) {
+export function mindLine(mind, { keep = () => true, dropWhy = false } = {}) {
     if (!mind || typeof mind !== 'object') return null;
     const want = tidy(mind.想要).replace(/^想要?/, ''), why = tidy(mind.出发点).replace(/^因为/, '');
-    const body = [want && `想${want}`, why && `因为${why}`].filter(Boolean).join('，');
+    const body = [want && `想${want}`, !dropWhy && why && `因为${why}`].filter(Boolean).join('，');
     if (!body) return null;
     const line = warmWords(`你这阵子的愿望和缘由：${body}`);
     return keep(line) ? line : null;
@@ -76,14 +76,14 @@ export function pushedText(visible = [], { name, same = (a, b) => a === b, since
 // 他那一格里的那一块。name：开口的人；userName：玩家；entry：他那一份；present：眼下在场的人；
 // keep(一截)：说她伤病的那一截拿掉（body 的守门，bodyGuard.lines）；pushed：上面那条记录的正文。
 // 返回 own（他自己的目标、镜头外办到哪）和 team（团里两人之间的，对方在场才给）
-export function crewLines({ name, userName = null, entry = null, present = [], same = (a, b) => a === b, keep = () => true, pushed = null } = {}) {
+export function crewLines({ name, userName = null, entry = null, present = [], same = (a, b) => a === b, keep = () => true, pushed = null, dropWhy = false } = {}) {
     if (!name || !entry || (userName && same(name, userName))) return { own: [], team: [] };
     // 只给"想办成"（T073）：接下来想做（下一步）、想拉她一起（拉她）是具体步骤，前台拿到就一轮说完；镜头外推一步照旧读下一步，办过了的由 pushed 那句带到前台
     const segs = [['想办成', tidy(entry.想干)]].filter(([, v]) => v).map(([k, v]) => `${k}——${v}`).filter(s => keep(s));
     const own = [];
     if (segs.length) own.push(`${name}这阵子自己想办成的事（不用每轮都提）：${segs.join('；')}`);
     // 心思跟在"这阵子自己想办成的事"后面（数据约定第 2、3 条）
-    const mind = mindLine(entry.心思, { keep });
+    const mind = mindLine(entry.心思, { keep, dropWhy });
     if (mind) own.push(mind);
     if (pushed) own.push(`（${String(pushed).replace(/[。．.]+$/, '')}——这是${personWord(name)}自己办的事，见了面提不提、说几分由${personWord(name)}）`);
     const team = (Array.isArray(entry.团里) ? entry.团里 : [])

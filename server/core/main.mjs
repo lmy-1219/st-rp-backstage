@@ -32,7 +32,7 @@ import { openSituation, SITUATION_SYSTEM, parseSituation, recordOutcomes, repRec
 import { loadAnchors, indexAnchors, planYearFlags, yearFlagText } from './years.mjs';
 import { storyYear } from './world.mjs';
 import { turnWorth, planRetryDue } from './planner.mjs';   // 转向检查先程序初筛（10/16）；规划连不上自己再试（T074）
-import { NOW_MOTIF, PLAN_SYSTEM, withIntimate, API_PLAN_NOTE, placePrep, parsePlan, verifiedPlanSourceIds, NODE_CHECK_SYSTEM, nodeCheckPrompt, parseNodeCheck, TURN_CHECK_SYSTEM, turnCheckPrompt, parseTurnCheck, premiseWaiting, premiseVoids } from './planner.mjs';
+import { NOW_MOTIF, PLAN_SYSTEM, withIntimate, API_PLAN_NOTE, placePrep, parsePlan, verifiedPlanSourceIds, NODE_CHECK_SYSTEM, nodeCheckPrompt, parseNodeCheck, TURN_CHECK_SYSTEM, turnCheckPrompt, parseTurnCheck, premiseWaiting, premiseVoids, mindReasons } from './planner.mjs';
 import { planRoster, normalizeRelations, personOf, leaderOf } from './relations.mjs';
 import { ARRIVAL_SYSTEM, arrivalPrompt, parseArrival, groundedArrivalReason, lastLeave, awaySpan, validAwayPlan, LEAVE_SYSTEM, leavePrompt, parseLeave, isRemote, metInPerson, justLeft, openNow } from './arrival.mjs';
 import { enteredSince, landSent } from './landing.mjs';
@@ -563,6 +563,26 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
         for (const m of premiseVoids(waiting, v.gone)) {
             if (tip) store.updateMenu(chatKey, m.id, { status: 'void', by: '转向检查', why: m.why, at: { pos: tip.pos, fp: tip.fp } });
             log(`plan ${planId} menu ${m.id}「${m.title}」void: ${m.why}`);
+        }
+        if (tip && v.stale?.ids.length) {
+            const messages = store.currentMessages(chatKey);
+            if (messages.some(m => m.pos === tip.pos && m.fp === tip.fp)) {
+                const key = `mind_stale:${planId}`;
+                const raw = store.getMeta(key);
+                let previous = [];
+                try { previous = raw == null ? [] : JSON.parse(raw); } catch { previous = null; }
+                if (Array.isArray(previous)) {
+                    const live = previous.filter(x => x?.at && messages.some(m => m.pos === x.at.pos && m.fp === x.at.fp));
+                    const reasons = mindReasons(node);
+                    const fresh = v.stale.ids.map(id => reasons.find(r => r.id === id)).filter(Boolean)
+                        .filter(r => !live.some(x => x.who === r.who && x.why === r.why))
+                        .map(r => ({ who: r.who, why: r.why, at: { pos: tip.pos, fp: tip.fp }, because: v.stale.why }));
+                    if (fresh.length) {
+                        store.setMeta(key, JSON.stringify([...live, ...fresh]));
+                        for (const r of fresh) log(`plan ${planId} mind stale: ${r.who}（${r.because}）`);
+                    }
+                }
+            }
         }
 
         // 角色起的新念头（玩家没转向、没弄断时）：给眼下这个节点补几件，不整个重排（D-107）

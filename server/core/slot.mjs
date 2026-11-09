@@ -962,6 +962,13 @@ function arrivalForSlot(store, chatKey, arrived, name, names) {
 // 平时轮到这一轮第一个开口的人时，看要不要递一个"不在场的人来联系"。
 // camera（N-276）：镜头开口——name 是玩家（照玩家的眼睛看），不给"回来那一段"、关系、追问这些属于某个人的
 const recipientRemote = (board, name, same) => board?.people?.some(p => same(p.name, name) && p.status === 'remote');
+function staleMindReasons(store, planId) {
+    if (!planId) return [];
+    try {
+        const stale = JSON.parse(store.getMeta(`mind_stale:${planId}`) ?? '[]');
+        return Array.isArray(stale) ? stale : [];
+    } catch { return []; }
+}
 function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { economy = null, contacts = null, absence = null, planner = null, world = null, factions = null, situation = null, pendingAway = false, pendingLedger = null, slot = null, backstoryPick = null, drift = null, promised = null, pace = null, mood = null, guard: given = null }, base) {
     const drama = fullPlay(store, chatKey);
     const ts = scaleFor(store, chatKey);   // 这一局的时间尺度（章程 G2）
@@ -1237,13 +1244,16 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             const { plan, node } = latestNode(store, chatKey);
             const entry = node ? crewEntry(node, name, sameP) : null;
             const inCrew = !!entry && crewOf(store.setupOf?.(storyId)?.data ?? null, node, userName).some(n => sameP(n, name));
+            const stale = staleMindReasons(store, plan?.id);
+            const dropWhy = mind => !!mind?.出发点 && stale.some(x => sameP(x?.who, name) && x.why === mind.出发点
+                && x.at && messages.some(m => m.pos === x.at.pos && m.fp === x.at.fp));
             // 要紧的人（不在主角团里、规划另写了心思的）：他开口时只给他那句心里的打算（N-368），别的主角团那几句没有
             const key = !inCrew && node ? keyPersonEntry(node, name, sameP) : null;
-            const keyMind = key ? mindLine(key.心思, { keep: l => guard.lines([l]).length > 0 }) : null;
+            const keyMind = key ? mindLine(key.心思, { keep: l => guard.lines([l]).length > 0, dropWhy: dropWhy(key.心思) }) : null;
             if (keyMind) add(0, [keyMind], 'back', 'person');
             if (inCrew) {
                 const { own, team } = crewLines({ name, userName, entry, present, same: sameP, keep: l => guard.lines([l]).length > 0,
-                    pushed: pushedText(visible, { name, same: sameP, since: plan?.anchor_pos ?? -1 }) });
+                    pushed: pushedText(visible, { name, same: sameP, since: plan?.anchor_pos ?? -1 }), dropWhy: dropWhy(entry.心思) });
                 add(0, own, 'back', 'person');
                 add(1, team, 'back', 'person');
             }
