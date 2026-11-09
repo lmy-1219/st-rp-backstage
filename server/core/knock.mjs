@@ -13,7 +13,7 @@ import { callsOf } from './camera-turn.mjs';
 import { isBridge, isLull } from './director.mjs';
 import { paceName, MID } from './tempo.mjs';
 import { normalizeRelations } from './relations.mjs';
-import { occasionOf, WHY as OCCASION_WHY } from './occasion.mjs';   // 场合（用户 10/16）：亲密戏、打着的时候不叩门，候着时那几句不算没回
+import { occasionStrict, WHY as OCCASION_WHY } from './occasion.mjs';   // 场合（用户 10/16）：亲密戏、打着的时候不叩门，候着时那几句不算没回
 
 export const STATES = ['候着', '进场', '作废', '没发生'];
 export const MAX_TURNS = 2;   // 玩家几句没回算没接（方案第八节建议 2 句）
@@ -106,7 +106,7 @@ export function knockState(knock, { messages = [], knocks = [], userName = null,
     const asks = [];
     const done = (state, why, m) => ({ ...base, state, why, message, decided: { pos: m.pos, fp: m.fp }, unanswered, asks, held });
     const sorted = [...messages].sort((a, b) => a.pos - b.pos);
-    const busy = m => occasion !== false && !!occasionOf(sorted.filter(x => x.pos <= m.pos && x.pos > msg.pos), { except: knock.who });
+    const busy = m => occasion !== false && !!occasionStrict(sorted.filter(x => x.pos <= m.pos && x.pos > msg.pos), { except: knock.who });
     for (const m of sorted.filter(x => x.pos > msg.pos)) {
         if (m.is_user) {
             const key = `${m.pos}:${m.fp}`;
@@ -138,7 +138,7 @@ export function knockTiming({ messages = [], knocks = [], pace = null, present =
     const last = messages.at(-1);
     if (!last) return { ok: false, why: '还没有消息' };
     // 场合（occasion.mjs）：正写着亲密戏、正打着——外头的人先别来
-    const now = occasion !== false ? occasionOf(messages) : null;
+    const now = occasion !== false ? occasionStrict(messages) : null;
     if (now) return { ok: false, why: `场合不合适：${OCCASION_WHY[now]}` };
     const p = paceName(pace && typeof pace === 'object' ? pace.name : pace) ?? MID;
     const opts = { messages, knocks, ...rest };

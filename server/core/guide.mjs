@@ -9,7 +9,7 @@
 import { entryOf, afterBlocked, entryProjection, nearPlace as exactPlace } from './planner.mjs';
 import { leadReady, focusLine } from './eventlead.mjs';
 import { stillThere, movedTo } from './scene.mjs';
-import { occasionOf, heartToHeart, closeCountsByMessage, tenseStrongCount } from './occasion.mjs';
+import { occasionOf, heartToHeart, closeCountsByMessage, tenseStrict } from './occasion.mjs';
 import { narrationOf } from './timeline.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
 import { sameName } from './setup.mjs';
@@ -58,16 +58,16 @@ export function stuckAt({ messages = [], events = [], shown = null, quiet = GUID
 }
 
 // 沉浸的场面：亲密、紧张、交心。不自动弹，手动按钮不看这条
-// 路标卡的亲密口径比叩门严（回放里"腰包""指尖敲桌"这类日常描写凑够 3 个弱信号就被认成亲密）：
-// 强信号 ≥1，或弱信号 ≥3 且散在至少 CLOSE_SOFT_MSGS 条不同消息里。不改 occasionOf（叩门在用）。
+// 路标卡的亲密口径：强信号 ≥1，或弱信号 ≥3 且散在至少 CLOSE_SOFT_MSGS 条不同消息里。
+// 与叩门的单条弱信号口径各自保留；occasionOf 的旧口径也保留。
 export const CLOSE_SOFT_MSGS = 2;
 export function closeStrict(messages = []) {
     const rows = closeCountsByMessage(messages);
     const strong = rows.reduce((n, r) => n + r.strong, 0), soft = rows.reduce((n, r) => n + r.soft, 0);
     return strong >= 1 || (soft >= 3 && rows.filter(r => r.soft > 0).length >= CLOSE_SOFT_MSGS);
 }
-// 紧张同理：路标卡让路是为了不打断真打起来的戏，那几乎必有强信号；弱信号凑数（日常的撞、退后、拔出）不算。叩门不变。
-export const tenseStrict = (messages = []) => tenseStrongCount(messages) >= 1;
+// 紧张只认强信号；弱信号凑数（日常的撞、退后、拔出）不算。
+export { tenseStrict };
 export function immersive(messages) {
     const occ = occasionOf(messages);
     if (occ === '紧张' && !tenseStrict(messages)) return heartToHeart(messages) ? '交心' : null;
