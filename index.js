@@ -4,6 +4,7 @@
 // ③ 设置面板里的开关与状态。后台连不上时什么都不做，ST 照常。
 import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStaleOn, guideClosed, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, classify, openSegment, closeSegment, residentFromStart, ensureCameraPresence, repairResidentSegment, restoreSegment, runLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
+import { cutByPresence, storyTimeAt } from './presence.mjs';
 
 const MODULE = 'rp_emergence';
 const KEYS = { rule: 'rp_emergence_rule', slot: 'rp_emergence_slot', mid: 'rp_emergence_mid', recall: 'rp_emergence_recall', world: 'rp_emergence_world' };
@@ -2005,16 +2006,25 @@ function anchorSynced(rows, c) {
     return seq.every((x, i) => x.f === s.seq[i].f && x.w === s.seq[i].w);
 }
 
+function oldIsolationActive(c) {
+    return typeof globalThis.contextIsolationInterceptor === 'function'
+        && !c.extensionSettings?.disabledExtensions?.includes('third-party/context-isolation');
+}
+
 globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
     clearPrompts();
+    const c = ctx();
+    const character = c.characters?.[c.characterId];
+    const camera = character && isCamera(character);
+    if (c.groupId && character && !camera && type !== 'quiet' && type !== 'impersonate' && !oldIsolationActive(c)) {
+        const rec = c.chatMetadata?.contextIsolation?.anchors?.[character.avatar];
+        cutByPresence(_chat, rec, { full: c.chat, storyTimeAt: (index, back) => storyTimeAt(c.chat ?? [], index, back) });
+    }
     if (!settings().enabled || !state.chatKey || !INJECT_TYPES.has(type ?? 'normal')) return;
     keepRecentRounds(_chat, Number(settings().historyRounds) || 0);
     if (settings().digestOld) await digestOld(_chat).catch(() => {});
-    const c = ctx();
-    const character = c.characters?.[c.characterId];
     if (!character) return;
     cameraOf(c);
-    const camera = isCamera(character);
     // 发消息、打电话来的那几条（extra.rp_vis）同屋别的有卡的人看不见：发出去的这份按开口的人筛（方案 自动进离场与调度，N-377）
     filterVisible(_chat, camera ? '旁白' : character.name, c.name1);
     if (camera) {
@@ -2283,7 +2293,7 @@ export function panelPageHtml(page) {
     return `${button('advanced-back', '‹ 返回设置')}
         ${card('口味', '<div data-role="prompt-pack-controls"></div>' + button('prompt-pack', '看／改口味包 · 导入／导出') + button('prompt-preview', '预览规划题目（不花钱）'))}
         ${card('这一局的细节', '<label data-role="pack-row">素材包：<select data-opt="pack"></select> <button class="menu_button" type="button" data-action="material-pack" title="导入参考资料，建议先核对预览。">导入素材包</button></label><label data-role="away-row">离开时这一局：<select data-opt="awayMode"><option value="">跟着默认</option><option value="real">照现实过</option><option value="pause">世界等你</option></select></label><label class="checkbox_label"><input type="checkbox" data-opt="speakFirst"> 离开回来时由角色先开口</label><label class="checkbox_label"><input type="checkbox" data-opt="cameraJoin"> 有卡的人在场时旁白也接没卡的人的戏</label>' + button('camera', '一个人时的旁白') + button('plan-request', '要下一个节点的规划（约一两美元）') + button('lore', '世界书谁知道') + '<small>后台自动判每条世界书谁该知道（要打开“世界书按开口的人筛”）；判错了在这里改。一般不用动。</small>')}
-        ${card('送给前台的', '<label>每轮只送最近：<select data-opt="historyRounds"><option value="0">不限（ST 默认）</option><option value="10">10 轮</option><option value="15">15 轮</option><option value="20">20 轮</option><option value="30">30 轮</option></select> 聊天</label><label class="checkbox_label"><input type="checkbox" data-opt="digestOld"> 较早的回复换成大意，最近 <select data-opt="digestKeep"><option>4</option><option>6</option><option>8</option><option>12</option><option>20</option></select> 条照原文</label><label class="checkbox_label"><input type="checkbox" data-opt="loreFilter"> 世界书按开口的人筛</label>' + button('places', '提示词位置'))}
+        ${card('送给前台的', '<label>每轮只送最近：<select data-opt="historyRounds"><option value="0">不限（ST 默认）</option><option value="10">10 轮</option><option value="15">15 轮</option><option value="20">20 轮</option><option value="30">30 轮</option></select> 聊天</label><label class="checkbox_label"><input type="checkbox" data-opt="digestOld"> 较早的回复换成大意，最近 <select data-opt="digestKeep"><option>4</option><option>6</option><option>8</option><option>12</option><option>20</option></select> 条照原文</label><label class="checkbox_label"><input type="checkbox" data-opt="loreFilter"> 世界书按开口的人筛</label><small data-role="old-isolation-hint" style="opacity:.65" hidden>谁在场的截取已由本扩展负责；旧的上下文隔离扩展可以关掉了（它和本扩展读同一份记录，关掉不丢东西）。</small>' + button('places', '提示词位置'))}
         ${card('后台', '<p data-role="ledger"></p><div class="rpe-grid">' + button('stages', '各环节的模型') + button('tuning', '调参') + button('extract', '暂停每条总结') + button('backfill', '补记接入以前的消息') + button('sync', '立即同步') + button('update', '检查更新') + '</div><label>新开的窗口：<select data-opt="newChats"><option value="ask">问我</option><option value="auto">直接接入</option><option value="off">不接入</option></select></label>')}
         <details class="rpe-card"><summary>排查用（平时不用开）</summary><p data-role="status"></p><span data-role="leave-retries"></span><small data-role="waiting"></small><p data-role="warn" hidden></p>${button('confirm', '确认，是我删的')}
         <div data-role="preview-row"><select class="text_pole" data-role="preview-who"></select>${button('preview', '预览所选角色此刻的场记')}</div><div class="rpe-grid">${button('timings', '这一轮各步耗时')}${button('plan-attempts', '最近 20 次规划尝试')}${button('rejected', '被拦下的')}</div><label class="checkbox_label"><input type="checkbox" data-opt="testSlot"> 接线测试（仅测试用）</label><label class="checkbox_label"><input type="checkbox" data-opt="enabled"> 总开关</label></details>`;
@@ -2361,6 +2371,7 @@ function mountPanel() {
         $('[data-opt="enabled"]').checked = s.enabled;
         $('[data-opt="newChats"]').value = s.newChats;
         $('[data-opt="historyRounds"]').value = String(Number(s.historyRounds) || 0);
+        $('[data-role="old-isolation-hint"]').hidden = !oldIsolationActive(ctx());
         $('[data-opt="digestOld"]').checked = !!s.digestOld;
         $('[data-opt="loreFilter"]').checked = !!s.loreFilter;
         $('[data-opt="digestKeep"]').value = String(Number(s.digestKeep) || 8);
