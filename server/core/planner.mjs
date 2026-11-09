@@ -1302,7 +1302,7 @@ export const NOW_MOTIF = '后续·当下';
 // timeScale：这一局的尺度——放几格沉底按它（天尺度 2 天、慢沉 5 天；年尺度 1 年、2 年）；按消息数沉的不变。
 // pace：这局的节奏（章程 H2，tempo.paceOf）——份数、沉底的格数和条数、氛围意外各几件、一场戏叠几件；不给就是中档（和以前一样）。
 // stacked：此刻这场戏里已经拿出来、还没下文的有几件（stackedHere）；到了这一档的上限，别的先不进口袋（镜头外的、局势排的"当下"、跟着约定的不算）。
-export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, firm = null, hold = null, keep = () => false, gone = null, timeScale = DAY, pace = null, stacked = 0, contentTier = null, visible = [], messages = [] }) {
+export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, firm = null, hold = null, keep = () => false, gone = null, timeScale = DAY, pace = null, stacked = 0, contentTier = null, visible = [], messages = [], notHere = () => false }) {
     const ts = scaleOf(timeScale);
     const basePace = paceOf(pace, ts);
     const intimateFirst = contentTier === '纯NSFW';
@@ -1331,7 +1331,7 @@ export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, fir
         changes.push(change);
     }
     const gate = pocketGate(menu, { today: sink.today, part, at, hold, pace: p, stacked, contentTier, timeScale, gone,
-        statusOf: m => changes.find(c => c.id === m.id)?.status ?? m.status, visible, messages });
+        statusOf: m => changes.find(c => c.id === m.id)?.status ?? m.status, visible, messages, notHere });
     for (const m of gate.ready) {
         if (!gate.canEnter(m.id)) continue;
         changes.push({ id: m.id, status: 'pocket', pocket_day: sink.today });
@@ -1344,7 +1344,7 @@ export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, fir
 
 // 普通入袋和兴头提前共用；唯一可免的是候选件的 ready_day。
 // statusOf 让普通步进看见本轮先过期／沉底的结果；提前按写入前的最新菜单重建。
-export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone = null, pace = null, stacked = 0, contentTier = null, timeScale = DAY, statusOf = m => m.status, visible = [], messages = [] } = {}) {
+export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone = null, pace = null, stacked = 0, contentTier = null, timeScale = DAY, statusOf = m => m.status, visible = [], messages = [], notHere = () => false } = {}) {
     const base = paceOf(pace, scaleOf(timeScale)), intimateFirst = contentTier === '纯NSFW';
     const p = intimateFirst ? { ...base, mix: { ...base.mix, 亲密: base.name === '慢' ? 1 : 2 } } : base;
     const now = m => m.motif === NOW_MOTIF;
@@ -1354,7 +1354,8 @@ export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone
         .sort((a, b) => rankOf(a, intimateFirst) - rankOf(b, intimateFirst) || a.ready_day - b.ready_day || a.id - b.id);
     const stillIn = menu.filter(m => statusOf(m) === 'pocket');
     const budget = pocketBudget(menu, ready.length, p);
-    let used = stillIn.filter(m => entryOf(m) !== '镜头外').reduce((sum, m) => sum + units(m), 0);
+    const countsForBudget = m => entryOf(m) !== '镜头外' && !(entryOf(m) === '到现场' && notHere(m));
+    let used = stillIn.filter(countsForBudget).reduce((sum, m) => sum + units(m), 0);
     const kinds = new Map(Object.keys(p.mix).map(k => [k, stillIn.filter(m => m.purpose === k).length]));
     return {
         ready,
@@ -1371,7 +1372,7 @@ export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone
         },
         take(m) {
             if (entryOf(m) === '镜头外') return;
-            used += units(m);
+            if (countsForBudget(m)) used += units(m);
             if (kinds.has(m.purpose)) kinds.set(m.purpose, kinds.get(m.purpose) + 1);
         },
         full: () => used >= budget,
@@ -1394,13 +1395,13 @@ export function ttlOf(m) {
 }
 const partIn = text => PART_WORDS.find(([w]) => String(text ?? '').includes(w))?.[1] ?? null;
 // 地方对不对得上：写的那个地方和镜头所在的地方（场面表 camera.place）互相认得出（nearPlace 的认法）；抽不出实在的字就当认不出
-const samePlace = (what, place) => !!place && /[一-鿿]{2,}/.test(what) && /[一-鿿]{2,}/.test(place) && (nearPlace({ place: what }, place) || nearPlace({ place }, what));
+const samePlace = (what, place, names = []) => !!place && /[一-鿿]{2,}/.test(what) && /[一-鿿]{2,}/.test(place) && (nearPlace({ place: what }, place, names) || nearPlace({ place }, what, names));
 // ctx：today、dayOf（消息位置→剧情日）、at（最后一条）、partAt（消息位置→时段）、placeAt(pos)／placeNow（镜头在哪）、presentAt(pos)／presentNow（谁在场）、same(a, b)
 export function expiredPocket(m, ctx = {}) {
     if (m?.status !== 'pocket' && m?.status !== 'waiting') return null;
     const t = ttlOf(m);
     if (!t || t.kind === '一直' || t.kind === '三天内') return null;
-    const { today = 0, dayOf = null, at = 0, partAt = () => null, placeAt = () => null, placeNow = null, presentAt = () => [], presentNow = [], same = (a, b) => a === b } = ctx;
+    const { today = 0, dayOf = null, at = 0, partAt = () => null, placeAt = () => null, placeNow = null, presentAt = () => [], presentNow = [], same = (a, b) => a === b, names = [] } = ctx;
     const inPocket = m.status === 'pocket' && Number.isFinite(m.pocket_pos);
     const day = inPocket && dayOf ? dayOf(m.pocket_pos) : (inPocket && Number.isFinite(m.pocket_day) ? m.pocket_day : m.ready_day);
     const dayGone = Number.isFinite(day) && today > day;
@@ -1420,14 +1421,14 @@ export function expiredPocket(m, ctx = {}) {
         return seenAt.some(p => has(presentAt(p))) && !has(presentNow) ? { status: 'expired', why: `没赶上：${who}已经不在场了` } : null;
     }
     const place = what || m.place || String(m.fit ?? '').split(/[，,；;、]/)[0] || '';
-    return seenAt.some(p => samePlace(place, placeAt(p))) && !samePlace(place, placeNow) ? { status: 'expired', why: `没赶上：镜头离开了${place}` } : null;
+    return seenAt.some(p => samePlace(place, placeAt(p), names)) && !samePlace(place, placeNow, names) ? { status: 'expired', why: `没赶上：镜头离开了${place}` } : null;
 }
 // 一场戏里已经叠了几件（章程 H2）：拿出来了（shown）、还没有下文（没用上、没沉）的那几件，拿出来那条上的场面和此刻是同一场戏——
 // 同一个剧情日、同一个地方（镜头在哪，都认不出也算同一处）、同一拨在场的人。纯程序：场面表认地方和人。
 // sceneAt(pos)／now：{ place, present }；dayOf(pos)、today 给了才比日子
-export function stackedHere(menu, { sceneAt = () => null, now = null, same = (a, b) => a === b, dayOf = null, today = null } = {}) {
+export function stackedHere(menu, { sceneAt = () => null, now = null, same = (a, b) => a === b, dayOf = null, today = null, names = [] } = {}) {
     if (!now) return 0;
-    const placeOk = (a, b) => (!a && !b) || (!!a && !!b && (a === b || samePlace(a, b)));
+    const placeOk = (a, b) => (!a && !b) || (!!a && !!b && (a === b || samePlace(a, b, names)));
     const sameCrowd = (a = [], b = []) => a.length === b.length && a.every(x => b.some(y => same(x, y))) && b.every(y => a.some(x => same(x, y)));
     return (menu ?? []).filter(m => m.status === 'shown' && Number.isFinite(m.settled_pos)).filter(m => {
         if (dayOf && Number.isFinite(today) && dayOf(m.settled_pos + 0.5) !== today) return false;
@@ -1518,7 +1519,29 @@ const PLACE_STOP = /的时候|时候|出门|一起|那儿|那里|这里|路上|�
 const PLACE_END = /[摊店铺厅馆所院室场楼房吧介厢街巷站市库仓]/;
 export function nearPlace(m, sceneText, names = []) {
     const place = String(m?.place ?? '').trim().replace(/^在/, '').replace(/[「」]/g, '');
-    return place.length >= 2 && String(sceneText ?? '').includes(place);
+    const scene = String(sceneText ?? '');
+    if (place.length < 2 || !scene.trim()) return false;
+    const finder = Array.isArray(names)
+        ? { names: text => names.filter(n => n && String(text).includes(n)), same: (a, b) => sameName(a, b, names) }
+        : names;
+    const named = finder?.names ?? finder?.named ?? (() => []);
+    const same = finder?.same ?? ((a, b) => a === b);
+    const parts = text => {
+        const clean = String(text).replace(/[「」]/g, '').trim();
+        const people = named(clean);
+        const end = [...clean].findLastIndex(c => PLACE_END.test(c));
+        const center = end > 0 ? clean.slice(end - 1, end + 1) : '';
+        const before = end > 0 ? clean.slice(0, end - 1) : '';
+        const regionWord = (before.match(/^(.+?)(?:的|\s)/)?.[1] ?? '').trim();
+        const region = !people.length && /^(?:地区|城|镇|街|区|路|巷|村|市|省|州|县|坊|院区|园区)|[街巷镇区县市省州村]$/.test(regionWord) ? regionWord : '';
+        return { center, people, region };
+    };
+    const a = parts(place), b = parts(scene);
+    // 裸中心词不是具体地点，不能仅凭原样出现就放行。
+    if (scene.includes(place) && !(place === a.center && !a.people.length && !a.region)) return true;
+    if (!a.center || a.center !== b.center) return false;
+    if (a.people.some(x => b.people.some(y => same(x, y)))) return true;
+    return !!a.region && !!b.region && (scene.includes(a.region) || place.includes(b.region));
 }
 // 镜头外的那件：进口袋以后剧情时间真过去了没有（跨天、时段跳了两档以上）。partAt(pos)：那条的时段。
 const PART_ORDER = ['早上', '上午', '中午', '下午', '傍晚', '晚上', '深夜', '凌晨'];

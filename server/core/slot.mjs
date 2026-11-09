@@ -1431,7 +1431,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 那件约定的当事人才拿得到它的内容（镜头照玩家的眼睛）
     const holdWho = camera ? userName : name;
     const pendingHold = pendingPocketRelated.size ? { related: m => pendingPocketRelated.has(`pocket:${m.id}`), label: m => (x => (x && [...(x.who ?? []), ...(x.with ?? [])].some(w => sameName(w, holdWho, rosterNames)) ? x.text : ''))(pendingLedger.items.find(x => x.kind === '约定' && OPEN_PROMISE.has(x.status) && (x.with ?? []).includes(`pocket:${m.id}`))).slice(0, 40) } : null;
-    const scenePlace = confirmedScenePlace(messages, store.stateNotesOf?.(chatKey) ?? [], lastPos, userName);
+    const scenePlace = board?.camera?.place || confirmedScenePlace(messages, store.stateNotesOf?.(chatKey) ?? [], lastPos, userName);
     const menuLines = drama && store.menuOf ? menuFor(store, chatKey, { records, isCarded: who => !!cardOf(who), speaker: camera ? CAMERA_NAME : name, camera, present, recentUser, userName, today, dayOf, firm: { today, dayOf }, at: lastPos, passive: passiveUser(messages), record: planner?.record !== false, carry, followers: who => (rel ? followersOf(rel, who, rosterNames) : []), face: who => roleOf(roster, who)?.role === '新面孔', stranger: strangerCall(roster, messages),
         giver: who => (p => (givesWork(p) ? giverLine(p, priceOf) : null))(rel ? personOf(rel, who, rosterNames) : null),
         player: [userName, ...(rel && userName ? (p => (p ? [p.名, ...p.又名] : []))(personOf(rel, userName, rosterNames)) : [])].filter(Boolean), hold: promised?.hold ? { related: m => promised.hold.related(m) || !!pendingHold?.related(m), label: m => (promised.hold.party?.(m, holdWho) ? promised.hold.label(m) : '') || pendingHold?.label(m) || '', today: m => !!promised.hold.strong?.(m) && !!promised.hold.party?.(m, holdWho) } : null, keep: m => !!(pendingHold?.related(m) || promised?.keeps?.(m)),
@@ -1717,7 +1717,9 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             let stacked = 0;
             try { stacked = pocketStack(store, records, chatKey, { menu, messages, rosterNames, today, dayOf }); } catch {}
             const contentTier = activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null;
-            for (const c of stepPocket(menu, { today, part: timelineFor(store, records, chatKey, messages).part, dayOf, at: lastPos, timeScale: scaleFor(store, chatKey), pace: paceFor(store, chatKey), contentTier, stacked, firm: { today, dayOf }, hold: promised?.hold ?? null, keep: promised?.keeps ?? (() => false), gone, visible: records.visible(chatKey), messages })) {
+            const scenePlace = board?.camera?.place || confirmedScenePlace(messages, store.stateNotesOf?.(chatKey) ?? [], lastPos, userName);
+            const placeNames = nameFinder(rel, rosterNames);
+            for (const c of stepPocket(menu, { today, part: timelineFor(store, records, chatKey, messages).part, dayOf, at: lastPos, timeScale: scaleFor(store, chatKey), pace: paceFor(store, chatKey), contentTier, stacked, firm: { today, dayOf }, hold: promised?.hold ?? null, keep: promised?.keeps ?? (() => false), gone, visible: records.visible(chatKey), messages, notHere: m => !nearPlace(m, scenePlace, placeNames) })) {
                 store.updateMenu(chatKey, c.id, c.status === 'pocket' ? { ...c, basisDay: today } : c);
                 if (c.why && (c.status === 'expired' || c.status === 'void')) store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : 'menu_void', { id: c.id, why: c.why });
             }
@@ -2459,7 +2461,9 @@ export function promisesNow(store, records, chatKey, { visible, messages, dayOf,
     const todayFrom = messages.find(m => dayOf(m.pos + 0.5) >= today)?.pos ?? lastPos;
     const due = stages.filter(({ p, stage }) => stage === 'today' && [...p.doers, ...p.with].some(x => here.some(n => same(n, x)))
         && lastPos - Math.max(todayFrom, p.r.pos ?? 0) < HOLD_FOR);
-    const relatedOne = m => due.find(({ p }) => relatedTo(p, m, { same, names, present: here }));
+    const relatedOne = m => (m.promise_ref != null
+        ? allStages.find(({ p, stage }) => p.id === m.promise_ref && (stage === 'today' || stage === 'soon'))
+        : null) ?? due.find(({ p }) => relatedTo(p, m, { same, names, present: here }));
     // 说"这件和今天说好的是一回事"只认真对得上的（规划写明跟着它、内容或场合对得上、约定冲着牵头的那个人去）；办约定的人自己牵头的只拿来让路（试玩 10/7：箱子那件被说成和吃烤肉是一回事）
     const strongOne = m => due.find(({ p }) => relatedTo(p, m, { same, names, present: here, byPeople: 'named' }));
     const hold = due.length ? { related: m => !!relatedOne(m), strong: m => !!strongOne(m), party: (m, who) => (o => !!o && partyOf(o.p, who, same))(strongOne(m)), label: m => retime(strongOne(m)?.p.r.text ?? '', strongOne(m)?.p.saidDay ?? today, today, tl.scale).replace(/[（(][^）)]*[）)]/g, '').replace(/[。．.]+$/, '').split(/[，,；;]/)[0].slice(0, 40) } : null;
@@ -2528,7 +2532,8 @@ export function pocketGone(store, records, chatKey, { messages, roster = [], ros
     try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
     const avatarOf = n => roster.find(e => sameName(e.name, n, rosterNames))?.avatar ?? null;
     const sinceOf = m => (m.anchor_pos != null ? m.anchor_pos : store.planById?.(m.plan_id)?.anchor_pos ?? null);
-    const ctx = { today, dayOf, at: messages.at(-1)?.pos ?? 0, partAt, placeAt: pos => boardAt(pos)?.camera?.place ?? null, placeNow: board?.camera?.place ?? null,
+    const rel = normalizeRelations(store.relationsOf?.(store.requireChat(chatKey).story_id));
+    const ctx = { today, dayOf, at: messages.at(-1)?.pos ?? 0, partAt, placeAt: pos => boardAt(pos)?.camera?.place ?? null, placeNow: board?.camera?.place ?? null, names: nameFinder(rel, rosterNames),
         presentAt: pos => presentOn(boardAt(pos)), presentNow: here, same: (a, b) => sameName(a, b, rosterNames) };
     const names = rosterNames.filter(n => n && n !== CAMERA_NAME);
     return m => premiseGone(m, { names, since: sinceOf, entered: (who, pos) => enteredSince(pos, { who, avatar: avatarOf(who), messages, anchors, arrivals, knockLive: e => store.knockLive?.(chatKey, e) }) }) ?? expiredPocket(m, ctx);
@@ -2550,7 +2555,8 @@ export function pocketStack(store, records, chatKey, { menu, messages, rosterNam
         try { b = boardFor(store, records, chatKey, { anchor: `${pos + 1}:${m.fp}`, present: [], recentUser: '', timeline: tl }); } catch {}
         return b ? { place: b.camera?.place ?? null, present: presentOn(b) } : null;
     };
-    return stackedHere(out, { sceneAt, now: sceneAt(last.pos), same: (a, b) => sameName(a, b, rosterNames), dayOf, today });
+    const rel = normalizeRelations(store.relationsOf?.(store.requireChat(chatKey).story_id));
+    return stackedHere(out, { sceneAt, now: sceneAt(last.pos), same: (a, b) => sameName(a, b, rosterNames), dayOf, today, names: nameFinder(rel, rosterNames) });
 }
 const presentOn = b => (b?.people ?? []).filter(p => p.status === 'present' && p.name !== CAMERA_NAME).map(p => p.name);
 
@@ -2700,10 +2706,11 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
         return at - last.pos >= ERRAND_GAP;
     };
     // 到场前的本人想法和已收到的记录，按实际去的人独立于牵头人取。
-    if (!camera && !remoteSpeaker) for (const m of menu.filter(m => m.status === 'pocket' && eligible(m) && entryOf(m) === '到现场' && !nearPlace(m, scene))) {
+    const placeNames = { names: named, same };
+    if (!camera && !remoteSpeaker) for (const m of menu.filter(m => m.status === 'pocket' && eligible(m) && entryOf(m) === '到现场' && !nearPlace(m, scene, placeNames))) {
         if (!goersOf(m).some(n => sameAs(n, speaker)) || !errandDue(m) || (Number.isFinite(m.ready_day) && today < m.ready_day)) continue;
         const p = entryProjection(m, { viewer: speaker, visible, same: sameAs });
-        if (!p || (p.mode === 'records' && !nearPlace(m, p.text))) continue;
+        if (!p || (p.mode === 'records' && !nearPlace(m, p.text, placeNames))) continue;
         const text = (p.parts ?? [{ text: p.text, day: m.said_day }]).map(part => renderEntry(part.text, m, { sourceDay: part.pos != null ? dayOf?.(part.pos) : part.day ?? m.said_day, today, timeScale: menuTs, roster: store.getCast?.(store.requireChat(chatKey).story_id) ?? [], messages: uptoMsgs })).join('；');
         add(2, errandLines({ ...shownAs(m), entryText: text }, { goer: speaker }), 'back',
             { kind: 'errand', sourceKey: sourceKey(m), rank: [1, 0, 2, 0, m.offered_n ?? 0, m.id],
@@ -2721,7 +2728,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
             }
             continue;
         }
-        if (entry === '到现场' && !nearPlace(pocket, scene)) continue;
+        if (entry === '到现场' && !nearPlace(pocket, scene, placeNames)) continue;
         if (recentUser && reachedFor(pocket, recentUser)) {
             // 玩家伸手了：眼下开口的人接（冲着别人来的照样写明只写自己那份）
             add(0, [...respondLines(shownAs(pocket), { userName: userName ?? '玩家', speaker }), ...intimateLines(pocket), ...aside(pocket)], 'now', { carry: true, sourceKey: sourceKey(pocket) });
@@ -3197,7 +3204,9 @@ export function advanceImpulse(store, records, chatKey, id, at, { expected = nul
     const gone = pocketGone(store, records, chatKey, { ...s, today: s.firm.today, dayOf: s.firm.dayOf, rosterNames: names, board, here: s.present });
     const stacked = pocketStack(store, records, chatKey, { ...s, menu, rosterNames: names });
     const contentTier = activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null;
-    const gate = pocketGate(menu, { today: s.firm.today, part: timelineFor(store, records, chatKey, s.messages).part, at: s.lastPos, hold: promised.hold, gone, stacked, pace: paceFor(store, chatKey), timeScale: s.ts, contentTier, visible: s.visible, messages: s.messages });
+    const scenePlace = board?.camera?.place || confirmedScenePlace(s.messages, store.stateNotesOf?.(chatKey) ?? [], s.lastPos, s.userName);
+    const placeNames = nameFinder(rel ? normalizeRelations(rel) : null, names);
+    const gate = pocketGate(menu, { today: s.firm.today, part: timelineFor(store, records, chatKey, s.messages).part, at: s.lastPos, hold: promised.hold, gone, stacked, pace: paceFor(store, chatKey), timeScale: s.ts, contentTier, visible: s.visible, messages: s.messages, notHere: m => !nearPlace(m, scenePlace, placeNames) });
     if (!gate.canEnter(id, { ignoreReadyDay: true })) return null;
     store.updateMenu(chatKey, id, { status: 'pocket', pocket_day: s.firm.today, at, by: '兴头', ...(knownWhy && item.who ? { why: knownWhy } : {}) });
     return item;
