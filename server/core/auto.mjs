@@ -131,10 +131,14 @@ export function knockNow(store, records, chatKey, { present = [], timeline = nul
     if (!last) return { ok: false, why: '还没有消息' };
     if (pendingKnock(store, chatKey)) return { ok: false, why: '有一条候着的还没写出来' };
     const knocks = knocksOf(store, chatKey);
-    const cards = present.filter(n => roster.some(e => hasCard(e) && sameName(e.name, n, names)));
-    const timing = knockTiming({ messages, knocks, pace: paceFor(store, chatKey), present: cards, rowAt, parts: tl.parts, roster, relations, userName, maxTurns: auto.maxTurns });
-    if (!timing.ok) return { ok: false, why: timing.why };
     const c = knockCandidate(store, records, chatKey, { present, timeline: tl });
+    const lit = read(store, `door_lit:${chatKey}`, null);
+    const litPos = num(lit?.pos);
+    const summoned = !!c?.who && (c.source?.type === 'named' || (lit?.by === 'narrator' && litPos != null
+        && last.pos - litPos <= 4 && messages.find(m => m.pos === litPos)?.fp === lit.fp && sameName(c.who, lit.who, names)));
+    const cards = present.filter(n => roster.some(e => hasCard(e) && sameName(e.name, n, names)));
+    const timing = knockTiming({ messages, knocks, pace: paceFor(store, chatKey), present: cards, rowAt, parts: tl.parts, roster, relations, userName, maxTurns: auto.maxTurns, summoned, occasion: !summoned });
+    if (!timing.ok) return { ok: false, why: timing.why };
     if (!c?.who) return { ok: false, why: c?.why ?? '门上没人到时候' };
     return { ok: true, ...c, at: last.pos + 1, fp: last.fp, basisDay: tl.firmToday ?? tl.today };
 }

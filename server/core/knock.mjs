@@ -132,9 +132,9 @@ export function knockState(knock, { messages = [], knocks = [], userName = null,
 /**
  * 这会儿能不能叩门（都是程序，不花钱）：一次只一个；上一次叩门隔够几条；一个时段至多几次；
  * 空当——玩家这句只是承接、刚换了时段、旁白刚写完一段；玩家正和在场的人一来一回紧着说，先等。
- * opts：knockState 的那些，再加 pace、present（在场的有卡的人；给了空名单就不用等"一来一回"）、gap、perPart
+ * opts：knockState 的那些，再加 pace、present（在场的有卡的人；给了空名单就不用等"一来一回"）、gap、perPart；summoned 跳过间隔和时段次数
  */
-export function knockTiming({ messages = [], knocks = [], pace = null, present = null, gap = null, perPart = null, occasion = true, ...rest } = {}) {
+export function knockTiming({ messages = [], knocks = [], pace = null, present = null, gap = null, perPart = null, occasion = true, summoned = false, ...rest } = {}) {
     const last = messages.at(-1);
     if (!last) return { ok: false, why: '还没有消息' };
     // 场合（occasion.mjs）：正写着亲密戏、正打着——外头的人先别来
@@ -148,9 +148,9 @@ export function knockTiming({ messages = [], knocks = [], pace = null, present =
     const live = states.filter(x => x.s.state !== '没发生');
     const lastAt = Math.max(-Infinity, ...live.map(x => num(x.k.at)).filter(v => v != null));
     const need = gap ?? GAP[p];
-    if (Number.isFinite(lastAt) && last.pos - lastAt < need) return { ok: false, why: `上一次叩门才隔了 ${last.pos - lastAt} 条，要隔够 ${need} 条` };
+    if (!summoned && Number.isFinite(lastAt) && last.pos - lastAt < need) return { ok: false, why: `上一次叩门才隔了 ${last.pos - lastAt} 条，要隔够 ${need} 条` };
     const rowAt = rest.rowAt ?? null, parts = rest.parts ?? PARTS;
-    if (rowAt) {
+    if (!summoned && rowAt) {
         const now = rowAt(last.pos);
         const n = live.filter(x => partsBetween(rowAt(num(x.k.at)), now, parts) === 0).length;
         if (n >= (perPart ?? PER_PART[p])) return { ok: false, why: `这个时段已经叩过 ${n} 次门` };
