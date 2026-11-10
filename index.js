@@ -4257,7 +4257,7 @@ function drawBoards() {
 }
 // 纠正这一条上的场面（第 1 步丙，用户 10/6："错了你看得见、点一下就对"）：镜头在哪、谁在不在。存在这条消息的 extra.rp_board 里
 // （{ place, people: { 名字: 在场|远程|外头|不在 } }），跟着聊天文件走，同步时交给后台，排在所有来源前面；之后的移动、进场离场再接管。
-const BOARD_STATES = [['在场', '在场'], ['远程', '远程（发消息、打电话来）'], ['不在', '不在']];
+const BOARD_STATES = [['在场', '在场'], ['远程', '远程'], ['不在', '不在']];
 function boardRosterNames(cast, characters = []) {
     return [...new Set(cast.filter(e => e?.name && e.role !== '不用' && e.name !== '旁白' && e.avatar !== 'narrator' && !characters.some(ch => ch.avatar === e.avatar && isCamera(ch))).map(e => e.name))];
 }
@@ -4274,14 +4274,16 @@ async function pickBoard(id) {
     const cards = boardRosterNames(cast, c.characters ?? []);
     const now = name => l?.people?.find(p => p.name === name)?.status ?? null;
     const nowWord = s => ({ present: '在场', remote: '远程', away: '不在眼前', absent: '不在', never: '没来过' })[s] ?? '？';
-    const row = name => `<tr><td style="padding:.1em .6em .1em 0">${escapeHtml(name)} <small>（系统认的：${nowWord(now(name))}）</small></td><td>` +
-        `<label><input type="radio" name="rpe-bp-${escapeHtml(name)}" value=""${current.people?.[name] == null || current.people?.[name] === '外头' ? ' checked' : ''}> 不改</label> ` +
-        BOARD_STATES.map(([v, t]) => `<label style="margin-left:.5em"><input type="radio" name="rpe-bp-${escapeHtml(name)}" value="${v}"${current.people?.[name] === v ? ' checked' : ''}> ${t}</label>`).join('') + '</td></tr>';
+    const row = name => `<div style="padding:.35em 0;border-bottom:1px solid currentColor">` +
+        `<div>${escapeHtml(name)} <small>（系统认的：${nowWord(now(name))}）</small></div>` +
+        `<div style="display:flex;flex-wrap:wrap;column-gap:.7em;row-gap:.2em;margin-top:.2em">` +
+        `<label style="white-space:nowrap"><input type="radio" name="rpe-bp-${escapeHtml(name)}" value=""${current.people?.[name] == null || current.people?.[name] === '外头' ? ' checked' : ''}> 不改</label>` +
+        BOARD_STATES.map(([v, t]) => `<label style="white-space:nowrap"${v === '远程' ? ' title="发消息、打电话来"' : ''}><input type="radio" name="rpe-bp-${escapeHtml(name)}" value="${v}"${current.people?.[name] === v ? ' checked' : ''}> ${t}</label>`).join('') + '</div></div>';
     const html = `<h3>场面纠正</h3><p>系统现在认的：镜头在 ${escapeHtml(l?.place ?? '？')}${l?.home ? `（${escapeHtml(l.home)}的家）` : ''}</p>
         <div style="text-align:left">
           <b>镜头在哪</b>（留空＝不纠正）<br><input class="text_pole" data-role="rpe-board-place" value="${escapeHtml(current.place ?? '')}" placeholder="比如：楼下便利店、他的公寓">
-          ${known.length ? `<div style="margin:.3em 0"><small>认得的地方：</small>${known.map(p => `<button type="button" class="menu_button" data-role="rpe-board-pick" style="margin:.1em .2em;padding:.1em .5em" title="选择已知地点，建议核对实际场面。">${escapeHtml(p)}</button>`).join('')}</div>` : ''}
-          <b>谁在不在</b><table style="margin-top:.3em">${cards.map(row).join('')}</table>
+          ${known.length ? `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:.3em;margin:.3em 0"><small>认得的地方：</small>${known.map(p => `<button type="button" class="menu_button" data-role="rpe-board-pick" style="white-space:nowrap;width:auto;flex:none;margin:0;padding:.1em .5em" title="选择已知地点，建议核对实际场面。">${escapeHtml(p)}</button>`).join('')}</div>` : ''}
+          <b>谁在不在</b><div style="max-height:36vh;overflow-y:auto;margin-top:.3em">${cards.map(row).join('')}</div>
         </div>
         <button type="button" class="menu_button" data-role="rpe-board-reset" title="撤销本条纠正，建议确认识别无误再用。">清除此条场面纠正</button>
         <p><small>你定的算数，排在后台自己认的前面；从这条往后，直到之后又有人走了、来了、换了地方。存在这条消息里，跟着聊天文件走，也同步给后台。</small></p>`;
