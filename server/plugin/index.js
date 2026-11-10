@@ -38,7 +38,7 @@ export function readConfig() {
 function codeRepo(entry) {const parent=path.resolve(path.dirname(entry),'..');return path.basename(parent)==='server'&&fs.existsSync(path.join(parent,'..','release.json'))?path.resolve(parent,'..'):parent;}
 
 async function health(base) {
-    try { return (await fetch(`${base}/v1/health`, { signal: AbortSignal.timeout(1500) })).ok; }
+    try { return (await fetch(`${base}/v1/health`, { signal: AbortSignal.timeout(5000) })).ok; }
     catch { return false; }
 }
 
@@ -154,7 +154,8 @@ export async function init(router, { loadConfig = readConfig, startCore = ensure
     void Promise.resolve().then(() => follow(config)).then(() => restart(base, config)).catch(error => console.warn('[rp-emergence] 后台版本检查失败：', error.message));
 
     router.get('/health', async (_req, res) => {
-        res.status((await health(base)) ? 200 : 503).json({ ok: await health(base) });
+        const ok = await health(base);
+        res.status(ok ? 200 : 503).json({ ok });
     });
     router.post('/:route', async (req, res) => {
         if (!ROUTE.test(req.params.route)) return res.status(404).json({ error: 'not_found' });

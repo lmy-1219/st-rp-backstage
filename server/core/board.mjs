@@ -298,6 +298,7 @@ function cacheVersion(store, chat, chatKey, present, recentUser, marks) {
 }
 
 const cache = new Map();
+const loaderCache = new Map();
 
 /**
  * 从 store 读取场面表输入，按锚点截断并做至多 32 项的 LRU 缓存。
@@ -320,11 +321,17 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
     const roster = store.getCast?.(chat.story_id) ?? [];
     const solo = soloMember(chat, roster);
     const done = new Map();
+    const liveByEntry = new WeakMap();
+    const knockLive = e => {
+        if (!e || typeof e !== 'object') return store.knockLive?.(chatKey, e);
+        if (!liveByEntry.has(e)) liveByEntry.set(e, store.knockLive?.(chatKey, e));
+        return liveByEntry.get(e);
+    };
     const at = (anchor = null) => {
         const messages = uptoAnchor(all, anchor);
         const key = `${messages.length}|${messages.at(-1)?.fp ?? ''}`;
         if (done.has(key)) return done.get(key);
-        const value = boardAt({ messages, marks: messageMarks(messages), stateNotes, anchors, roster, solo, arrived, arrivals, knocks, knockLive: e => store.knockLive?.(chatKey, e), awayPlans, sourceLive: source => store.basisLive?.(chatKey, source.pos, source.day) !== false, present: present ?? [], recentUser, timeline: timeline ?? {}, homes });
+        const value = boardAt({ messages, marks: messageMarks(messages), stateNotes, anchors, roster, solo, arrived, arrivals, knocks, knockLive, awayPlans, sourceLive: source => store.basisLive?.(chatKey, source.pos, source.day) !== false, present: present ?? [], recentUser, timeline: timeline ?? {}, homes });
         done.set(key, value);
         return value;
     };
@@ -340,6 +347,8 @@ export function boardFor(store, records, chatKey, { anchor = null, present = nul
     const marks = messages.map(message => message.boardMark);
     // 消息序列（删改稿、左滑换版都变）和时间进版本，但只放一个哈希，键别有几千字
     const seqHash = createHash('sha1').update(messages.map(m => `${m.pos}:${m.fp}`).join('|')).digest('hex').slice(0, 16);
+    const allSeqHash = createHash('sha1').update(all.map(m => `${m.pos}:${m.fp}`).join('|')).digest('hex').slice(0, 16);
+    const allMarks = all.map(message => message.boardMark);
     const rowsHash = createHash('sha1').update((timeline?.rows ?? []).map(r => `${r.pos}:${r.day}:${r.part ?? ''}`).join('|')).digest('hex').slice(0, 16);
     const key = `${chatKey}|${seqHash}|${timeline?.timeView ?? 'firm'}:${timeline?.today ?? ''}:${timeline?.part ?? ''}:${rowsHash}|${anchor ?? ''}|${cacheVersion(store, chat, chatKey, presentList, recentUser, marks)}`;
     if (cache.has(key)) {
@@ -348,7 +357,13 @@ export function boardFor(store, records, chatKey, { anchor = null, present = nul
         cache.set(key, value);
         return value;
     }
-    const value = boardLoader(store, records, chatKey, { present: presentList, recentUser, timeline }).at(anchor);
+    const loaderKey = `${chatKey}|${allSeqHash}|${timeline?.timeView ?? 'firm'}:${timeline?.today ?? ''}:${timeline?.part ?? ''}:${rowsHash}|${cacheVersion(store, chat, chatKey, presentList, recentUser, allMarks)}`;
+    let loader = loaderCache.get(loaderKey);
+    if (loader) loaderCache.delete(loaderKey);
+    else loader = boardLoader(store, records, chatKey, { present: presentList, recentUser, timeline });
+    loaderCache.set(loaderKey, loader);
+    while (loaderCache.size > 8) loaderCache.delete(loaderCache.keys().next().value);
+    const value = loader.at(anchor);
     cache.set(key, value);
     while (cache.size > 32) cache.delete(cache.keys().next().value);
     return value;

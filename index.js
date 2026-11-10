@@ -134,7 +134,7 @@ function cardHash(text) {
     return `${s.length}:${(h >>> 0).toString(36)}`;
 }
 
-async function api(route, body, timeout = 30000) {
+async function api(route, body, timeout = 30000, { background = false } = {}) {
     const t0 = performance.now();
     let ok = false;
     try {
@@ -146,7 +146,7 @@ async function api(route, body, timeout = 30000) {
         if (!response.ok) throw Object.assign(new Error(data.error || String(response.status)), { status: response.status });
         ok = true;
         return data;
-    } catch (error) { if (!error.status) backendConnection.observe(0); throw error; }
+    } catch (error) { if (!error.status && !background) backendConnection.observe(0); throw error; }
     finally { tick(`后台:${route}`, performance.now() - t0, ok ? '' : '失败'); }
 }
 
@@ -189,7 +189,7 @@ export function createBackendConnection({ request, now = Date.now, schedule = se
     return { observe, check, view, stop };
 }
 const backendConnection = createBackendConnection({
-    request: async () => (await fetch('/api/plugins/rp-emergence/health', { signal: AbortSignal.timeout(3000) })).status,
+    request: async () => (await fetch('/api/plugins/rp-emergence/health', { signal: AbortSignal.timeout(6000) })).status,
     changed: status => { state.backendStatus = status.kind; state.backendDown = status.backendDown; render(); },
 });
 
@@ -4010,7 +4010,7 @@ function watchDraft() {
             const c = ctx();
             const recent = [...(c.chat ?? []).slice(-2).map(m => String(m.mes ?? '')), draft];
             const present = [c.name1, ...members(c).filter(m => !m.disabled).map(m => m.name)].filter(Boolean);
-            api('prefetch', { chatKey: state.chatKey, draft, recent, present }, 5000).catch(() => {});
+            api('prefetch', { chatKey: state.chatKey, draft, recent, present }, 5000, { background: true }).catch(() => {});
         }, 2500);
     });
 }

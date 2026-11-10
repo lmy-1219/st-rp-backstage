@@ -858,6 +858,11 @@ export function openStore(file) {
     const getRawMeta = key => memo('meta', key, () => q('select value from meta where key = ?').get(key)?.value ?? null);
     function knockLive(chatKey, entry) {
         if (!entry) return false;
+        const s = entry.sourceStep;
+        const key = `${chatKey}|${entry.who ?? ''}|${entry.at ?? ''}|${entry.fp ?? ''}|${entry.basisDay ?? ''}|${s ? `${s.kind}:${s.id}:${s.pos}:${s.fp}:${s.day}:${s.step ?? ''}` : ''}`;
+        return memo('knock_live', key, () => readKnockLive(chatKey, entry));
+    }
+    function readKnockLive(chatKey, entry) {
         if (!basisLive(chatKey, Number(entry.at) - 1, entry.basisDay)) return false;
         const source = entry.sourceStep;
         if (!source) return true; // 旧记录没有来源依据
@@ -875,6 +880,9 @@ export function openStore(file) {
         return true;
     }
     function getMeta(key) {
+        return memo('meta_live', key, () => readMeta(key));
+    }
+    function readMeta(key) {
         const value = getRawMeta(key);
         const knock = /^(arrived|arrivals|knocks|knock_pending):(.+)$/.exec(key);
         if (knock && value) {
@@ -990,7 +998,7 @@ export function openStore(file) {
         return true;
         };
     }
-    const sourceLive = (chatKey, source) => sourceReader(chatKey)(source);
+    const sourceLive = (chatKey, source) => memo('source_reader', chatKey, () => sourceReader(chatKey))(source);
 
     // basis：因为哪条消息上的判定（转向、弄断、局面变了）要的这份规划——那条删了、改了，这份也不算（用户 10/4）
     const basisOf = p => { try { return JSON.parse(getMeta(`plan_basis:${p.id}`) ?? 'null'); } catch { return null; } };
@@ -1174,14 +1182,14 @@ export function openStore(file) {
     // 单靠 shown/used 的菜单步骤不能证明那件事已有结果。
     function causeFor(chatKey, cause) {
         if (!cause || !['record', 'menu_result'].includes(cause.type) || !Number.isSafeInteger(cause.id) || cause.id <= 0) return null;
-        const rows = q(`select r.id, r.pos, r.fp, r.type, r.text, r.holder, r.holder_name, r.audience, r.matter, r.idea_ref, r.outcome
+        const rows = memo('cause_rows', chatKey, () => q(`select r.id, r.pos, r.fp, r.type, r.text, r.holder, r.holder_name, r.audience, r.matter, r.idea_ref, r.outcome
             from (select r.*, min(s.pos) pos from records r
                 join chats c on c.key = ? and c.story_id = r.story_id
                 join chat_seq s on s.chat_key = c.key and s.fp = r.fp
                 where r.status = 'ok' group by r.id) r
             where not exists (select 1 from record_links l join records newer on newer.id = l.from_id and newer.status = 'ok'
                 join chat_seq ns on ns.chat_key = ? and ns.fp = newer.fp
-                where l.to_id = r.id and l.kind in ('改掉', '否定'))`).all(chatKey, chatKey);
+                where l.to_id = r.id and l.kind in ('改掉', '否定'))`).all(chatKey, chatKey));
         if (cause.type === 'record') return rows.find(r => r.id === cause.id) ?? null;
         const happened = new Set(rows.filter(r => r.type === '做' && fromJson(r.matter)?.menu === cause.id && !fromJson(r.matter)?.kind).map(r => r.id));
         return rows.find(r => r.type === '了结' && r.outcome && happened.has(r.idea_ref)) ?? null;
@@ -1305,6 +1313,11 @@ export function openStore(file) {
         return chain;
     }
     function menuOf(chatKey, { speaker = null, settledOnly = false, logUpTo = null, all = false, replacing = null } = {}) {
+        const opts = { speaker, settledOnly, logUpTo, all, replacing };
+        const key = `${chatKey}|${speaker ?? ''}|${settledOnly ? 1 : 0}|${logUpTo ?? ''}|${all ? 1 : 0}|${replacing ?? ''}`;
+        return memo('menu', key, () => readMenuOf(chatKey, opts), list => list.map(m => ({ ...m })));
+    }
+    function readMenuOf(chatKey, { speaker = null, settledOnly = false, logUpTo = null, all = false, replacing = null } = {}) {
         const h = historyOf(chatKey);
         const info = q(`select s.pos, m.is_user, m.speaker, m.name from chat_seq s join chats c on c.key = s.chat_key
                          join messages m on m.story_id = c.story_id and m.fp = s.fp where s.chat_key = ? order by s.pos`).all(chatKey);

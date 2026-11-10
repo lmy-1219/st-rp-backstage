@@ -288,13 +288,13 @@ export function waitingKnock(store, records, chatKey) {
 }
 
 // 每人此刻要说的（给调度排"插"）：来意没说（记账里还开着的来意）、口袋到了（进了口袋还没拿出来）、等的回音有了、兴头（最近三十条里他的想法）
-export function wantsFor(store, records, chatKey, { messages = null, timeline = null } = {}) {
+export function wantsFor(store, records, chatKey, { messages = null, timeline = null, present = [] } = {}) {
     const rows = messages ?? live(store.currentMessages(chatKey));
     const lastPos = rows.at(-1)?.pos ?? 0;
     const out = [];
     for (const r of records?.visible?.(chatKey) ?? []) if (isOpenMatter(r) && r.matter?.kind === INTENT && r.holder_name) out.push({ who: r.holder_name, kind: '来意', text: r.matter.title ?? '' });
     for (const m of store.menuOf?.(chatKey) ?? []) if (m.status === 'pocket' && m.who) out.push({ who: m.who, kind: '口袋', text: m.title ?? '' });
-    try { for (const p of pendingFor(store, records, chatKey, { timeline }).items) if (p.kind === '等回音' && p.status === '有回音' && p.owner) out.push({ who: p.owner, kind: '等回音', text: p.text ?? '' }); } catch {}
+    try { for (const p of pendingFor(store, records, chatKey, { present, timeline }).items) if (p.kind === '等回音' && p.status === '有回音' && p.owner) out.push({ who: p.owner, kind: '等回音', text: p.text ?? '' }); } catch {}
     for (const r of records?.openIdeas?.(chatKey) ?? []) if (r.type === '想法' && r.holder_name && lastPos - (r.pos ?? 0) <= 30) out.push({ who: r.holder_name, kind: '兴头', text: r.text ?? '' });
     return out;
 }
@@ -333,7 +333,7 @@ export function turnFor(store, records, chatKey, { present = [], recentUser = ''
         return {...p,status:lastUser>e.at?'away':'absent',stage:'early'};
     })};
     present=present.filter(name=>board ? !excluded.has(name) : !departed.some(e=>e.who===name));
-    const d = turnDetail({ text: recentUser || null, messages, board, roster, relations, wants: wantsFor(store, records, chatKey, { messages, timeline: tl }), pace: paceFor(store, chatKey), userName, present,
+    const d = turnDetail({ text: recentUser || null, messages, board, roster, relations, wants: wantsFor(store, records, chatKey, { messages, timeline: tl, present }), pace: paceFor(store, chatKey), userName, present,
         stateNotes: store.stateNotesOf?.(chatKey) ?? [], cap: Number(auto.cap) > 0 ? Number(auto.cap) : null, chain: auto.chain ?? null });   // 没填（null）按节奏档，别算成 0；chain 没填按默认
     // back：刚走的人被点名，直接叫回来（不走进场那套）——扩展要先取消静音、开区间
     return { queue: d.queue.map(q => ({ who: q.who, avatar: q.who === '旁白' ? null : avatarFor(ctx, q.who), role: q.role, why: q.why, noRepeat: !!q.noRepeat,
