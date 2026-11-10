@@ -203,6 +203,23 @@ export function closeLed({ records, chatKey, storyId, who, fp, same = (a, b) => 
 // 只看玩家有没有提起"）：拿出来了、还没了结的那件，这场戏里接着开口的每个人（当时在场看见的；镜头照玩家的眼睛）都带着；旧应答只随尚未交付的 shown 项。
 // 这场戏：同一天、拿出来以后 STAGE_SPAN 条以内。拿出来的那个人这一轮正在交后半截的不重复给。
 export const STAGE_SPAN = 20;
+// 只从同一份可见账里找亲历者也知道的后续；地点等单个碰巧相同的词不足以认成同一件事。
+function matterFollowups(r, visible, name, same) {
+    const keys = [...new Set((r.keys ?? []).filter(k => typeof k === 'string' && k.length >= 2 && !weakPair(k)))];
+    const title = String(r.matter?.title ?? '').trim();
+    const linked = x => x.type === '了结' && x.idea_ref != null && visible.some(y => y.id === x.idea_ref && (y.id === r.id || y.pos === r.pos || (r.matter?.menu != null && y.matter?.menu === r.matter.menu)));
+    const related = x => {
+        if (linked(x)) return true;
+        const words = [x.text, ...(x.keys ?? []), ...(Array.isArray(x.wide) ? x.wide : [])].join(' ');
+        if (title.length >= 4 && title !== r.matter?.place && words.includes(title)) return true;
+        return keys.filter(k => words.includes(k)).length >= 2;
+    };
+    const followups = visible.filter(x => x.id !== r.id && x.pos > r.pos && !x.superseded_by && !x.guess && !x.fabricated
+        && ['说', '做', '改变', '了结'].includes(x.type) && knows(x, name, same) && related(x))
+        .sort((a, b) => a.pos - b.pos || a.id - b.id);
+    return followups.length <= 3 ? followups : [followups[0], ...followups.slice(-2)];
+}
+const followupLines = rows => rows.map(x => `  后来：${String(x.text).trim()}`);
 export function stageLines({ menu = [], visible = [], name, knower = name, speaker = name, same = (a, b) => a === b, lastPos = 0, dayOf = () => 0, today = 0, userName = '玩家', talk = '', gone = () => false }) {
     // gone(名字)：有卡、已经离场的人——他牵头的那件跟着他离开了这场戏
     const on = menu.filter(m => ['shown', 'used'].includes(m.status) && Number.isFinite(m.settled_pos) && lastPos - m.settled_pos <= STAGE_SPAN && dayOf(m.settled_pos) === today && !gone(m.who)
@@ -263,7 +280,7 @@ export function matterLines(items, opts) {
     const mine = items.filter(x => x.r.matter?.kind === LEAD);
     const intent = opts?.camera ? [] : items.filter(x => x.r.matter?.kind === INTENT);
     const missed = opts?.camera ? [] : items.filter(x => x.r.matter?.kind === MISSED);
-    return [...intentLines(intent, opts), ...ledLines(mine, opts), ...missedLines(missed, opts), ...metLines(items.filter(x => !mine.includes(x) && ![INTENT, MISSED].includes(x.r.matter?.kind)), opts)];
+    return [...intentLines(intent, opts), ...ledLines(mine, opts), ...missedLines(missed, opts), ...metLinesWithFollowups(items.filter(x => !mine.includes(x) && ![INTENT, MISSED].includes(x.r.matter?.kind)), opts)];
 }
 // 他排的事没人接（章程 F2）：他心里记着；提不提、怎么提、记不记恨由他，别当成要讨的说法
 function missedLines(items, { name, when = () => '之前' }) {
@@ -299,6 +316,18 @@ function metLines(items, { name, when = () => '之前', camera = false, userName
             : '  （有人在追这件事；它背后是怎么回事还没定——真去查了，就按这个世界说得通的样子露一截，和已经发生的对得上；露出来的会记下来，往后照它）');
     }
     return out;
+}
+
+function metLinesWithFollowups(items, opts) {
+    const visible = opts?.visible ?? [];
+    const same = opts?.same ?? ((a, b) => a === b);
+    const later = items.map(({ r }) => matterFollowups(r, visible, opts?.camera ? opts.userName : opts?.name, same));
+    if (!later.some(rows => rows.length)) return metLines(items, opts);
+    return items.flatMap((item, i) => {
+        const lines = metLines([item], opts);
+        if (!later[i].length) return lines;
+        return [`${opts?.camera ? opts.userName : opts.name}碰上过、后来有了这些进展（以这些为准，别说成还悬着、别提议再去办同一件）：`, lines[1], ...followupLines(later[i]), ...lines.slice(2)];
+    });
 }
 
 // 规划简报里的一段：还没下文的（谁知道、来由），规划可以给它排后续

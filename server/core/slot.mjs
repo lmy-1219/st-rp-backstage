@@ -1493,7 +1493,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         // 过了收期的不再列（用户 10/12，N-362：三天前的小事还挂在"还没下文"里）：折那一步会替它记了结，这里防的是还没折到的那一下
         const lapsed = closeClock(store, chatKey, { messages, dayOf, today });
         const items = (who ? mattersFor(fed, { name: who, same, dayOf, today, talk: recentUser, userName, senseOf: id => base.sense?.get?.(id) ?? 0 }) : []).filter(x => !stage.menus.has(x.r.matter?.menu) || x.r.matter?.kind === LEAD).filter(x => !lapsed(x.r));
-        const opts = { name, when: material.when ?? (r => tagDay(seenDayOf(r.pos))), camera, userName: userName ?? '玩家', pursue: PURSUE.test(recentUser) };
+        const opts = { name, when: material.when ?? (r => tagDay(seenDayOf(r.pos))), camera, userName: userName ?? '玩家', pursue: PURSUE.test(recentUser), visible: fed, same };
         // 玩家这句说到的放眼下这一轮（对这句的回应要用），别的放想起的那一块；他的来意（只他本人）也放眼下：他手上正拿着的事，不当旧事
         const now = x => x.hit || x.r.matter?.kind === INTENT;
         // 来意是递给本人的私下话：过一道换词（N-368），库里的原文不动

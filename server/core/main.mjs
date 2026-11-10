@@ -774,6 +774,8 @@ async function runGlance({ chatKey }) {
 // 最后一场还没收尾的先不存；同一处隔 EP_RETRY 条才再试（一场戏聊得很长时，别每来一条就花一次钱）。
 const EP_MIN = 10, EP_KEEP = 4, EP_MAX = 36, EP_ROUNDS = 4, EP_RETRY = 6;
 const episodeBusy = new Set();
+export const episodeRetryDue = ({ last, from, fp, end, to, force = false }) => force || last?.from !== from || last?.fp !== fp ||
+    end - (Number.isFinite(last?.end) ? last.end : last?.to ?? -Infinity) >= EP_RETRY;
 // 有卡的人进场（N-292，用户 10/6）：扩展点了"进场"以后调。由头（来联系挑中的、口袋里的事、玩家点的名）＋他和玩家的关系＋到场前那几条
 // → 便宜模型（兴头那一档）理出"怎么来的、为什么来、到场那一刻看得见什么"，记下，他进场后头两回开口时给他（slot.extrasFor）。
 // 没配模型、超了当天预算、调不通：只记由头（那一格里写"看得见的照最后一段写的"）。他为什么来记一笔只他知道的心里话，往后问起答得上。
@@ -1261,8 +1263,8 @@ async function runEpisodes({ chatKey, force = false }) {
             const tryKey = `episodes_try:${chatKey}`;
             let last = null;
             try { last = JSON.parse(store.getMeta(tryKey) ?? 'null'); } catch {}
-            if (!force && last?.from === from && last?.fp === msgs[from]?.fp && to - last.to < EP_RETRY) break;
-            store.setMeta(tryKey, JSON.stringify({ from, fp: msgs[from]?.fp, to }));
+            if (!episodeRetryDue({ last, from, fp: msgs[from]?.fp, end, to, force })) break;
+            store.setMeta(tryKey, JSON.stringify({ from, fp: msgs[from]?.fp, to, end }));
             const tl = timelineFor(store, records, chatKey, msgs);
             const row = new Map(tl.rows.map(r => [r.pos, r]));
             const whenAt = pos => (r => (r ? `${tl.scale.ordinal(dayNumber(tl.start, r.day))}${r.part ? ` ${r.part}` : ''}` : ''))(row.get(pos));
