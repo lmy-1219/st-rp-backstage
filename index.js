@@ -1804,7 +1804,8 @@ async function syncOnce(force = false, light = false) {
         return epoch === state.epoch;
     } catch (error) {
         if (epoch === state.epoch) {
-            state.note = error.status === 404 ? '后台没有这个窗口的记录。' : '后台暂时连不上；ST 照常可用。';
+            state.note = error.code === 'LEAVE_APPLY_FAILED' ? '离场撤销尚未落实。'
+                : error.status === 404 ? '后台没有这个窗口的记录。' : '后台暂时连不上；ST 照常可用。';
             if (error.status !== 404) scheduleSync(30000);
         }
         return false;
@@ -3257,7 +3258,11 @@ async function autoPeek({ onlyUndo = false, returnReply = false } = {}) {
     if (onlyUndo) {
         const undo = (r?.left ?? []).filter(l => l.action === 'undo');
         if (!undo.length) return false;
-        if (await autoApply({ ...r, left: undo, lapsed: [] }) === false) throw new Error('离场撤销尚未落实');
+        if (await autoApply({ ...r, left: undo, lapsed: [] }) === false) {
+            const error = new Error('离场撤销尚未落实');
+            error.code = 'LEAVE_APPLY_FAILED';
+            throw error;
+        }
         return true;
     }
     const applied=await autoApply(r);
@@ -3278,7 +3283,8 @@ async function autoApply(r) {
     if (auto.on===false && was!==false) refreshDoor().catch(() => {});
     let applied = true;
     for (const l of [...(r?.left??[]),...(r?.lapsed??[])]) {
-        try { if(await autoClose(l,l.id?'走了':'作废')===false) applied=false; }
+        // 连败三次的事件已在面板暂停并可手动再试；不挡其他事件和接话。
+        try { await autoClose(l,l.id?'走了':'作废'); }
         catch(error) { applied = false; console.warn('[RP：幕后] 离场未落实，将重试',l.who,error); }
     }
     render();
@@ -3395,6 +3401,9 @@ async function autoClose(l, why) {
     const chatKey=state.chatKey, jobs=auto.jobs, key=l.id??`${l.who}:${l.at}`;
     if(jobs.has(key)) return jobs.get(key);
     const c=ctx(),failures=c.chatMetadata.rpeLeaveRetries??={};
+    // 旧版在没有落实记录的撤销回执处读 rec.status 失败；升级后让这一种旧暂停自动重试。
+    if(l.action==='undo' && failures[key]?.count>=3 && !c.chatMetadata.rpeLeaveEvents?.[key]
+        && failures[key].reason==="Cannot read properties of undefined (reading 'status')") delete failures[key];
     if(l.action!=='undo'&&failures[key]?.count>=3){
         const ch=cardNamed(c,l.who,l.avatar),segs=c.chatMetadata?.contextIsolation?.anchors?.[ch?.avatar]?.segments;
         const decision=classify({kind:'close',segments:segs??[],at:l.at,disabled:!!currentGroup(c)?.disabled_members?.includes(ch?.avatar),resident:ch?residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot}):false});
@@ -3478,7 +3487,7 @@ async function applyAutoClose(l,why,chatKey) {
             if((rec.muted||rec.muting) && !rec.wasDisabled && !laterClose() && i>=0 && currentGroup(ctx())?.disabled_members?.includes(ch.avatar)) throw new Error('角色未取消静音');
             rec.undone=true;await save();
         },
-        ack:receipt=>ackLeave(chatKey,{...receipt,result:rec.status??'applied'})
+        ack:receipt=>ackLeave(chatKey,{...receipt,result:rec?.status??'applied'})
     });
     if(l.action!=='undo') {if(state.remote?.avatar===ch.avatar)state.remote=null;auto.remote.delete(ch.avatar);}
 }
