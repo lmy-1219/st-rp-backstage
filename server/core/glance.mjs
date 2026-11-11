@@ -22,6 +22,7 @@ export const LEFT_SYSTEM = [
 export const CAME_SYSTEM = [
     '照给出的正文，逐人判断他是不是已经当面出现在这个场面里。正文写他走进来、推门出来、站在面前，有人当面跟他说话，或者他开口说了话，算到了。',
     '只是提到他、说要去找他、在想他、打电话或发消息给他，不算到了。拿不准就答没到。叫法和又名只用来认人，答案用名单上的名字。',
+    '靠你、她等代词认人时，连同前文确认指的是名单上这位；多人场合指代不清，答没到。',
     '每人答到了或没到，用条号和那条里二十字以内的原文作依据。',
     '这一眼的答案是一个 JSON：{"名字":{"结果":"到了|没到","条":0,"引":"照抄的短片段"}}。',
 ].join('\n');
@@ -44,12 +45,12 @@ export function glancePrompt({ state = null, scene = null, left = null, came = n
     ].join('\n').trim();
 }
 export function camePrompt({ doubts = [], messages = [], userName = '玩家' } = {}) {
-    const userAt = messages.findLastIndex(m => m.is_user);
-    const from = Math.max(0, userAt - 3);
-    const clip = text => { const t = String(text ?? ''); return t.length <= 1500 ? t : t.slice(0, 300) + '……' + t.slice(-900); };
+    // 候选保存的同一取料范围也用于回包核验，不另截条数或正文。
+    const basis = new Set(doubts.flatMap(d => d.basis ?? []).map(b => b.pos));
+    const window = basis.size ? messages.filter(m => basis.has(m.pos)) : messages;
     return ['【要复核的几位】', ...doubts.map(d => '· ' + d.who + '（叫法：' + (d.aliases ?? [d.who]).join('、') + '）'),
         '', '【最近正文】（' + userName + '是玩家的角色）',
-        ...messages.slice(from).slice(-10).map(m => '〔' + m.pos + '〕' + (m.is_user ? userName : (m.name ?? m.speaker)) + '：' + clip(m.text))].join('\n');
+        ...window.map(m => '〔' + m.pos + '〕' + (m.is_user ? userName : (m.name ?? m.speaker)) + '：' + String(m.text ?? ''))].join('\n');
 }
 
 // 第三眼的材料：拿不准的几位（who、why）＋最近几条正文

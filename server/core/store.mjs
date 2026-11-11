@@ -993,8 +993,8 @@ export function openStore(file) {
         if (!history.sees(chatKey, source.pos, source.fp) || !dayLive(source.pos, source.day, source.part)) return false;
         const current = currentFps[source.pos];
         if (source.exact && current !== source.fp) return false;
-        if (source.menuStatus) return q('select fp, story_day, basis_part from menu_log where chat_key = ? and item_id = ? and status = ? and pos = ?').all(chatKey, source.menu, source.menuStatus, source.pos)
-            .some(row => sameMessage(current, row.fp) && dayLive(source.pos, row.story_day, row.basis_part));
+        if (source.menuStatus) return q(`select chat_key, pos, fp, story_day, basis_part from menu_log where chat_key in (${history.keys.map(() => '?').join(',')}) and item_id = ? and status = ? and pos = ?`).all(...history.keys, source.menu, source.menuStatus, source.pos)
+            .some(row => history.sees(row.chat_key, row.pos, row.fp) && sameMessage(current, row.fp) && dayLive(source.pos, row.story_day, row.basis_part));
         return true;
         };
     }
@@ -1067,15 +1067,16 @@ export function openStore(file) {
     const nodeOf = id => { let next = Number(id), seen = new Set(); while (!seen.has(next)) { seen.add(next); const parent = Number(getMeta(`replan_of:${next}`)); if (!parent) break; next = parent; } return next; };
     const flightKey = (chatKey, id) => `${chatKey}:${nodeOf(id)}`;
     function activePlanAttempt(chatKey, id) { return planFlights.get(flightKey(chatKey, id)) ?? null; }
-    function beginPlanAttempt(planId, { entry = 'auto', source = null, model = null, thinks = false, briefChars = 0, supplement = false } = {}) {
+    function beginPlanAttempt(planId, { entry = 'auto', source = null, model = null, thinks = false, briefChars = 0, supplement = false, chatKey = null } = {}) {
         const plan = planById(planId);
-        if (!plan || !stillWanted(plan) || (supplement ? plan.status !== 'ready' || lastReadyPlan(plan.chat_key)?.id !== plan.id : plan.status !== 'requested' || lastPlan(plan.chat_key)?.id !== plan.id)) return null;
-        const key = flightKey(plan.chat_key, plan.id);
+        if (!plan || (supplement ? !chatKey || plan.status !== 'ready' || lastReadyPlan(chatKey)?.id !== plan.id : !stillWanted(plan) || plan.status !== 'requested' || lastPlan(plan.chat_key)?.id !== plan.id)) return null;
+        const owner = supplement ? chatKey : plan.chat_key;
+        const key = flightKey(owner, plan.id);
         if (planFlights.has(key)) return null;
         const id = randomUUID();
         q('update plan_attempts set repairable = 0 where plan_id = ?').run(plan.id);
         q("insert into plan_attempts(id,plan_id,node_id,chat_key,entry,source,model,thinks,brief_chars,stage,status,started_at) values (?,?,?,?,?,?,?,?,?,'发出','running',?)")
-            .run(id, plan.id, nodeOf(plan.id), plan.chat_key, ['auto','button','supplement','handoff','repair'].includes(entry) ? entry : 'auto', safePlanSource(source) ?? (['handoff','repair','supplement'].includes(entry) ? entry : safePlanSource(getMeta(`plan_source:${plan.id}`))) ?? safePlanSource(entry) ?? 'auto', typeof model === 'string' ? model.slice(0, 200) : null, thinks ? 1 : 0, Math.max(0, Number(briefChars) || 0), now());
+            .run(id, plan.id, nodeOf(plan.id), owner, ['auto','button','supplement','handoff','repair'].includes(entry) ? entry : 'auto', safePlanSource(source) ?? (['handoff','repair','supplement'].includes(entry) ? entry : safePlanSource(getMeta(`plan_source:${plan.id}`))) ?? safePlanSource(entry) ?? 'auto', typeof model === 'string' ? model.slice(0, 200) : null, thinks ? 1 : 0, Math.max(0, Number(briefChars) || 0), now());
         planFlights.set(key, { id, planId: plan.id, supplement, started: Date.now() });
         return id;
     }
@@ -1083,7 +1084,7 @@ export function openStore(file) {
         const attempt = q('select * from plan_attempts where id = ?').get(id);
         if (!attempt || attempt.status !== 'running') return false;
         const flight = activePlanAttempt(attempt.chat_key, attempt.plan_id), plan = planById(attempt.plan_id);
-        return flight?.id === id && !!plan && stillWanted(plan) && (flight.supplement ? plan.status === 'ready' && lastReadyPlan(plan.chat_key)?.id === plan.id : plan.status === 'requested' && lastPlan(plan.chat_key)?.id === plan.id);
+        return flight?.id === id && !!plan && (flight.supplement ? plan.status === 'ready' && lastReadyPlan(attempt.chat_key)?.id === plan.id : stillWanted(plan) && plan.status === 'requested' && lastPlan(plan.chat_key)?.id === plan.id);
     }
     function updatePlanAttempt(id, meta = {}) {
         const columns = { stage: 'stage', outputChars: 'output_chars', internalRetries: 'internal_retries', finishReason: 'finish_reason', briefChars: 'brief_chars', repairable: 'repairable', repairError: 'repair_error', repaired: 'repaired' };
@@ -1249,6 +1250,16 @@ export function openStore(file) {
             if (old) replaced.push({ old, by: n });
             items.push(n);
         }
+        const removedTitles = [...offeredItems.filter(m => !items.includes(m)).map(m => m.title),
+            ...dropped.filter(d => !d.kept).map(d => d.item?.title ?? d.item?.['题']).filter(Boolean)];
+        // 按新规划生效后的 menuOf 可见性核验：普通旧 waiting 不再可见；有答复的旧件会留着或变为 void。
+        // 留／撤／换只在有锚点时落账；其余沿用 readMenuOf 的后续、已留和口袋退场口径。
+        const existing = before.filter(m => !chain.has(m.plan_id) && (
+            (plan.anchor_pos != null && answer.has(m.id))
+            || ((follow(m) || m.kept_pos != null) && (m.status === 'waiting' || m.status === 'pocket'))
+            || (m.status !== 'waiting' && !(retire && m.status === 'pocket'))));
+        const checked = acceptMenuChains(plan.chat_key, id, items, existing, removedTitles);
+        items.splice(0, items.length, ...checked);
         // 新规划给同一个人、同一条线（或题互相包含的）排了后续：旧的那件还没放出来、还在口袋里的收掉（场记章程第 11 条，试玩 10/10：
         // "推完以后的读数"排上了，"三天后的读数"还挂在门上）。这一步记在要这份规划的那条消息上：那条删了，规划退了，旧件也回来
         // 只看新规划落账以后还留着的旧件（旧规划没放出来的本来就由新规划接手，见 menuOf；这里收的是还挂着的口袋、局势排的后续）
@@ -1262,7 +1273,7 @@ export function openStore(file) {
             q('update notes set used_in_plan = ? where chat_key = ? and kind = ? and used_in_plan is null').run(id, plan.chat_key, '聊');
             if (items.length) putIntimateProgress(plan.chat_key, intimateProgress, { planId: id, storyDay: plan.story_day });
         });
-        for (const { old, by } of plan.anchor_pos == null ? [] : replaced) {
+        for (const { old, by } of plan.anchor_pos == null ? [] : replaced.filter(r => items.includes(r.by))) {
             updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', byPlan: id, why: `新规划里同一拍子的「${by.title}」替换了它`, at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
             log(plan.chat_key, 'menu_void', { id: old.id, title: old.title, plan: id, why: `同一拍子（${old.line}／${old.purpose}）新规划又写了一回「${by.title}」，留新的，旧的「${old.title}」收了` });
         }
@@ -1290,18 +1301,53 @@ export function openStore(file) {
         return menuOf(plan.chat_key);
     }
     // 给眼下这份规划补几件（角色起的新念头，D-107）：挂在 at 那条消息上；从 storyDay 起算第几天后。
-    function appendMenu(planId, items, { storyDay, at, intimateProgress = [], source = null }) {
+    function appendMenu(planId, items, { chatKey, storyDay, at, intimateProgress = [], source = null, removedTitles = [] }) {
+        if (typeof chatKey !== 'string' || !chatKey) throw new Error('chat_key_required');
         const plan = planById(planId);
         if (!plan || plan.status !== 'ready') throw Object.assign(new Error('plan_not_ready'), { status: 409 });
+        if (lastReadyPlan(chatKey)?.id !== planId) throw Object.assign(new Error('plan_not_current'), { status: 409 });
+        const h = historyOf(chatKey);
+        if (!at || !Number.isInteger(at.pos) || at.pos > h.last || at.pos < -1 || (at.pos === -1 && (h.last !== -1 || at.fp != null)) || !h.sees(chatKey, at.pos, at.fp)) throw new Error('invalid_menu_anchor');
+        items = acceptMenuChains(chatKey, planId, items, menuOf(chatKey), removedTitles);
         tx(() => {
             const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, anchor_pos, anchor_fp, updated_at, entry, place, goer, errand, origin, signpost, cause_ref, entry_basis, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
             for (const m of items) {
-                const id = ins.run(planId, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, storyDay + m.afterDays, at.pos, at.fp, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, causeFor(plan.chat_key, m.cause) ? JSON.stringify(m.cause) : null, m.entryBasis ? JSON.stringify(m.entryBasis) : null, ...cellValues(m)).lastInsertRowid;
+                const id = ins.run(planId, chatKey, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, storyDay + m.afterDays, at.pos, at.fp, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, causeFor(chatKey, m.cause) ? JSON.stringify(m.cause) : null, m.entryBasis ? JSON.stringify(m.entryBasis) : null, ...cellValues(m)).lastInsertRowid;
                 if (source) setMeta(`event_source:${id}`, JSON.stringify(source));
             }
-            if (items.length) putIntimateProgress(plan.chat_key, intimateProgress, { planId, storyDay, at });
+            if (items.length) putIntimateProgress(chatKey, intimateProgress, { planId, storyDay, at });
         });
-        return menuOf(plan.chat_key);
+        return menuOf(chatKey);
+    }
+    // 所有筛选和截断之后才查链；只拒本次新件，不改运行中旧件的状态或 after。
+    function acceptMenuChains(chatKey, planId, items, existing, removedTitles = []) {
+        const fresh = items.map(item => ({ item, title: item.title, after_title: item.after, plan_id: planId }));
+        const nodes = [...existing, ...fresh];
+        const removed = new Set(removedTitles), memoized = new Map(), newNodes = new Set(fresh);
+        const invalid = (node, path = []) => {
+            const loop = path.indexOf(node);
+            if (loop >= 0) return path.slice(loop).some(n => newNodes.has(n)) ? '前件成环' : null;
+            if (memoized.has(node)) return memoized.get(node);
+            if (!node.after_title) return null;
+            const same = nodes.filter(n => n.plan_id === node.plan_id && n.title === node.after_title);
+            const lost = newNodes.has(node) && removed.has(node.after_title) && !fresh.some(n => n.title === node.after_title);
+            const prior = lost ? [] : same.length ? same : nodes.filter(n => n.plan_id < node.plan_id && n.title === node.after_title);
+            let reason;
+            if (prior.length !== 1) reason = prior.length ? '前件不唯一' : '前件不存在或已退件';
+            else if (prior[0] === node) reason = '自己指向自己';
+            else reason = invalid(prior[0], [...path, node]);
+            // 旧链本来悬空、退过件等不能推翻旧件的实际结果；本次新增造成的环仍拒收。
+            if (!newNodes.has(node) && reason !== '前件成环') reason = null;
+            memoized.set(node, reason);
+            return reason;
+        };
+        const kept = [];
+        for (const node of fresh) {
+            const reason = invalid(node);
+            if (reason) log(chatKey, 'plan_chain_dropped', { plan: planId, title: node.title, after: node.after_title, reason });
+            else kept.push(node.item);
+        }
+        return kept;
     }
     // 这个窗口此刻的菜单：它认得的规划里的菜单项，状态按它认得的那几步重放。
     // 交给某人那一格里的一步（pending）挂在它真正落到纸面上的那条（方案 删消息等于没发生过，10/9）：被回的那条后面紧跟着的就是他这条回复，
@@ -1336,7 +1382,7 @@ export function openStore(file) {
         if (replacing != null) for (const old of rerollChain(replacing, live)) replaced.add(old);
         const ids = plans.map(p => p.id), marks = ids.map(() => '?').join(', ');
         const items = q(`select * from menu where plan_id in (${marks}) order by id`).all(...ids)
-            .filter(m => (m.anchor_pos == null || h.sees(m.chat_key, m.anchor_pos, m.anchor_fp)) && (!getMeta(`event_source:${m.id}`) || sourceLive(chatKey, JSON.parse(getMeta(`event_source:${m.id}`)))));
+            .filter(m => menuItemLive(chatKey, m, h));
         const steps = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids)
             .filter(s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && basisLive(chatKey, s.pos, s.story_day, s.basis_part) && replied(s));
         for (const m of items) {
@@ -1368,12 +1414,16 @@ export function openStore(file) {
     }
     // 这几份规划里排过的事，不管后来到了哪一步、有没有被新规划接手（menuOf 只留眼下还算数的）——简报数最近两份各类别排了几件用（章程 J1）。
     // 后来补进来的几件照样看它挂的那条消息还在不在
+    function menuItemLive(chatKey, m, h = historyOf(chatKey)) {
+        const source = getMeta(`event_source:${m.id}`);
+        return (m.anchor_pos == null || h.sees(m.chat_key, m.anchor_pos, m.anchor_fp)) && (!source || sourceLive(chatKey, fromJson(source)));
+    }
     function planItems(chatKey, planIds = []) {
         const ids = planIds.filter(Number.isInteger);
         if (!ids.length) return [];
         const h = historyOf(chatKey);
         return q(`select * from menu where plan_id in (${ids.map(() => '?').join(', ')}) order by id`).all(...ids)
-            .filter(m => m.anchor_pos == null || h.sees(m.chat_key, m.anchor_pos, m.anchor_fp)).map(m => { readCells(m); m.entryBasis = fromJson(m.entry_basis); return m; });
+            .filter(m => menuItemLive(chatKey, m, h)).map(m => { readCells(m); m.entryBasis = fromJson(m.entry_basis); return m; });
     }
     // 菜单日志走到哪了；某一步之后拿出来、交出去过的那几件（碰上的事从启用那一刻起算，旧的不补，matters.mjs）
     // 菜单项改挂到另一条消息上（landing.relinkArrivals：进场时顺带排的那件挂到他那条回复上）。返回动了几件

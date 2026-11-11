@@ -1265,17 +1265,23 @@ export function parseNodeCheck(text) {
 // 掷骰（可复现）：同一条、同一天，结果不变。
 // shown＝角色已经把这件事拿出来了（记账认出来的，D-100）；接下来给后半截，然后算 used。
 export const SETTLED = new Set(['used', 'shown', 'sunk', 'sunk_told', 'void', 'expired']);
+// 只读当前可见记录；结果必须能用原文核实，任何相反结论都阻断成功。
+export function menuSuccessEvidence(m, { visible = [], messages = [] } = {}) {
+    const quoted = r => Array.isArray(r.quotes) && r.quotes.length > 0 && r.quotes.every(q =>
+        typeof q === 'string' && q.trim() && messages.some(msg => msg.fp === r.fp && String(msg.text ?? '').includes(q)));
+    return visible.filter(r => r.type === '做' && r.matter?.menu === m.id && !r.matter?.kind).flatMap(action => {
+        const ends = visible.filter(end => end.type === '了结' && end.idea_ref === action.id);
+        if (ends.some(end => end.outcome !== '做了')) return [];
+        return ends.filter(end => end.outcome === '做了' && quoted(end)).map(result => ({ action, result }));
+    });
+}
 // 后件只凭同一窗口里有原文依据的实际成功解锁；菜单状态不是办成的证据。
 export function afterBlocked(m, menu = [], statusOf = x => x.status, { visible = [], messages = [] } = {}) {
     if (!m?.after_title) return false;
     const same = menu.filter(x => x.plan_id === m.plan_id && x.title === m.after_title);
     const prior = same.length ? same : menu.filter(x => x.plan_id < m.plan_id && x.title === m.after_title);
     if (prior.length !== 1 || prior[0].id === m.id) return true;
-    const quoted = r => Array.isArray(r.quotes) && r.quotes.length > 0 && r.quotes.every(q =>
-        typeof q === 'string' && q.trim() && messages.some(msg => msg.fp === r.fp && String(msg.text ?? '').includes(q)));
-    return !visible.some(r => r.type === '做' && r.matter?.menu === prior[0].id && !r.matter?.kind
-        && visible.some(end => end.type === '了结' && end.idea_ref === r.id && end.outcome === '做了' && quoted(end))
-        && !visible.some(end => end.type === '了结' && end.idea_ref === r.id && end.outcome !== '做了'));
+    return !menuSuccessEvidence(prior[0], { visible, messages }).length;
 }
 
 export const roll = (key, sides) => parseInt(createHash('sha256').update(String(key)).digest('hex').slice(0, 8), 16) % sides;
@@ -1409,7 +1415,7 @@ export function expiredPocket(m, ctx = {}) {
     const what = String(t.what ?? '').trim();
     if (t.follow === '时间') {
         const p = PART_ORDER.indexOf(partIn(what)), nowPart = PART_ORDER.indexOf(partAt(at));
-        return dayGone || (p >= 0 && nowPart > p) ? { status: 'expired', why: `没赶上：${what || '那个时候'}已经过了`, basisDay: today, ...(!dayGone ? { basisPart: partAt(at) } : {}) } : null;
+        return dayGone || (today === day && p >= 0 && nowPart > p) ? { status: 'expired', why: `没赶上：${what || '那个时候'}已经过了`, basisDay: today, ...(!dayGone ? { basisPart: partAt(at) } : {}) } : null;
     }
     // 跟着人、跟着地方：得先在过（进口袋那一下、递出去那一下），现在不在了才算过期；一直没到过的照旧按时间沉
     const seenAt = [inPocket ? m.pocket_pos : null, Number.isFinite(m.held_pos) ? m.held_pos : null].filter(Number.isFinite);

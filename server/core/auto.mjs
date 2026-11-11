@@ -25,6 +25,8 @@ export const KNOCKS = chatKey => `knocks:${chatKey}`;
 export const PENDING = chatKey => `knock_pending:${chatKey}`;
 export const LEFT = chatKey => `auto_left:${chatKey}`;
 const KEEP = 40;
+const CAME_LOOKBACK = 3;
+const CAME_RECHECKS = 2;
 
 const read = (store, key, fallback) => { try { return JSON.parse(store.getMeta?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
 const readRaw = (store, key, fallback) => { try { return JSON.parse((store.getRawMeta ?? store.getMeta)?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
@@ -350,6 +352,9 @@ export const AUTO_CAME = chatKey => `auto_came:${chatKey}`;
 export const LEFT_PENDING = chatKey => `auto_left_pending:${chatKey}`;
 const squashQuote = t => String(t??'').replace(/[\p{P}\s]/gu,'');
 const isOwn = (m,p) => !m.is_user && (m.name===p.name || (!!p.avatar && m.speaker===p.avatar));
+const cameBasisLive = (c, messages) => messages.some(m => m.pos === c.at && m.fp === c.fp)
+    && (c.through == null || messages.some(m => m.pos === c.through && m.fp === c.throughFp))
+    && (!c.basis || c.basis.every(b => messages.some(m => m.pos === b.pos && m.fp === b.fp)));
 // 正文已把有卡的人带到场面：先按名册叫法挑候选，模型只复核这些人。
 export function cameDoubts(store, records, chatKey, { present = [], config = null } = {}) {
     if (config?.auto?.enabled === false || config?.auto?.turn === false) return [];
@@ -358,7 +363,9 @@ export function cameDoubts(store, records, chatKey, { present = [], config = nul
     const { messages, roster, names, relations } = ctx;
     const userAt = messages.findLastIndex(m => m.is_user);
     if (userAt < 0) return [];
-    const asked = read(store, CAME_ASK(chatKey), []).filter(a => messages.some(m => m.pos === a.at && m.fp === a.fp));
+    const from = Math.max(0, userAt - CAME_LOOKBACK);
+    const window = messages.slice(from);
+    const asked = read(store, CAME_ASK(chatKey), []).filter(a => cameBasisLive(a, messages));
     const arrived = activeCame(store, chatKey, messages);
     const rel = relations ? normalizeRelations(relations) : null;
     const out = [];
@@ -368,37 +375,47 @@ export function cameDoubts(store, records, chatKey, { present = [], config = nul
         if (p && ['present', 'remote'].includes(p.status)) continue;
         if (arrived.some(a => (a.avatar && a.avatar === entry.avatar) || a.who === entry.name)) continue;
         const aliases = callsOf(entry.name, { rel, names });
-        const hit = messages.slice(userAt).findLast(m => aliases.some(n => n && String(m.text ?? '').includes(n)));
-        if (!hit || asked.some(a => a.who === entry.name && a.at === hit.pos && a.fp === hit.fp)) continue;
+        const hit = window.findLast(m => aliases.some(n => n && String(m.text ?? '').includes(n)));
+        if (!hit) continue;
+        const prior = asked.filter(a => a.who === entry.name && a.at === hit.pos && a.fp === hit.fp)
+            .sort((a,b) => (a.through ?? a.at) - (b.through ?? b.at)).at(-1);
+        const review = prior ? (prior.review ?? 0) + 1 : 0;
+        if (prior && (prior.result === '到了' || review > CAME_RECHECKS
+            || !window.some(m => !m.is_user && m.pos > (prior.through ?? prior.at)))) continue;
         out.push({ who: entry.name, avatar: entry.avatar ?? null, aliases, at: hit.pos, fp: hit.fp,
+            from: window[0].pos, basis: window.map(m => ({ pos: m.pos, fp: m.fp })), review,
             through: messages.at(-1).pos, throughFp: messages.at(-1).fp });
     }
     return out;
 }
 export function activeCame(store, chatKey, messages = live(store.currentMessages(chatKey))) {
     const departed = leaveEvents(store, chatKey).filter(e => e.action === 'leave');
-    return read(store, AUTO_CAME(chatKey), []).filter(c => messages.some(m => m.pos === c.at && m.fp === c.fp)
+    return read(store, AUTO_CAME(chatKey), []).filter(c => cameBasisLive(c, messages)
         && !departed.some(e => ((c.avatar && e.avatar === c.avatar) || e.who === c.who) && e.at > c.at));
 }
 export function answerCame(store, chatKey, doubts, verdicts) {
     const messages = live(store.currentMessages(chatKey));
-    const asked = read(store, CAME_ASK(chatKey), []).filter(a => messages.some(m => m.pos === a.at && m.fp === a.fp));
-    const came = read(store, AUTO_CAME(chatKey), []).filter(c => messages.some(m => m.pos === c.at && m.fp === c.fp));
-    const userAt = messages.findLastIndex(m => m.is_user);
+    const asked = read(store, CAME_ASK(chatKey), []).filter(a => cameBasisLive(a, messages));
+    const came = read(store, AUTO_CAME(chatKey), []).filter(c => cameBasisLive(c, messages));
     const accepted = [];
     for (const d of doubts) {
         const anchor = messages.find(m => m.pos === d.at && m.fp === d.fp);
         const last = messages.find(m => m.pos === d.through && m.fp === d.throughFp);
         const v = verdicts?.[d.who];
-        if (!anchor || !last || !v || !['到了', '没到'].includes(v['结果'])) continue;
+        if (!anchor || !last || !v || !['到了', '没到'].includes(v['结果']) || !cameBasisLive(d, messages)) continue;
+        if (asked.some(a => a.who === d.who && (a.through ?? a.at) >= d.through)) continue;
+        const basis = messages.filter(m => m.pos >= d.from && m.pos <= d.through).map(m => ({ pos: m.pos, fp: m.fp }));
+        if (!d.basis?.length || JSON.stringify(basis) !== JSON.stringify(d.basis)) continue;
         const evidenceIndex = messages.findIndex(m => Number.isInteger(v['条']) && m.pos === v['条']);
         const evidence = messages[evidenceIndex];
-        if (!evidence || evidenceIndex < Math.max(0, userAt - 3) || evidence.pos > last.pos
+        if (!evidence || evidence.pos < d.from || evidence.pos > last.pos
             || typeof v['引'] !== 'string' || [...v['引']].length > 20 || !squashQuote(v['引'])
             || !squashQuote(evidence.text).includes(squashQuote(v['引']))) continue;
-        asked.push({ who: d.who, at: d.at, fp: d.fp });
+        asked.push({ who: d.who, at: d.at, fp: d.fp, through: d.through, throughFp: d.throughFp,
+            result: v['结果'], review: d.review ?? 0, basis: d.basis });
         if (v['结果'] !== '到了') continue;
-        const item = { who: d.who, avatar: d.avatar ?? null, at: evidence.pos, fp: evidence.fp, quote: v['引'] };
+        const item = { who: d.who, avatar: d.avatar ?? null, at: evidence.pos, fp: evidence.fp, quote: v['引'],
+            basis: d.basis, through: d.through, throughFp: d.throughFp };
         if (!came.some(c => c.who === item.who && c.at === item.at && c.fp === item.fp)) { came.push(item); accepted.push(item); }
     }
     write(store, CAME_ASK(chatKey), asked.slice(-60));

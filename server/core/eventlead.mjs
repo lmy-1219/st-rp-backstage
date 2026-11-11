@@ -164,7 +164,7 @@ export function echoEvent(store, records, chatKey, m, { at, day, roster = [], us
     if (holder && record && records?.addDerived && storyId) records.addDerived({ storyId, fp: at.fp, type: '做', text: record.slice(0, 240), holder: holderOf(roster, holder), holderName: holder, audience: [holder], about: holder,
         keys: [m.title, m.place].map(tidy).filter(x => x.length >= 2), known: [{ basis: { pos: at.pos, fp: at.fp, day, menu: m.id, menuStatus: 'expired' } }], matter: { menu: m.id, title: m.title ?? '', entry: '镜头外', who: holder } });
     const plan = store.lastReadyPlan?.(chatKey);
-    if (item && plan && store.appendMenu) store.appendMenu(plan.id, [item], { storyDay: day, at, source: { pos: at.pos, fp: at.fp, day, menu: m.id, menuStatus: 'expired' } });
+    if (item && plan && store.appendMenu) store.appendMenu(plan.id, [item], { chatKey, storyDay: day, at, source: { pos: at.pos, fp: at.fp, day, menu: m.id, menuStatus: 'expired' } });
     if (LIVE.has(m.status)) store.updateMenu(chatKey, m.id, { status: 'expired', by: '程序', why: why || `${userName ?? '玩家'}没去：${holder ?? '那边'}照常办了`, basisDay: day, at });
     store.logEvent?.(chatKey, 'event_echo', { id: m.id, title: m.title, holder, why });
     return { holder, item };

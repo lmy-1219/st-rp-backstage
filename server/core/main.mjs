@@ -601,17 +601,17 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
 // 补进来的挂在起念头那条消息上，删到它之前就撤回。出来的事按"事件"那套核对，新面孔照样入册。
 const SUPPLEMENTS = 2;
 async function supplement({ chatKey, planId, idea, at }) {
-    return addToPlan({ chatKey, planId, at, counter: `plan_supplements:${planId}`, max: SUPPLEMENTS, reason: 'idea', verdict: `${idea.who}：${idea.what}`, line: `${idea.who}的念头`, label: `for ${idea.who}（${idea.what}）` });
+    return addToPlan({ chatKey, planId, at, counter: `plan_supplements:${chatKey}:${planId}`, max: SUPPLEMENTS, reason: 'idea', verdict: `${idea.who}：${idea.what}`, line: `${idea.who}的念头`, label: `for ${idea.who}（${idea.what}）` });
 }
 // 剧情走到了开局单里某条储备线写明的地方（N-293）：展开那条线，给眼下这个节点补几件此刻就能用上的；同一份规划至多两回（同一条线一个剧情日一回，slot 那边管）
 // 玩家停得够久还没新事（路标卡的 guide.stall 倍数，T077）：往眼下这个节点补几件此刻就能用上的；记号 guide_refill 由 server 管（同一份规划至多一回），
 // 这里的计数器单独走一个，不占念头、储备线的两回
 async function stallSupplement({ chatKey, planId, at }) {
-    return addToPlan({ chatKey, planId, at, counter: `plan_stall:${planId}`, max: 1, reason: 'stall', verdict: '玩家连着好几轮都没有新的事情发生', line: '停住补货', label: 'stall' });
+    return addToPlan({ chatKey, planId, at, counter: `plan_stall:${chatKey}:${planId}`, max: 1, reason: 'stall', verdict: '玩家连着好几轮都没有新的事情发生', line: '停住补货', label: 'stall' });
 }
 async function placeSupplement({ chatKey, planId, line, place, at }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
-    return addToPlan({ chatKey, planId, at, counter: `plan_place:${planId}`, max: SUPPLEMENTS, reason: 'place', verdict: `储备线「${line}」写明的地方到了：${place}`, thread: line, line, label: `at ${place}（${line}）` });
+    return addToPlan({ chatKey, planId, at, counter: `plan_place:${chatKey}:${planId}`, max: SUPPLEMENTS, reason: 'place', verdict: `储备线「${line}」写明的地方到了：${place}`, thread: line, line, label: `at ${place}（${line}）` });
 }
 async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, thread = null, line, label }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
@@ -620,7 +620,7 @@ async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, t
     const cfg = getConfig(), e = cfg.extractor, p = cfg.planner, s = cfg.stages.plan;
     if (p.provider !== 'api' || !s.baseUrl || !s.apiKey) return;
     if (records.spentToday() >= e.dailyBudgetUsd || records.spentTodayOn('(规划)') >= p.budgetUsd) return;
-    const attempt = store.beginPlanAttempt(planId, { entry: 'supplement', model: s.model ?? p.model, thinks: !!(s.extraBody?.reasoning_effort || s.extraBody?.output_config?.effort), supplement: true });
+    const attempt = store.beginPlanAttempt(planId, { entry: 'supplement', model: s.model ?? p.model, thinks: !!(s.extraBody?.reasoning_effort || s.extraBody?.output_config?.effort), supplement: true, chatKey });
     if (!attempt) return;
     try {
     store.setMeta(key, String(done + 1));
@@ -650,7 +650,8 @@ async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, t
     const today = storyContext(store, records, chatKey, { through: at?.pos ?? null }).today;
     requirePlanAttempt(attempt);
     store.updatePlanAttempt(attempt, { stage: '落账' });
-    store.appendMenu(planId, items, { storyDay: today, at, intimateProgress: parsed.intimateProgress });
+    store.appendMenu(planId, items, { chatKey, storyDay: today, at, intimateProgress: parsed.intimateProgress,
+        removedTitles: [...parsed.items.slice(4).map(m => m.title), ...(parsed.dropped ?? []).filter(d => !d.kept).map(d => d.item?.title ?? d.item?.['题']).filter(Boolean)] });
     addFaces(store, chat.story_id, parsed.faces);
     log(`plan ${planId} supplement ${label}: ${items.map(m => m.title).join('、')} $${costUsd.toFixed(3)}`);
     store.finishPlanAttempt(attempt);
@@ -1234,7 +1235,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
         if (plan) {
             store.appendMenu(plan.id, [{ who: pull.with, title: '人都来了', surface: pull.surface || `${who}人找到这儿来了；${pull.with}约他的那件，眼下就能当面说`, respond: pull.respond || '', sink: null, fit: null, weight: '半轮', know: null,
                 line: '约定提前', after: null, motif: NOW_MOTIF, promiseRef: pull.promiseRef ?? null, offscreen: false, afterDays: 0, entry: '找上门', place: null, goer: null, errand: null,
-                origin: `原本约的：${pull.text}。${who}找上门来，正好碰上，顺便提前到眼下` }], { storyDay: storyContext(store, records, chatKey).today, at: { pos: tip.pos, fp: tip.fp } });
+                origin: `原本约的：${pull.text}。${who}找上门来，正好碰上，顺便提前到眼下` }], { chatKey, storyDay: storyContext(store, records, chatKey).today, at: { pos: tip.pos, fp: tip.fp } });
             const id = store.db.prepare('select max(id) id from menu where plan_id = ?').get(plan.id)?.id;
             if (Number.isInteger(id)) menus.push(id);
         }
@@ -1851,7 +1852,7 @@ async function situationOnce({ chatKey, day, loud = null, skip = null }) {
                 }
                 return /^[1-9]\d*$/.test(source) ? { type: 'record', id: Number(source) } : null;
             };
-            store.appendMenu(plan.id, v.followups.map(f => ({ who: f.who, title: f.title, surface: f.surface, respond: f.respond, sink: null, fit: null, weight: f.weight, know: f.know || null, origin: f.origin || null, cause: causeOf(f.source), line: '后续', after: null, motif: f.loud ? NOW_MOTIF : '后续', afterDays: f.afterDays })), { storyDay: day, at: m.anchor });
+            store.appendMenu(plan.id, v.followups.map(f => ({ who: f.who, title: f.title, surface: f.surface, respond: f.respond, sink: null, fit: null, weight: f.weight, know: f.know || null, origin: f.origin || null, cause: causeOf(f.source), line: '后续', after: null, motif: f.loud ? NOW_MOTIF : '后续', afterDays: f.afterDays })), { chatKey, storyDay: day, at: m.anchor });
             log(`situation ${chatKey} day ${day}: follow-ups ${v.followups.map(f => `${f.source}→${f.who}「${f.title}」`).join('、')}`);
         }
         // 镜头外有了动静（D-171，用户 10/6："发酵有了但整体规划反而落后"）：让每轮那次检查看一眼，规划设想的局面还成不成立；不成立就照常重新规划
