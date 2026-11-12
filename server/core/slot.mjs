@@ -1,3 +1,4 @@
+import { measure } from './request-timing.mjs';
 import { partsText, partsSources, recordParts } from './records.mjs';
 import { personWord, renderPronouns, playerWord, playerContext } from './pronoun.mjs';
 import { registerPromptDefaults, promptText, promptOptionsFor, DEFAULT_TIER, DEFAULT_PACK } from './prompt-slots.mjs';
@@ -3501,7 +3502,7 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     const chat = store.requireChat(chatKey);
     if (!chat.enabled) return { text: '', rule: '' };
     // 先折一次（世界往前走的那些写），再组格（只读）；预览（slot-preview）走 composeSlot，不经这里，什么都不写
-    await advance(store, records, chatKey, { planner, situation, absence }, { present });
+    await measure('advance', () => advance(store, records, chatKey, { planner, situation, absence }, { present }));
     // 分块放（slot.split）：各块的文字和中段、"玩家最后一句之前"各插在倒数第几条；扩展不认分块时照旧用 text 整格放最后
     const split = slot?.split !== false;
     const depths = { mid: slot?.midDepth ?? 4, recall: slot?.recallDepth ?? -1, now: slot?.nowDepth ?? 4 };
@@ -3541,7 +3542,7 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     }
     const key = `${chatKey}\u0001${speaker}\u0001${anchor}\u0001${version}`;
     if (!inflight.has(key)) {
-        inflight.set(key, composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift })
+        inflight.set(key, measure('compose', () => composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift }))
             .then(result => {
                 if (versionNow() !== version) return result;
                 if (result.final) store.putSlot({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.parts ?? null, ver: version });

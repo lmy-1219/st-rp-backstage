@@ -11,7 +11,7 @@ export { RELEASE_REPOSITORY, isReleaseOrigin } from './install.mjs';
 
 // 装进 ST 的文件：扩展、转发插件（插件的 config.json 是每个 ST 自己的，不在这里）
 export const INSTALL = [
-    { from: 'extension', to: ['data', 'default-user', 'extensions', 'rp-emergence'], files: ['manifest.json', 'index.js', 'sync.mjs'] },
+    { from: 'extension', to: ['data', 'default-user', 'extensions', 'rp-emergence'], files: ['manifest.json', 'index.js', 'sync.mjs', 'lifecycle.mjs'] },
     { from: 'plugin', to: ['plugins', 'rp-emergence'], files: ['index.js', 'package.json'] },
 ];
 
@@ -91,7 +91,7 @@ export async function checkRelease({ repo, stRoot = null, follow = 'origin/main'
     };
 }
 
-const isExtensionFile = file => ['index.js', 'sync.mjs', 'manifest.json', 'style.css'].includes(file) || file.startsWith('assets/');
+const isExtensionFile = file => ['index.js', 'sync.mjs', 'lifecycle.mjs', 'manifest.json', 'style.css'].includes(file) || file.startsWith('assets/');
 
 // 与安装器共用 origin、工作区和树检查；后台只用异步 git，不运行安装器的同步命令。
 async function prepareClone(repo, { follow, fetch, acceptsOrigin }) {

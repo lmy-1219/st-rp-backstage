@@ -1,3 +1,4 @@
+import { measure } from './request-timing.mjs';
 // 调模型：OpenAI 兼容的 /chat/completions；按 Anthropic 写法开了思考档的走 Anthropic 原生的 /messages（见 noNative 那段）。钥匙只在请求头里用，不写日志。
 // temperature 只在配置里给了数字时才发（新一代模型不接受采样参数）；extraBody 原样并进请求体（比如思考档位）。
 // 一律流式读（实测中转对不流式的长回答会卡住：几千字的回答五分钟都等不回来）。只要一直有数据进来就不算超时，
@@ -153,7 +154,7 @@ export function createModelClient({ baseUrl, apiKey, model, temperature = null, 
             const add = u => { for (const k of ['input', 'output']) if (Number.isFinite(u?.[k])) used[k] = (used[k] ?? 0) + u[k]; };
             for (;;) {
                 let r;
-                try { r = await once(max, prompt, observe); }
+                try { r = await measure('modelWait', () => once(max, prompt, observe)); }
                 catch (error) {
                     observe({ requestEnd: 'error', errorCode: causeCode(error) });
                     add(error.usage);

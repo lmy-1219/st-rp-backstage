@@ -2,6 +2,7 @@ import { signalEvaluation } from './planner.mjs';
 import { secretCandidates } from './held.mjs';
 // 本机后台的 HTTP 接口。只听 127.0.0.1；浏览器不直接连它，经 ST 里的转发插件过来（plugin/）。
 import http from 'node:http';
+import { requestTrace, withTrace, traceView, measure } from './request-timing.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, menuDays, scaleFor, renderEntry, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
@@ -236,12 +237,12 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/sync': b => {
             const chatKey = str(b.chatKey, 'chatKey'), seq = readSeq(b.seq);
             // 同步前：给眼下的最后一条记一份快照（它当最后一条时最后的样子）；删回到它时拿来对账（rewind.mjs）
-            if (records) try { if (store.currentMessages(chatKey).length) snapshotRewind(store, records, chatKey); } catch {}
-            const result = store.sync({
+            if (records) try { measure('snapshot', () => { if (store.currentMessages(chatKey).length) snapshotRewind(store, records, chatKey); }); } catch {}
+            const result = measure('store.sync', () => store.sync({
                 chatKey, seq, force: !!b.force,
                 members: Array.isArray(b.members) ? b.members : null,
                 anchors: b.anchors && typeof b.anchors === 'object' ? b.anchors : null,
-            });
+            }));
             // 开局单"人物开场状态"里要记成记录的那几类（约定、欠账、名声、手头的事）落到第一条消息上；开局单没变就不动（opening.mjs）
             if (result.committed && records) try { ensureOpening(store, records, b.chatKey); } catch {}
             // 进场时替他记的那几笔挂到他那条回复上：删了、换了跟着看不见，又开口了跟着回来（landing.mjs）
@@ -249,7 +250,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             // 删回去了：重算的和那条当时的快照比，对不上的面板上亮一行（rewind.mjs）
             if (result.committed && records) try { checkRewind(store, records, b.chatKey, result); } catch {}
             // 同步提交了就折一次：不等有人开口，世界也往前走（到日子的传开、口袋进沉、几种检查）
-            if (result.committed && records) advance(store, records, b.chatKey, withPack(b.chatKey)).catch(() => {});
+            if (result.committed && records) measure('advance', () => advance(store, records, b.chatKey, withPack(b.chatKey))).catch(() => {});
             if (result.committed && result.added) worker?.kick();
             // 看一眼（glance）：此刻的样子＋兴头并成一次；面板关了合并就各调各的
             if (result.committed) settings().glance?.run?.({ chatKey: b.chatKey }).catch(() => {});
@@ -470,7 +471,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/turn': async b => {
             const auto = settings().auto;
             if (!auto?.turn) bad('auto_unavailable');
-            return auto.turn({ chatKey: str(b.chatKey, 'chatKey'), present: strings(b.present, 60, 200), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', peek: b.peek === true });
+            return measure('compose', () => auto.turn({ chatKey: str(b.chatKey, 'chatKey'), present: strings(b.present, 60, 200), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', peek: b.peek === true }));
         },
         'POST /v1/turn-result': b => {
             const chatKey = str(b.chatKey, 'chatKey'); store.requireChat(chatKey);
@@ -640,7 +641,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             return { labels: labelsOf(seenTimeline, seenTimeline.start, { seed: seenTimeline.seed, notes: store.stateNotesOf?.(chatKey) ?? [] }), today: seenTimeline.today, hasDate: !!seenTimeline.start?.日期, since: sinceWord(seenTimeline.start),
                 scale: { unit: seenTimeline.scale.unit, word: seenTimeline.scale.word, ord: seenTimeline.scale.ord, parts: [...seenTimeline.scale.parts] } };
         },
-        'POST /v1/boards': b => {
+        'POST /v1/boards': b => measure('compose', () => {
             const chatKey = str(b.chatKey, 'chatKey');
             const all = store.currentMessages(chatKey);
             const from = Number.isInteger(Number(b.from)) ? Math.max(0, Number(b.from)) : Math.max(0, all.length - 20);
@@ -654,7 +655,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                     sourceVersion: board.sourceVersion,
                     time: { day: board.time.day, part: board.time.part } };
             }) };
-        },
+        }),
         // ST 世界书谁知道（§5.4、N-252）：entries＝扩展这回加载到、后台还没见过的条目（带内容）；set＝玩家改的 [{key, all, who}]。
         // 回给扩展每条的判断（按内容指纹认），扩展据此把开口的人不该知道的条目拿掉。
         'POST /v1/lore': b => {
@@ -1225,31 +1226,41 @@ export function createServer(store, { log = () => {}, worker = null, records = n
         return { last: timings.slice(-100), byRoute: [...by.values()].map(s => ({ route: s.route, n: s.n, avg: Math.round(s.ms / s.n), max: s.max })).sort((a, b) => b.avg * b.n - a.avg * a.n) };
     };
     return http.createServer(async (req, res) => {
+        const trace = requestTrace();
+        const name = `${req.method} ${new URL(req.url, 'http://x').pathname}`;
+        const heavy = ['POST /v1/sync', 'POST /v1/slot', 'POST /v1/turn', 'POST /v1/boards'].includes(name);
         const send = (status, value) => {
-            res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-            res.end(JSON.stringify(value));
-        };
-        try {
-            const route = routes[`${req.method} ${new URL(req.url, 'http://x').pathname}`];
-            if (!route) return send(404, { error: 'not_found' });
-            let body = {};
-            if (req.method === 'POST') {
-                // 只收 JSON：别的网页用表单偷偷往本机端口发请求时会被挡在这里。
-                if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) return send(415, { error: 'json_only' });
-                const text = await readBody(req);
-                try { body = text ? JSON.parse(text) : {}; } catch { bad('bad json'); }
-                if (!body || typeof body !== 'object' || Array.isArray(body)) bad('body must be an object');
+            trace.ended = performance.now();
+            const stages = traceView(trace), ms = Math.round(stages.total);
+            const failed = status >= 400 || value?.ok === false;
+            if (name !== 'POST /v1/timings') {
+                timings.push({ at: Date.now(), route: name, status, ms, failed, stages });
+                if (timings.length > 400) timings.splice(0, timings.length - 400);
             }
-            const t0 = performance.now();
-            const value = await route(body);
-            const ms = Math.round(performance.now() - t0);
-            const name = `${req.method} ${new URL(req.url, 'http://x').pathname}`;
-            if (name !== 'POST /v1/timings') { timings.push({ at: Date.now(), route: name, ms }); if (timings.length > 400) timings.splice(0, timings.length - 400); if (ms > 1500) log(`slow ${name}: ${ms} ms`); }
-            send(200, value);
-        } catch (error) {
-            const status = error.status ?? 500;
-            if (status >= 500) log(`error ${req.method} ${req.url}: ${error.stack ?? error}`);
-            send(status, { error: error.message });
-        }
+            // 不输出错误原文、请求体、查询参数；失败阶段只取程序内固定标签。
+            if (failed || ms > 1500 || heavy) log(`${failed ? 'failed' : ms > 1500 ? 'slow' : 'request'} ${name}: status=${status} stage=${stages.stage} ${ms} ms${heavy ? ` phases=${JSON.stringify(stages)}` : ''}`);
+            res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(JSON.stringify(heavy && value && typeof value === 'object' ? { ...value, timings: stages } : value));
+        };
+        await withTrace(trace, async () => {
+            try {
+                const route = routes[name];
+                if (!route) return send(404, { error: 'not_found' });
+                let body = {};
+                if (req.method === 'POST') {
+                    if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) return send(415, { error: 'json_only' });
+                    const text = await readBody(req);
+                    try { body = text ? JSON.parse(text) : {}; } catch { bad('bad json'); }
+                    if (!body || typeof body !== 'object' || Array.isArray(body)) bad('body must be an object');
+                }
+                trace.stage = 'route';
+                const value = await route(body);
+                trace.failedStage = null;
+                trace.stage = value?.ok === false ? 'business' : 'complete';
+                send(200, value);
+            } catch (error) {
+                send(error.status ?? 500, { error: error.message });
+            }
+        });
     });
 }

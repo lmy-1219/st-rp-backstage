@@ -6,6 +6,7 @@ import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStal
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 import { cutByPresence, storyTimeAt } from './presence.mjs';
 import { boardSegmentEdit, undoBoardSegmentEdit } from './sync.mjs';
+import { failureView, setStage, stageHtml, cardChoiceHtml } from './lifecycle.mjs';
 
 const MODULE = 'rp_emergence';
 const KEYS = { rule: 'rp_emergence_rule', slot: 'rp_emergence_slot', mid: 'rp_emergence_mid', recall: 'rp_emergence_recall', world: 'rp_emergence_world' };
@@ -139,15 +140,14 @@ async function api(route, body, timeout = 30000, { background = false } = {}) {
     const t0 = performance.now();
     let ok = false;
     try {
-        const response = await fetch(`/api/plugins/rp-emergence/${route}`, {
-            method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(timeout),
-        });
-        backendConnection.observe(response.status);
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw Object.assign(new Error(data.error || String(response.status)), { status: response.status });
+        const options = { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(timeout) };
+        const response = await fetch(`/api/plugins/rp-emergence/${route}`, options).catch(error => { throw Object.assign(error, { kind: 'network' }); });
+        const data = await response.json().catch(() => { if (response.ok) throw new Error('后台响应不是有效 JSON'); return {}; });
+        backendConnection.observe(response.status === 404 && data.error === 'unknown_chat' ? 200 : response.status);
+        if (!response.ok) throw Object.assign(new Error(data.error || String(response.status)), { status: response.status, code: data.error });
         ok = true;
         return data;
-    } catch (error) { if (!error.status && !background) backendConnection.observe(0); throw error; }
+    } catch (error) { if (error.kind === 'network' && !background) backendConnection.observe(0); throw error; }
     finally { tick(`后台:${route}`, performance.now() - t0, ok ? '' : '失败'); }
 }
 
@@ -191,8 +191,19 @@ export function createBackendConnection({ request, now = Date.now, schedule = se
 }
 const backendConnection = createBackendConnection({
     request: async () => (await fetch('/api/plugins/rp-emergence/health', { signal: AbortSignal.timeout(6000) })).status,
-    changed: status => { state.backendStatus = status.kind; state.backendDown = status.backendDown; render(); },
+    changed: status => backendChanged(status),
 });
+
+function backendChanged(status) {
+    const previous = state.backendStatus;
+    state.backendStatus = status.kind; state.backendDown = status.backendDown;
+    setStage(state, 'connection', status.kind === 'healthy' ? '成功' : status.kind === 'starting' ? '检查中' : '不可用');
+    if (previous !== 'healthy' && status.kind === 'healthy' && state.openEpoch === state.epoch && !state.opened && ctx().chatMetadata?.rp_emergence?.chatKey) {
+        if(state.openFlight?.epoch===state.epoch)state.recoveryRequested=state.epoch;
+        else void reconnect();
+    }
+    render();
+}
 
 const escapeHtml = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
@@ -1711,6 +1722,7 @@ if (globalThis.MutationObserver && globalThis.document?.body) new globalThis.Mut
 // light＝只等"后台认得这些消息"（sync 提交）；状态、门、日期、世界书、规划这些刷新放到后面跑，不挡调用的人（T080 返工：生成前的同步用）。
 function syncNow(force = false, light = false) {
     if (!state.chatKey || !settings().enabled) return Promise.resolve(false);
+    if (state.openEpoch === state.epoch && state.opened === false) return Promise.resolve(false);
     // 调度必须等正在同步的那次连同撤销一起做完，不能只记 dirty 就拿旧场面排人。
     if (state.syncFlight?.epoch === state.epoch) { state.dirty = true; return state.syncFlight.promise; }
     const flight = { epoch: state.epoch, promise: null };
@@ -1726,6 +1738,7 @@ async function syncOnce(force = false, light = false) {
     const epoch = state.epoch;
     const tStart = performance.now();
     let changed = force;
+    setStage(state, 'sync', '进行中', '核对人设与撤销');
     try {
         do {
             state.dirty = false;
@@ -1733,16 +1746,18 @@ async function syncOnce(force = false, light = false) {
             await sendPersona();
             if (epoch !== state.epoch) return false;
             if (typeof reconcileBoardState === 'function') await reconcileBoardState();
+            if (epoch !== state.epoch) return false;
             cameraOf(c);   // 旁白卡写的记 narrator：先认出它再算指纹
             const tb = performance.now();
             const generating = activeGeneration();
             const { seq, bodies, pending } = buildSequence(c.chat, fallbackAvatar(c), generating);
             tick('同步:算指纹', performance.now() - tb, `${seq.length} 条`);
-            if (pending) { state.pendingSyncEpoch = epoch; return false; }
+            if (pending) { state.pendingSyncEpoch = epoch; setStage(state, 'sync', '等待', '消息或生成状态尚未稳定'); return false; }
             const payload = {
                 chatKey: state.chatKey, seq, force, members: members(c),
                 anchors: c.chatMetadata?.contextIsolation?.anchors ?? null,
             };
+            setStage(state, 'sync', '进行中', '提交消息');
             let result = await api('sync', payload);
             if (result.need?.length) {
                 for (const batch of batches(result.need.map(f => bodies.get(f)).filter(Boolean))) {
@@ -1754,7 +1769,7 @@ async function syncOnce(force = false, light = false) {
             }
             if (epoch !== state.epoch) return false;
             state.collapsed = result.collapsed ?? null;
-            if (!result.committed) return false;
+            if (!result.committed) { setStage(state, 'sync', '等待', result.collapsed ? '聊天缩短，等待确认' : '后台尚未提交'); return false; }
             if (state.pendingSyncEpoch === epoch) state.pendingSyncEpoch = null;
             // 记下后台这次认得的序列：生成前用它判断锚点那条是不是已经同步过（anchorCovered）
             state.synced = { chatKey: state.chatKey, epoch, seq: seq.map(s => ({ f: s.f, w: s.w })) };
@@ -1768,14 +1783,19 @@ async function syncOnce(force = false, light = false) {
                 if (epoch !== state.epoch) return false;
                 const live = ctx();
                 result = await api('sync', { ...payload, force: false, members: members(live), anchors: live.chatMetadata?.contextIsolation?.anchors ?? {} });
-                if (!result.committed || epoch !== state.epoch) return false;
+                if (epoch !== state.epoch) return false;
+                if (!result.committed) { setStage(state, 'sync', '等待', '撤销后同步尚未提交'); return false; }
             }
             force = false;
             state.note = '';
         } while (state.dirty && epoch === state.epoch);
+        if (epoch !== state.epoch) return false;
+        setStage(state, 'sync', '成功');
         const tail = async () => {
             if (epoch !== state.epoch) return;
-            state.status = await api('status', { chatKey: state.chatKey });
+            const status = await api('status', { chatKey: state.chatKey });
+            if (epoch !== state.epoch) return;
+            state.status = status;
             noticeHandoffs(state.status.handoffs);
             noticeStory(state.chatKey, state.status.notice);
             noticeStory(state.chatKey, state.status.secretNotice, 'secret');
@@ -1812,9 +1832,11 @@ async function syncOnce(force = false, light = false) {
         return epoch === state.epoch;
     } catch (error) {
         if (epoch === state.epoch) {
-            state.note = error.code === 'LEAVE_APPLY_FAILED' ? '离场撤销尚未落实。'
-                : error.status === 404 ? '后台没有这个窗口的记录。' : '后台暂时连不上；ST 照常可用。';
-            if (error.status !== 404) scheduleSync(30000);
+            const failure = failureView(error, '消息同步 / 对账');
+            state.note = error.code === 'LEAVE_APPLY_FAILED' ? `离场撤销尚未落实：${String(error.message).slice(0, 100)}` : failure.text;
+            setStage(state, 'sync', '失败', state.note);
+            if (failure.kind === 'unknown') { state.opened = false; state.openUnknown = true; }
+            else scheduleSync(30000);
         }
         return false;
     } finally {
@@ -1897,7 +1919,12 @@ async function onChatChanged() {
     personaWatch.pause();
     if (!samePersonaWindow) { state.personaPrompted = new Set(); state.personaFallback = null; }
     state.personaWindow = chatIds(ctx()).stChatId;
+    const cardTask = state.cardFlight;
     const epoch = ++state.epoch;
+    void cardTask?.cancel?.();
+    state.openEpoch = epoch; state.opened = false; state.openUnknown = false; state.openFlight = null; state.cardFlight = null; state.recoveryRequested = null;
+    state.stages = { connection: state.stages?.connection };
+    state.boardsStale = false;
     state.lastCameraPrompt = null;
     state.generation = null;
     state.pendingSyncEpoch = null;
@@ -1926,28 +1953,77 @@ async function onChatChanged() {
     const { stChatId, groupId } = chatIds(c);
     if (!stChatId) return;
     const mark = c.chatMetadata?.rp_emergence;
-    try {
-        if (!mark?.chatKey) {
-            // 新开的窗口（只有开场白或空的）问一次要不要接；老窗口要用户点名才接（白皮书 §9.1-10）。
-            if (freshChat(c) && !mark?.declined) await offerJoin(epoch);
-            return;
+    if (!mark?.chatKey) {
+        // 新开的窗口（只有开场白或空的）问一次要不要接；老窗口要用户点名才接（白皮书 §9.1-10）。
+        if (freshChat(c) && !mark?.declined) await offerJoin(epoch);
+        return;
+    }
+    await reconnect();
+}
+
+// 自动恢复与手动重试共用同一任务；所有等待之后都核对原窗口。
+function reconnect(manual = false) {
+    const c = ctx(), epoch = state.epoch, mark = c.chatMetadata?.rp_emergence;
+    if (!settings().enabled || !mark?.chatKey) return Promise.resolve(false);
+    if (state.openFlight?.epoch === epoch) return state.openFlight.promise;
+    const flight = { epoch, promise: null };
+    state.openFlight = flight;
+    flight.promise = Promise.resolve().then(() => openCurrent(c, epoch, mark, manual)).finally(() => {
+        if (state.openFlight === flight) {
+            state.openFlight = null;
+            if(state.recoveryRequested===epoch){
+                state.recoveryRequested=null;
+                if(!state.opened&&!state.openUnknown&&state.backendStatus==='healthy')void reconnect();
+            }
         }
-        const result = await api('open', {
-            chatKey: mark.chatKey, stChatId, groupId,
-            siblings: currentGroup(c)?.chats ?? null, mainChat: c.chatMetadata?.main_chat ?? null,
-        });
-        if (epoch !== state.epoch) return;
-        if (result.status === 'unknown') { state.note = '这个窗口带着旧标记，但后台没有它的记录；可以重新接入。'; return; }
-        if (result.status === 'branch') {
+    });
+    return flight.promise;
+}
+
+async function openCurrent(c, epoch, mark, manual) {
+    const here = () => epoch === state.epoch && ctx().chat === c.chat && ctx().chatMetadata?.rp_emergence?.chatKey === mark.chatKey;
+    if (!here()) return false;
+    const { stChatId, groupId } = chatIds(c);
+    state.openEpoch = epoch; state.opened = false;
+    setStage(state, 'open', '进行中'); render();
+    try {
+        let result;
+        try {
+            result = await api('open', {
+                chatKey: mark.chatKey, stChatId, groupId,
+                siblings: currentGroup(c)?.chats ?? null, mainChat: c.chatMetadata?.main_chat ?? null,
+            });
+        } catch(error) {
+            if(!manual||failureView(error).kind!=='unknown')throw error;
+            result={status:'unknown'};
+        }
+        if (!here()) return false;
+        if (result.status === 'unknown' && manual) {
+            result = await api('join', { stChatId, groupId });
+            if (!here()) return false;
+        }
+        if (result.status === 'unknown') throw Object.assign(new Error('unknown_chat'), { code: 'unknown_chat' });
+        if (!result.chatKey) throw new Error('接入响应缺少窗口标记');
+        if (result.chatKey !== mark.chatKey) {
             c.chatMetadata.rp_emergence = { chatKey: result.chatKey };
             await c.saveMetadata();
+            if (epoch !== state.epoch || ctx().chat !== c.chat) return false;
         }
         state.chatKey = result.chatKey;
+        state.opened = true; state.openUnknown = false; auto.unavailable = false; state.note = '';
+        setStage(state, 'open', '成功');
         personaWatch.check();
         scheduleSync(0);
         setTimeout(() => { if (epoch === state.epoch) autoPeek().catch(() => {}); }, 2500);
-    } catch {
-        if (epoch === state.epoch) {state.chatKey=mark.chatKey;auto.unavailable=true;state.note = '后台暂时连不上；ST 照常可用。';}
+        return true;
+    } catch (error) {
+        if (epoch === state.epoch && ctx().chat === c.chat) {
+            const failure = failureView(error, '接入');
+            state.chatKey = mark.chatKey; auto.unavailable = true; state.note = failure.text;
+            state.openUnknown = failure.kind === 'unknown';
+            setStage(state, 'open', '失败', failure.text);
+        }
+        return false;
     } finally {
         render();
     }
@@ -2003,9 +2079,12 @@ async function join(epoch = state.epoch) {
     if (epoch !== state.epoch) return;
     c.chatMetadata.rp_emergence = { chatKey: result.chatKey };
     await c.saveMetadata();
+    if (epoch !== state.epoch || ctx().chat !== c.chat) return;
     state.chatKey = result.chatKey;
+    state.opened = true; state.openUnknown = false; auto.unavailable = false;
+    setStage(state, 'open', '成功');
     scheduleSync(0);
-    setTimeout(() => autoPeek().catch(() => {}), 2500);   // 自动进离场开没开：开了就把群改成手动策略
+    setTimeout(() => { if(epoch===state.epoch)autoPeek().catch(() => {}); }, 2500);   // 自动进离场开没开：开了就把群改成手动策略
 }
 
 // ---------- 发言前注入 ----------
@@ -2249,15 +2328,15 @@ export function pendingTasks({ status = null, release = null, planStatus = null 
 export function pendingTasksHtml(rows) {
     return rows.map(r => `<div class="rpe-task"><span>${escapeHtml(r.text)}${r.note ? `<small>${escapeHtml(r.note)}</small>` : ''}</span><button type="button" class="menu_button" data-action="${escapeHtml(r.action)}"${r.action === 'plan-reroll' ? ' data-source="pending-reroll"' : ''} title="打开这项待办，建议看清原因再处理。">${escapeHtml(r.label)}</button></div>`).join('');
 }
-export function sceneCardHtml(board, roster = [], date = null) {
-    if (!board) return '<p>场面还没算好</p>';
+export function sceneCardHtml(board, roster = [], date = null, stale = false) {
+    if (!board) return '<p>场面尚未读取，请查看接入与读取状态。</p>';
     const time = [date?.full || date?.label || (board.time?.day != null ? `第 ${board.time.day + 1} 天` : ''), board.time?.part].filter(Boolean).join(' · ');
     const people = (board.people ?? []).filter(p => ['present', 'remote'].includes(p.status)).map(p => {
         const entry = p.avatar ? roster.find(e => e.avatar === p.avatar && e.role !== '不用') : roster.filter(e=>e.name===p.name && e.role!=='不用').length===1 ? roster.find(e=>e.name===p.name && e.role!=='不用') : null;
         const tag = entry?.群体 ? '（一群人）' : String(entry?.avatar ?? '').startsWith('face:') ? '（没卡）' : '';
         return `<span class="rpe-person rpe-${p.status}">${escapeHtml(p.name)}${tag}${p.status === 'remote' ? ' · 远程' : ''}</span>`;
     }).join('');
-    return `<div class="rpe-scene-head"><b>镜头：${escapeHtml(board.place ?? '？')}</b><small>${escapeHtml(time)}</small></div><div class="rpe-people">${people || '<small>没有在场的人</small>'}</div>`;
+    return `${stale ? '<small>可能不是最新：场面读取失败，保留上次快照。</small>' : ''}<div class="rpe-scene-head"><b>镜头：${escapeHtml(board.place ?? '？')}</b><small>${escapeHtml(time)}</small></div><div class="rpe-people">${people || '<small>没有在场的人</small>'}</div>`;
 }
 export function boardLabelText(board, marked = false) {
     const present = (board.people ?? []).filter(p => p.status === 'present').map(p => p.name);
@@ -2327,7 +2406,7 @@ export function panelShellHtml() {
     #rp_emergence_panel summary{cursor:pointer;min-height:40px}#rp_emergence_panel input[type=number]{width:100%}
     @media(max-width:420px){#rp_emergence_panel .rpe-grid{grid-template-columns:1fr}#rp_emergence_panel .rpe-task{flex-wrap:wrap}}
     </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><div class="rpe-topbar"><span class="rpe-dot" data-role="connection-dot" aria-label="未接入"></span><b>RP：幕后</b><small data-role="spend"></small><button class="menu_button" type="button" data-action="pending-tab" data-role="pending-badge" hidden title="打开待办详情，建议按需查看。"></button></div><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
-    <div class="inline-drawer-content"><div data-role="installation-hint" role="status" hidden></div><nav class="rpe-tabs" role="tablist" aria-label="RP：幕后">${[['now','此刻'],['story','这一局'],['ledger','剧情现状'],['settings','设置']].map(([id,text])=>`<button type="button" class="menu_button" role="tab" data-tab="${id}" aria-controls="rpe-page-${id}" title="切换面板栏目，建议按需要查看。">${text}</button>`).join('')}</nav>${['now','story','ledger','settings','advanced'].map(id=>`<div id="rpe-page-${id}" data-page="${id}" role="tabpanel">${panelPageHtml(id)}</div>`).join('')}<small data-role="note"></small></div></div>`;
+    <div class="inline-drawer-content"><div data-role="installation-hint" role="status" hidden></div><nav class="rpe-tabs" role="tablist" aria-label="RP：幕后">${[['now','此刻'],['story','这一局'],['ledger','剧情现状'],['settings','设置']].map(([id,text])=>`<button type="button" class="menu_button" role="tab" data-tab="${id}" aria-controls="rpe-page-${id}" title="切换面板栏目，建议按需要查看。">${text}</button>`).join('')}</nav>${['now','story','ledger','settings','advanced'].map(id=>`<div id="rpe-page-${id}" data-page="${id}" role="tabpanel">${panelPageHtml(id)}</div>`).join('')}<small data-role="note"></small><button type="button" class="menu_button" data-action="reconnect" title="重新接入当前窗口并同步消息。">重新接入</button><div data-role="stages"></div><details><summary>认卡状态与重试</summary><div data-role="card-choices"></div></details></div></div>`;
 }
 
 function mountPanel() {
@@ -2433,6 +2512,10 @@ function mountPanel() {
         if (s.enabled && state.chatKey && st?.planning?.message) $('[data-role="status"]').textContent += ` ${st.planning.message}`;
         $('[data-role="leave-retries"]').innerHTML=s.enabled&&state.chatKey&&(leaveRetry.html||residentIssues.length)?'<button type="button" class="menu_button rpe-presence-check" title="核对并修正在场，建议先看预览。">核对在场</button>':'';
         $('[data-role="note"]').textContent = state.note;
+        $('[data-action="reconnect"]').hidden = !ctx().chatMetadata?.rp_emergence?.chatKey;
+        $('[data-action="reconnect"]').disabled = state.openFlight?.epoch === state.epoch;
+        $('[data-role="stages"]').innerHTML = stageHtml(state.stages, escapeHtml);
+        $('[data-role="card-choices"]').innerHTML = cardChoiceHtml(ctx().chatMetadata?.rpeCardChoices?.[state.chatKey], escapeHtml);
         const joinedNow = !!state.chatKey && s.enabled;
         const openChat = chatIds(ctx()).stChatId;
         $('[data-role="start-guide"]').innerHTML = onboardingHtml({hasChat:openChat != null && openChat !== '',joined:!!state.chatKey});
@@ -2529,7 +2612,7 @@ function mountPanel() {
             who.innerHTML = [...list.map(m => `<option value="${escapeHtml(m.avatar)}">${escapeHtml(m.name)}</option>`), ...(camIn ? [`<option value="${CAMERA_PICK}">旁白（镜头）</option>`] : [])].join('');
             if (list.some(m => m.avatar === keep) || (camIn && keep === CAMERA_PICK)) who.value = keep;
         }
-        $('[data-role="board-row"]').innerHTML = sceneCardHtml(boardLabels.at(-1), state.boardCast ?? [], dayLabels.at(-1));
+        $('[data-role="board-row"]').innerHTML = sceneCardHtml(boardLabels.at(-1), state.boardCast ?? [], dayLabels.at(-1), state.boardsStale);
         $('[data-role="schedule-status"]').innerHTML = scheduledStatusHtml();
         showPage(currentTab);
     };
@@ -2625,6 +2708,8 @@ function mountPanel() {
                 state.status = await api('status', { chatKey: state.chatKey });
             }
             if (action === 'sync') await syncNow();
+            if (action === 'reconnect') await reconnect(true);
+            if (action === 'card-retry') await resolveCastChoices([event.target.closest('[data-name]').dataset.name]);
             if (action === 'confirm') await syncNow(true);
             if (action === 'drift-clear') {
                 try { await api('drift-clear', { chatKey: state.chatKey }); state.status = { ...(state.status ?? {}), drift: null }; render(); } catch {}
@@ -2747,7 +2832,7 @@ function mountPanel() {
                 clearPrompts();
                 state.status = await api('status', { chatKey: state.chatKey });
             }
-        } catch { state.note = '后台暂时连不上；ST 照常可用。'; }
+        } catch (error) { state.note = failureView(error, '面板操作').text; }
         render();
     });
     panel.addEventListener('change', async event => {
@@ -2783,7 +2868,7 @@ function mountPanel() {
             try {
                 if (!state.chatKey) { if (event.target.checked) await join(); }
                 else { await api('enabled', { chatKey: state.chatKey, enabled: event.target.checked }); clearPrompts(); state.status = await api('status', { chatKey: state.chatKey }); }
-            } catch { state.note = '后台暂时连不上；ST 照常可用。'; }
+            } catch (error) { state.note = failureView(error, '面板操作').text; }
             render(); return;
         }
         if (opt === 'dailyBudget') {
@@ -2792,24 +2877,24 @@ function mountPanel() {
             render(); return;
         }
         if (opt === 'pack') {
-            try { state.pack = await api('pack', { chatKey: state.chatKey, set: event.target.value }); } catch { state.note = '后台暂时连不上。'; }
+            try { state.pack = await api('pack', { chatKey: state.chatKey, set: event.target.value }); } catch (error) { state.note = failureView(error, '设置保存').text; }
             render();
             return;
         }
         if (opt === 'handoffAuto') {
             try { state.handoffUi = await api('handoff-ui', { action: 'auto', on: event.target.checked, chatKey: state.chatKey }); }
-            catch { state.note = '后台暂时连不上。'; }
+            catch (error) { state.note = failureView(error, '设置保存').text; }
         } else if (opt === 'awayMode') {
             try { state.absence = await api('absence', { chatKey: state.chatKey, mode: event.target.value }); }
-            catch { state.note = '后台暂时连不上。'; }
+            catch (error) { state.note = failureView(error, '设置保存').text; }
         } else if (opt === 'absencePaused') {
             try { state.absence = await api('absence', { chatKey: state.chatKey, paused: event.target.checked }); }
-            catch { state.note = '后台暂时连不上。'; }
+            catch (error) { state.note = failureView(error, '设置保存').text; }
         } else if (opt === 'testSlot') {
             try {
                 await api('options', { chatKey: state.chatKey, testSlot: event.target.checked });
                 state.status = await api('status', { chatKey: state.chatKey });
-            } catch { state.note = '后台暂时连不上。'; }
+            } catch (error) { state.note = failureView(error, '设置保存').text; }
         } else {
             settings()[opt] = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
             saveExtensionSettings();
@@ -3407,7 +3492,7 @@ async function runScheduled(q, prepare) {
         guard();
         // 冷缓存先读名册并完成当前目标的认卡，再取执行基线；等待真实请求而非定时延迟。
         if(!state.boardCast?.length){const r=await api('cast',{chatKey});guard();state.boardCast=r.cast??[];}
-        if(q.role!=='旁白'&&q.who!=='旁白'){await resolveCard(q.who,q.avatar);guard();}
+        if(q.role!=='旁白'&&q.who!=='旁白'){await resolveCard(q.who,q.avatar,{interactive:false});guard();}
         roles=roleSnapshot();
         if(landed()){await report('delivered',`${q.who}的消息已落下`);return true;}
         if(['running','unconfirmed','cancelled','error','waiting','delivered'].includes(journal[id]?.result))throw Object.assign(Error('这次生成已发出或已停止，请核对消息后点重试'),{result:journal[id].result==='cancelled'?'cancelled':'unconfirmed'});
@@ -3521,7 +3606,7 @@ async function autoSpeak(q) {
         const c=ctx(),group=currentGroup(c);
         if(!group)throw Error('当前群不存在');
         const camera=q.role==='旁白'||q.who==='旁白';
-        const ch=camera?cameraOf(c):await resolveCard(q.who,q.avatar);
+        const ch=camera?cameraOf(c):await resolveCard(q.who,q.avatar,{interactive:false});
         if(!ch || q.avatar&&ch.avatar!==q.avatar)throw Error(`${q.who}的卡未能唯一匹配，请确认卡文件`);
         if(q.enter&&!group.members.includes(ch.avatar)){state.entering.add(ch.avatar);try{await run(`/member-add ${ch.avatar}`);}finally{state.entering.delete(ch.avatar);followBase();}}
         const at=group.members.indexOf(ch.avatar);
@@ -3545,7 +3630,7 @@ async function autoSpeak(q) {
 // 后台说该叩门了：拉进群、取消静音、从这条起在场（区间）、让他自己写那一条；他那条落下时 MESSAGE_RECEIVED 给它记号
 async function autoKnock(k) {
     return runScheduled(k,async()=>{
-        const c=ctx(),group=currentGroup(c),ch=await resolveCard(k.who,k.avatar);
+        const c=ctx(),group=currentGroup(c),ch=await resolveCard(k.who,k.avatar,{interactive:false});
         if(!group||!ch||k.avatar&&ch.avatar!==k.avatar)throw Error(`${k.who}的卡身份未对上`);
         const existing=new Set(c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]?.segments??[]),wasDisabled=group.disabled_members?.includes(ch.avatar);
         let opened=null,openedKey=null;
@@ -3920,57 +4005,112 @@ function cardNamed(c, who, avatar = null) {
     const group=currentGroup(c),members=group?.members??[c.characters?.[c.characterId]?.avatar].filter(Boolean);
     return cardNamedInGroup(c.characters??[], members, who, avatar, c.chatMetadata?.rpeCardChoices?.[state.chatKey]);
 }
-async function resolveCard(who, avatar = null) {
+async function resolveCard(who, avatar = null, { interactive = true, retry = false } = {}) {
     const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,group=currentGroup(c),cards=c.characters??[];
+    const here=()=>chatKey===state.chatKey&&epoch===state.epoch&&ctx().chat===c.chat;
     if (String(avatar??'').startsWith('face:')) return null;
     if (!group) return cardNamed(c,who,avatar??cards[c.characterId]?.avatar);
-    const choices=c.chatMetadata.rpeCardChoices?.[chatKey]??{};
+    const choices=(c.chatMetadata.rpeCardChoices??={})[chatKey]??={};
     const remember=async ch=>{
-        if(ch&&!choices[who].synced){const r=await api('card-choice',{chatKey,name:who,avatar:ch.avatar});if(chatKey!==state.chatKey||epoch!==state.epoch)return null;if(!r.ok)throw Error(r.why||'认卡选择尚未保存');choices[who].synced=true;await c.saveMetadata();}
-        return ch??null;
+        if(!ch||!here())return null;
+        if(choices[who]?.avatar===ch.avatar&&!choices[who].synced){
+            const choice=choices[who];
+            choice.status='unsaved';
+            try {
+                const r=await api('card-choice',{chatKey,name:who,avatar:ch.avatar});
+                if(!here()||choices[who]!==choice)return null;
+                if(!r.ok)throw Error(r.why||'认卡选择尚未保存');
+                choice.synced=true;choice.status='confirmed';await c.saveMetadata();
+            } catch(error) { if(here()){choice.synced=false;choice.status='unsaved';state.note=`认卡后台未保存：${String(error.message).slice(0,100)}；可以重新认卡。`;await c.saveMetadata();render();}throw error; }
+        }
+        return here()?ch:null;
     };
     const resolved=cardNamed(c,who,avatar??choices[who]?.avatar);
-    if(resolved)return choices[who]?.avatar===resolved.avatar?remember(resolved):resolved;
-    if(avatar||choices[who]?.asked)return null;
-    (c.chatMetadata.rpeCardChoices??={})[chatKey]=choices;
-    choices[who]={asked:true,avatar:null};await c.saveMetadata();
-    if(chatKey!==state.chatKey||epoch!==state.epoch)return null;
-    const inside=cards.filter(ch=>group.members.includes(ch.avatar)&&ch.name===who);
-    const candidates=inside.length?inside:cards.filter(ch=>!isCamera(ch));
-    let picked='';
-    const html=`<p>${escapeHtml(who)}${inside.length?'在群里对应多张卡':'在群里没有唯一对应卡'}，请选择本局使用的卡文件。</p><select class="text_pole rpe-card-choice"><option value="">暂不选择</option>${candidates.map(ch=>`<option value="${escapeHtml(ch.avatar)}">${escapeHtml(ch.name)} · ${escapeHtml(ch.avatar)}</option>`).join('')}</select>`;
-    const answer=await c.callGenericPopup(html,c.POPUP_TYPE.CONFIRM,'',{onClosing:popup=>{picked=popup.dlg.querySelector('.rpe-card-choice')?.value??'';return true;}});
-    if(chatKey!==state.chatKey||epoch!==state.epoch||ctx().chat!==c.chat)return null;
-    if(typeof answer==='string')picked=answer;
-    const ch=answer?candidates.find(ch=>ch.avatar===picked):null;
-    choices[who]={asked:true,avatar:ch?.avatar??null};await c.saveMetadata();
-    return remember(ch);
+    if(resolved&&!retry)return remember(resolved);
+    if(avatar&&!retry)return null;
+    // 自动动作只记录待确认，不弹窗；被动刷新根本不进入这里。
+    if(!interactive){
+        if(!choices[who]||choices[who].asked&&!choices[who].avatar){choices[who]={status:'pending',avatar:null};await c.saveMetadata();}
+        if(here())render();return null;
+    }
+    if(state.cardFlight?.epoch===epoch)return null;
+    const task={epoch,chatKey};state.cardFlight=task;
+    const previous=choices[who];
+    choices[who]={...previous,status:'pending'};
+    try {
+        await c.saveMetadata();if(!here())return null;render();
+        const inside=cards.filter(ch=>group.members.includes(ch.avatar)&&ch.name===who);
+        const candidates=inside.length?inside:cards.filter(ch=>!isCamera(ch));
+        let picked='';
+        const html=`<p>${escapeHtml(who)}：请选择本局使用的卡文件。</p><select class="text_pole rpe-card-choice"><option value="">暂不选择</option>${candidates.map(ch=>`<option value="${escapeHtml(ch.avatar)}">${escapeHtml(ch.name)} · ${escapeHtml(ch.avatar)}</option>`).join('')}</select>`;
+        const answer=await c.callGenericPopup(html,c.POPUP_TYPE.CONFIRM,'',{
+            onOpen:popup=>{task.cancel=()=>popup.complete(c.POPUP_RESULT.CANCELLED);if(!here())void task.cancel();},
+            onClosing:popup=>{picked=popup.dlg.querySelector('.rpe-card-choice')?.value??'';return true;},
+        });
+        if(!here())return null;
+        if(typeof answer==='string')picked=answer;
+        const ch=answer?candidates.find(ch=>ch.avatar===picked):null;
+        // 取消一次选择不抹掉先前确认的身份；没有确认过的保持可重试。
+        choices[who]=ch?{status:'unsaved',avatar:ch.avatar,synced:false}:previous?.avatar?{...previous,status:'cancelled'}:{status:'cancelled',avatar:null};
+        await c.saveMetadata();if(!here())return null;
+        return remember(ch);
+    } finally { if(state.cardFlight===task)state.cardFlight=null;if(here())render(); }
 }
-async function resolveCastChoices() {
-    const roster=state.boardCast??[];
-    for(const who of new Set(roster.filter(p=>p.role!=='不用'&&!isCamera(p)&&!String(p.avatar??'').startsWith('face:')).map(p=>p.name)))await resolveCard(who);
+async function resolveCastChoices(names = []) {
+    const chatKey=state.chatKey,epoch=state.epoch,chat=ctx().chat;
+    for(const who of new Set(names)) {
+        if(chatKey!==state.chatKey||epoch!==state.epoch||chat!==ctx().chat)return;
+        await resolveCard(who,null,{retry:true});
+    }
 }
 async function enterChar(who, avatar = null, opts = {}) {
     const c = ctx(), group = currentGroup(c);
     if (!group) { globalThis.toastr?.warning('进场只在群聊里用。', 'RP：幕后'); return false; }
-    const ch = cardNamed(c, who, avatar);
+    const chatKey=state.chatKey,epoch=state.epoch,chat=c.chat;
+    const here=()=>state.chatKey===chatKey&&state.epoch===epoch&&ctx().chat===chat;
+    const ch = await resolveCard(who, avatar);
+    if(!here())return false;
     if (!ch) { globalThis.toastr?.warning(`找不到「${who}」的卡。`, 'RP：幕后'); return false; }
     // 这是扩展自己拉进群的：群名单变了别当成玩家手动拉人（watchMembers），进场就走这一遍
+    const copy=x=>x==null?null:structuredClone(x);
+    const anchor=()=>c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]??null;
+    const before=copy(anchor()),wasMember=group.members.includes(ch.avatar),wasDisabled=!!group.disabled_members?.includes(ch.avatar);
+    const manualMute=JSON.stringify(c.chatMetadata.rpeManualMuted?.[ch.avatar]??null),length=chat.length;
+    let prepared=null,preparedMute=null,failed=true;
     state.entering.add(ch.avatar);
     try {
         if (!group.members.includes(ch.avatar)) await run(`/member-add ${ch.avatar}`);
+        if(!here())return false;
         let g = currentGroup(ctx()), at = g?.members.indexOf(ch.avatar) ?? -1;
         if (at < 0) { globalThis.toastr?.warning(`没能把${ch.name}加进群。`, 'RP：幕后'); return false; }
         if (g.disabled_members?.includes(ch.avatar)) await run(`/member-enable ${at}`);
+        if(!here())return false;
         // 从这一条起在场：之前这里说的话他没听见（没装上下文隔离扩展时，后台只能当他一直在）
         await openPresence(ch);
-        await syncNow(true).catch(() => {});
+        if(!here())return false;
+        prepared=copy(anchor());preparedMute=!!currentGroup(c)?.disabled_members?.includes(ch.avatar);
+        if(await syncNow(true)===false)throw Error('消息同步或撤销核验未完成，请重新同步后再进场');
+        if(!here())return false;
         globalThis.toastr?.info(`${ch.name}进场中……`, 'RP：幕后', { timeOut: 6000 });
-        await arriveNow(ch, opts);
+        const arrived=await arriveNow(ch, opts);
+        if(!here())return false;
+        if(!arrived||arrived.ok===false)throw Error(arrived?.why||'后台未确认进场，请重新核对身份与来源后重试');
         g = currentGroup(ctx()); at = g?.members.indexOf(ch.avatar) ?? -1;
         if (at >= 0) await run(`/trigger await=true ${at}`);
+        failed=false;
         return true;
+    } catch(error) {
+        if(here()){state.note=`进场未完成：${String(error.message).slice(0,120)}；可重新认卡或同步后再试。`;globalThis.toastr?.warning(state.note,'RP：幕后');render();}
+        return false;
     } finally {
+        // 仅撤回本次仍完整持有的准备。用户改过区间、静音或已有新消息时保留现状。
+        if(failed&&here()&&chat.length===length&&prepared&&JSON.stringify(anchor())===JSON.stringify(prepared)){
+            const anchors=c.chatMetadata.contextIsolation?.anchors;
+            if(anchors){if(before)anchors[ch.avatar]=before;else delete anchors[ch.avatar];await c.saveMetadata();}
+            const g=currentGroup(c),at=g?.members.indexOf(ch.avatar)??-1;
+            if(here()&&at>=0&&preparedMute===!!g.disabled_members?.includes(ch.avatar)&&manualMute===JSON.stringify(c.chatMetadata.rpeManualMuted?.[ch.avatar]??null)&&(wasDisabled||!wasMember))await run(`/member-disable ${at}`);
+            if(here())scheduleSync(0);
+        }
         state.entering.delete(ch.avatar);
         // 名单基线跟上（群名单变了没发事件时，下一次比的时候别把他当成新拉进来的）
         const snap = memberSnapshot();
@@ -3980,7 +4120,10 @@ async function enterChar(who, avatar = null, opts = {}) {
 // 后台替他理一次怎么来的、为什么来（main.arrive）；发消息、打电话来的记成远程
 async function arriveNow(ch, opts = {}) {
     let got = null;
-    try { got = await api('arrive', { chatKey: state.chatKey, who: ch.name, avatar: ch.avatar, mode: opts.mode ?? 'come', ...(opts.way ? { way: opts.way } : {}) }, 240000); } catch { /* 理不出来照样进场 */ }
+    const chatKey=state.chatKey,epoch=state.epoch;
+    try { got = await api('arrive', { chatKey, who: ch.name, avatar: ch.avatar, mode: opts.mode ?? 'come', ...(opts.way ? { way: opts.way } : {}) }, 240000); }
+    catch(error) { return {ok:false,why:failureView(error,'进场').text}; }
+    if(chatKey!==state.chatKey||epoch!==state.epoch||got?.ok===false)return got;
     state.remote = /电话|消息/.test(got?.how ?? '') ? { who: ch.name, avatar: ch.avatar, how: /电话/.test(got.how) ? '打电话' : '发消息', chatKey: state.chatKey } : null;
     return got;
 }
@@ -4457,14 +4600,27 @@ document.addEventListener('click', event => {
 }, true);
 async function refreshDays() {
     if (!settings().enabled || !state.chatKey) { dayLabels = []; boardLabels = []; drawDays(); drawBoards(); return; }
-    const chatKey = state.chatKey;
-    try { const r = await api('timeline', { chatKey }); if (chatKey === state.chatKey) { dayLabels = r.labels ?? []; daySince = r.since ?? ''; dayScale = r.scale ?? null; } } catch { return; }
-    try { const r = await api('boards', { chatKey }); if (chatKey === state.chatKey) boardLabels = r.boards ?? []; } catch { boardLabels = []; }
-    try { const r = await api('cast', { chatKey }); if (chatKey === state.chatKey) state.boardCast = r.cast ?? []; } catch { state.boardCast = []; }
-    if(chatKey===state.chatKey)try{await resolveCastChoices();}catch(error){state.note=`认卡待处理：${error.message}`;}
-    drawDays();
-    drawBoards();
+    const chatKey = state.chatKey, epoch = state.epoch;
+    const here = () => chatKey === state.chatKey && epoch === state.epoch;
+    // 日历失败也继续读场面；展示不等待名册，更不等待认卡弹窗。
+    try { const r = await api('timeline', { chatKey }); if (here()) { dayLabels = r.labels ?? []; daySince = r.since ?? ''; dayScale = r.scale ?? null; drawDays(); } } catch(error) { if(here())state.note=failureView(error,'日期读取').text; }
+    if(!here())return;
+    setStage(state, 'boards', '进行中');render();
+    try {
+        const r = await api('boards', { chatKey });
+        if(!here())return;
+        if(!Array.isArray(r.boards))throw Error('场面响应缺少快照');
+        boardLabels = r.boards;state.boardsStale=false;setStage(state,'boards','成功');
+    } catch(error) {
+        if(!here())return;
+        state.boardsStale=true;setStage(state,'boards','失败',failureView(error,'场面读取').text);
+    }
+    if(!here())return;
+    drawDays();drawBoards();render();
+    try { const r = await api('cast', { chatKey }); if(here()) { state.boardCast=r.cast??[];drawBoards();render(); } }
+    catch(error) { if(here())state.note=failureView(error,'名册读取').text; }
 }
+
 function drawDays() {
     for (const el of document.querySelectorAll('#chat .rpe_daylabel')) el.remove();
     const c = ctx();
@@ -4486,7 +4642,7 @@ function drawBoards() {
     // 面板"这一局"里的一行：最新那条的场面
     const row = document.querySelector('[data-role="board-row"]');
     if (row) {
-        row.innerHTML = sceneCardHtml(boardLabels.at(-1), state.boardCast ?? [], dayLabels.at(-1));
+        row.innerHTML = sceneCardHtml(boardLabels.at(-1), state.boardCast ?? [], dayLabels.at(-1), state.boardsStale);
     }
     for (const l of boardLabels) {
         const m = c.chat?.[l.pos];
