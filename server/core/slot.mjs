@@ -1,3 +1,4 @@
+import { partsText, partsSources, recordParts } from './records.mjs';
 import { personWord, renderPronouns, playerWord, playerContext } from './pronoun.mjs';
 import { registerPromptDefaults, promptText, promptOptionsFor, DEFAULT_TIER, DEFAULT_PACK } from './prompt-slots.mjs';
 // 发言前给当前角色的那一格材料。
@@ -21,14 +22,14 @@ import { profileParts } from './profile.mjs';
 import { senseScores, textKey } from './vectors.mjs';
 import { onwardLine, absentAskLine, takenLine, moldOf, varyLine, lastEchoes, scopeLine, bodyHarping, choreLoop, restHarping, choreLine } from './pace.mjs';
 import { bodyGate, bodyGuard } from './body.mjs';
-import { crewOf, crewEntry, latestNode, crewLines, pushedText, crewPushDue, pushedMeta, keyPersonEntry, mindLine } from './crew.mjs';
+import { crewOf, crewEntry, latestNode, crewLines, pushedText, crewPushDue, pushedMeta, keyPersonEntry, mindLine, effectiveNode, liveMindRevisions } from './crew.mjs';
 import { warmWords } from './tone.mjs';
 import { keepWay, wayOnly } from './fresh.mjs';
 import { factionLedger, factionSlotLines, factionBrief, nameResolver, samePerson } from './factions.mjs';
-import { situationNow, moveLive, situationPrompt, deliverDue, situationSlotLines, situationBrief, repLines } from './situation.mjs';
+import { situationReader, situationNow, dueEchoes, moveLive, situationPrompt, deliverDue, situationSlotLines, situationBrief, repLines } from './situation.mjs';
 import { closeness, roleOf, BOND_DEFAULT, mentionedIn } from './cast.mjs';
 import { slotLines, sameName, reserveOpen, toText as setupText, backstoryText, staleBackstory, knowsRow, heldBackstory, activeIntimate, checkIntimate } from './setup.mjs';
-import { heldLines, saidSince, activeLeaks, withSecretLeaks, secretLeakLines } from './held.mjs';
+import { heldLines, activeLeaks, withSecretLeaks, secretLeakLines, effectivePlanNode, nodeContext, nodeProjection, correctionRev } from './held.mjs';
 import { openingLines, bodyRows, OPEN_SCENE } from './opening.mjs';
 // 规划简报里的主角团、还没下文的口子（章程 K1）
 import { crewTies } from './relations.mjs';
@@ -36,12 +37,13 @@ import { openGaps, CLOSE_UNITS, intimatePair } from './planner.mjs';
 import { toText as relationsText } from './relations.mjs';
 import { normalizeRelations, slotLines as relationLines, leaderOf, followersOf, personOf, givesWork, giverLine, mentionLines, currentRelations } from './relations.mjs';
 import { pickSeed, seedLines, storyYear } from './world.mjs';
+import { verificationSnapshot, deliveryVerified, retryKnob, evaluationState, saveEvaluation, signalEvaluation, planningDecision, evaluationBasis, commitVerification } from './planner.mjs';
 import { picksOf } from './guide.mjs';
 import { SIGN_PICKS_MAX, NOW_MOTIF, placesIn, buildBrief, needsPlan, stepPocket, stackedHere, reachedFor, awaitingExtract, AWAIT_SPAN, pocketLines, respondLines, shownLines, sinkLines, storyDigest, WORLD, OFFSCREEN_FIT, entryOf, nearPlace, timePassed, offscreenLines, errandLines, entryProjection, ifTakenOf, ifSunkOf, takenOf, expiredPocket, premiseGone, storyLayers, layerNote, briefBlocks, BRIEF_CHARS, BRIEF_SHARES, UNSQUEEZED, categoryCounts, draggingLines, overdueAhead, LOOKBACK_PLANS } from './planner.mjs';
 import { foldState, stateLines, herOwnOnly } from './state.mjs';
 import { timeline, clockNow, dateIn, dayNumber, weekdayIndex, PARTS, withNoteMarks, timeTag, sceneHeading } from './timeline.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
-import { paceOf } from './tempo.mjs';
+import { paceOf, paceNote } from './tempo.mjs';
 import { promiseOf, stageOf, promiseLines, relatedTo, retime, partyOf, LAPSED, settledTwins, settledByDoing, dueOf } from './promises.mjs';
 import { offstageFacts, reachDeliveries, informCandidates, asksAway, replyLines } from './offstage.mjs';
 import { matchFacts, factLines, planFactLines } from './facts.mjs';
@@ -63,7 +65,9 @@ import { pairImpressions } from './impressions.mjs';
 import { readDrive } from './drive.mjs';
 import { focusLine } from './eventlead.mjs';
 import { foldPending } from './pending.mjs';
-import { pocketGate, ttlOf, triggerTimeReady, afterBlocked } from './planner.mjs';
+import { pocketGate, ttlOf, triggerTimeReady, afterBlocked, planSystem, withIntimate } from './planner.mjs';
+import { paceCap } from './tempo.mjs';
+import { withTaste } from './taste.mjs';
 import { datedEvent } from './eventlead.mjs';
 
 // 钉住的那一格只在同一版后台代码里算数（试玩 10/1：删回去重新生成，拿到的是几小时前旧代码钉住的那一格——没有约定、口袋还在最后）。
@@ -145,7 +149,7 @@ export const CAMERA_NAME = '旁白';
 // 聊天中间只留一句短的（cameraNudge）。称呼旁白用"旁白"，免得和"正文里称玩家为'你'"混在一起。
 export const cameraRule = (name, others = [], { cards = [] } = {}) => [
     `【场记】旁白是谁（一直算数）：旁白是这场戏的镜头，不是戏里的哪个人，跟着${name}的眼睛看。${others.length ? `${name}身边有${others.join('、')}——他们的话和动作由他们自己来，旁白不替他们写。这一轮只写没卡的人的回应和周围的动静，有卡的人刚说的话不重复、不替他们接。` : `${name}这会儿身边没有别人。`}`,
-    `· 写什么：${name}周围看得见、听得见的——天气和光线、这地方的样子、近处远处的动静；这里没有卡的人：路人、店里的人、来搭话的生人、找上门的陌生人、捎来的话和消息（按这个世界说得通的方式）。没卡的人由旁白来演，说什么、做什么都可以写，可以一来一回接着往下演，同一个人前后一致（长相、说话的样子、前面说过的话）。但他们是这地方的一部分，不是主角：一次说一两句、做一个动作，不发长篇，不一口气把事说完，留着让${name}问。`,
+    `· 写什么：${name}周围看得见、听得见的——天气和光线、这地方的样子、近处远处的动静；这里没有卡的人：路人、店里的人、来搭话的生人、找上门的陌生人、捎来的话和消息（按这个世界说得通的方式）。没卡的人由旁白来演，说什么、做什么都可以写，可以一来一回接着往下演，同一个人前后一致（长相、说话的样子、前面说过的话）。他们是这地方的一部分，也各有各的心思和处境，回应从这些和眼前的事里来。旁白一轮给一两句、一个动作，不发长篇，不一口气把场面往前推；${name}问起时，别为了控制篇幅故意挤牙膏。`,
     `· 怎么写：叙述放在括号里。正文里称${name}为"你"；别的人、这地方用第三人称。旁白没有"我"——叙述里不出现"我"，不用谁的口吻、不从谁的眼睛里写。没卡的人开口，话放在引号里，写清是谁说的。聊天记录里各人用"我"写的是他们自己的视角，旁白别跟着学。`,
     `· 不写什么：${cards.length ? `有自己卡的人（${cards.join('、')}）` : '有自己卡的人'}的话和动作，一个字都不替他们写；他们要来，写到他出现之前就停。${name}的话、心思和决定是${name}自己的：不替${name}说话，不写${name}心里想什么，不替${name}拿主意、动手；旁白写的是这个世界和这些人对它的回应。`,
     `· 要紧的事不编：有名有姓的新人、具体的地址和门路、价钱、哪个势力在干什么、谁在找谁——场记里没给的别造。${name}问起场记里没有的，让人答得含糊（"认识个人，回头给你地方"）或者答不上，后面自会有安排。能编的只是眼前的小东西：光、声音、一个路人、一句搭腔。`,
@@ -159,7 +163,7 @@ export const cameraNudge = name => `（旁白：叙述用第三人称，正文�
 export const cameraCardPrompt = () => ({
     system: [
         '你是这场戏的镜头（旁白），不是戏里的人，跟着玩家的眼睛看。',
-        '写玩家周围看得见、听得见的：天气和光线、这地方的样子、近处远处的动静、捎来的话和消息。没有卡的人由旁白来演，可以一来一回接着往下演，同一个人前后一致；但他们是这地方的一部分，不是主角：一次说一两句、做一个动作，不发长篇，不一口气把事说完。',
+        '写玩家周围看得见、听得见的：天气和光线、这地方的样子、近处远处的动静、捎来的话和消息。没有卡的人由旁白来演，可以一来一回接着往下演，同一个人前后一致；他们是这地方的一部分，也各有各的心思和处境，回应从这些和眼前的事里来。旁白一轮给一两句、一个动作，不发长篇，不一口气把场面往前推；玩家问起时，别为了控制篇幅故意挤牙膏。',
         '叙述放在括号里，正文里称玩家为"你"，别的人和这地方用第三人称。旁白没有"我"，不沿用聊天记录里各人的第一人称视角。没卡的人开口，话放在引号里，写清是谁说的。',
         '有自己卡的人的话和动作不替他们写；他们要来，只写到他出现为止。不替玩家说话、想心事、拿主意或动手，只写周围对玩家的回应。',
         '要紧的事不编：有名有姓的新人、具体的地址和门路、价钱、势力的动向、谁在找谁，场记里没给的别造；玩家问起没有的，让人答得含糊或答不上。能编的只是眼前的小东西。',
@@ -198,7 +202,7 @@ function testContent({ speakerName, total }) {
 const ahead = new Map();
 const AHEAD_TTL_MS = 15 * 60 * 1000;
 // 用户那句去掉首尾空白再比（打字时预跑用的草稿和发出去的那条，ST 会修掉首尾空白）。
-const aheadKey = (chatKey, speaker, recentUser) => `${chatKey}\u0001${speaker}\u0001${String(recentUser ?? '').trim()}`;
+const aheadKey = (store, chatKey, speaker, recentUser, rev = correctionRev(store, chatKey)) => `${chatKey}\u0001${speaker}\u0001${String(recentUser ?? '').trim()}\u0001fix:${rev}`;
 const KEYS = '\u0002keys';
 function once(key, start) {
     const now = Date.now();
@@ -221,7 +225,7 @@ async function queryKeysFor(store, keyMaker, { chatKey, recent, recentUser, pres
     // 只有"嗯""好""（点头）"这种：配不出词（T-22 实测模型回一段"我需要更多信息"，被当成检索词），不调，旧事按上文挑。
     if (recentUser.replace(/[（(][^）)]*[）)]/g, '').replace(/[\s\p{P}]/gu, '').length < 3) return [];
     const names = [...new Set([...present, ...memberList(store, chatKey).map(m => m.name)].filter(Boolean))];
-    try { return (await once(aheadKey(chatKey, KEYS, recentUser), () => keyMaker({ chatKey, recent, recentUser, names }))) ?? []; }
+    try { return (await once(aheadKey(store, chatKey, KEYS, recentUser), () => keyMaker({ chatKey, recent, recentUser, names }))) ?? []; }
     catch { return []; }
 }
 
@@ -376,7 +380,7 @@ export function stopIntimate(store, records, chatKey, { present = [] } = {}) {
     }
     return { stopped: true, withdrawn };
 }
-function intimateAllowed(store, records, chatKey, { present = [], record = false } = {}) {
+export function intimateAllowed(store, records, chatKey, { present = [], record = false } = {}) {
     if (intimateStopped(store, records, chatKey, { present, record })) return () => false;
     const rows = activeIntimate(intimateSetup(store, chatKey));
     return m => rows.some(x => x.谁.includes(m.who));
@@ -779,6 +783,8 @@ export function cameraKnowledgeLines({ roster, board, visible = [], rel = null, 
 // 后开口的人多半已经提前组装好（prefetchOthers），不用等。
 async function memorySlot(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { assembler = null, keyMaker = null, vectors = null, skipOpen = null, pendingLedger = null, scale = 1, episodes = [], guard = null }) {
     const name = speakerName || speaker;
+    // 异步配词、组装期间玩家可能纠正；迟到的结果只留在开始时的版本里。
+    const recallKey = aheadKey(store, chatKey, speaker, recentUser);
     if (camera) {
         // 旁白的旧事按地方和眼前没卡的人来，不走玩家的关键词召回（召回来的是她的衣服鞋子）
         const messages = store.currentMessages(chatKey);
@@ -839,7 +845,7 @@ async function memorySlot(store, records, { chatKey, speaker, speakerName, ancho
         // 程序连一条相关的都没挑出来，就不花钱请模型了。
         if (!material.hits.length || !material.pool.length) return plain(material, queryKeys, true, 'plain');
         try {
-            const r = await once(aheadKey(chatKey, speaker, recentUser),
+            const r = await once(recallKey,
                 () => assembler({ chatKey, speaker, anchor, name, present, recent, recentUser, material, messageText }));
             if (r && (r.lines.length || r.none)) return out(material, queryKeys, renderNarrative(material, r.lines), true, 'narrative', [...r.lines.flatMap(l => l.ids), ...narrativeState(material, r.lines).map(s => s.id), ...material.open.map(o => o.id)]);
             // 模型给了东西却一句都没过核对：多半是格式乱了，用纯程序的，钉住（免得左滑一次花一次）。
@@ -1210,9 +1216,9 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             const canonOf = n => personOf(rel, n, rosterNames)?.名 ?? String(n ?? '').trim();
             const meC = canonOf(name);
             const relRecs = visible.filter(r => r.type === '关系' && r.relation?.with && (r.holder_name === name || (r.audience ?? []).includes(name)));
-            const snaps = (drama ? store.readyPlans?.(chatKey) ?? [] : []).flatMap(p => { let n = null; try { n = JSON.parse(p.node ?? 'null'); } catch {} return (n?.关系 ?? []).filter(x => canonOf(x.谁) === meC && x.现在).map(x => ({ pos: p.anchor_pos ?? -1, text: x.现在, from: '规划', with: canonOf(x.对谁) })); });
+            const snaps = (drama ? store.readyPlans?.(chatKey) ?? [] : []).flatMap(p => { const n = effectivePlanNode(store, chatKey, p); return (n?.关系 ?? []).filter(x => canonOf(x.谁) === meC && x.现在).map(x => ({ pos: p.anchor_pos ?? -1, text: x.现在, from: '规划', with: canonOf(x.对谁) })); });
             // 规划交的"这一段留下的"（第 4 步）：那一步走出来了，带分量；3 是转折，一直留着
-            const lefts = (drama ? store.readyPlans?.(chatKey) ?? [] : []).flatMap(p => { let n = null; try { n = JSON.parse(p.node ?? 'null'); } catch {} return (n?.留下 ?? []).filter(x => canonOf(x.谁) === meC && x.留下的).map(x => ({ pos: (p.anchor_pos ?? 0) - 0.5, text: x.留下的, from: '规划留下', weight: x.分量, with: canonOf(x.对谁) })); });
+            const lefts = (drama ? store.readyPlans?.(chatKey) ?? [] : []).flatMap(p => { const n = effectivePlanNode(store, chatKey, p); return (n?.留下 ?? []).filter(x => canonOf(x.谁) === meC && x.留下的).map(x => ({ pos: (p.anchor_pos ?? 0) - 0.5, text: x.留下的, from: '规划留下', weight: x.分量, with: canonOf(x.对谁) })); });
             const clean = es => es.filter(e => guard.lines([e.text]).length);   // 她的身子她说了算：说她伤病的那几步不给（body.mjs）
             path = { label, entriesFor: other => clean([
                 ...relRecs.filter(r => { const a = canonOf(r.holder_name ?? r.holder), b = canonOf(r.relation.with); return (a === meC && b === other) || (a === other && b === meC); })
@@ -1241,19 +1247,17 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     if (drama && !camera && userName && !sameName(name, userName, rosterNames)) {
         try {
             const sameP = (a, b) => sameName(a, b, rosterNames) || (!!rel && !!personOf(rel, a, rosterNames) && personOf(rel, a, rosterNames) === personOf(rel, b, rosterNames));
-            const { plan, node } = latestNode(store, chatKey);
+            const { plan, node: originalNode } = latestNode(store, chatKey);
+            const node = originalNode;
             const entry = node ? crewEntry(node, name, sameP) : null;
             const inCrew = !!entry && crewOf(store.setupOf?.(storyId)?.data ?? null, node, userName).some(n => sameP(n, name));
-            const stale = staleMindReasons(store, plan?.id);
-            const dropWhy = mind => !!mind?.出发点 && stale.some(x => sameP(x?.who, name) && x.why === mind.出发点
-                && x.at && messages.some(m => m.pos === x.at.pos && m.fp === x.at.fp));
             // 要紧的人（不在主角团里、规划另写了心思的）：他开口时只给他那句心里的打算（N-368），别的主角团那几句没有
             const key = !inCrew && node ? keyPersonEntry(node, name, sameP) : null;
-            const keyMind = key ? mindLine(key.心思, { keep: l => guard.lines([l]).length > 0, dropWhy: dropWhy(key.心思) }) : null;
+            const keyMind = key ? mindLine(key.心思, { keep: l => guard.lines([l]).length > 0 }) : null;
             if (keyMind) add(0, [keyMind], 'back', 'person');
             if (inCrew) {
                 const { own, team } = crewLines({ name, userName, entry, present, same: sameP, keep: l => guard.lines([l]).length > 0,
-                    pushed: pushedText(visible, { name, same: sameP, since: plan?.anchor_pos ?? -1 }), dropWhy: dropWhy(entry.心思) });
+                    pushed: pushedText(visible, { name, same: sameP, since: plan?.anchor_pos ?? -1 }) });
                 add(0, own, 'back', 'person');
                 add(1, team, 'back', 'person');
             }
@@ -1265,7 +1269,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         try {
             const sameP = (a, b) => sameName(a, b, rosterNames) || (!!rel && !!personOf(rel, a, rosterNames) && personOf(rel, a, rosterNames) === personOf(rel, b, rosterNames));
             const { plan, node } = latestNode(store, chatKey);
-            const fromPlan = (drama ? node?.心事 ?? [] : []).filter(x => sameP(x.谁, name) && !saidSince(x, visible, { name, since: plan?.anchor_pos ?? -1, same: sameP }));
+            const fromPlan = (drama ? node?.心事 ?? [] : []).filter(x => sameP(x.谁, name));
             const fromSetup = heldBackstory(setup, { name, present, roster: rosterNames });
             const held = heldLines({ name, items: [...fromPlan, ...fromSetup] });
             const kept = held.slice(1).filter(l => guard.lines([l]).length);   // 说她伤病的那一条照"她的身子"那道筛子去掉
@@ -1433,6 +1437,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     const pendingHold = pendingPocketRelated.size ? { related: m => pendingPocketRelated.has(`pocket:${m.id}`), label: m => (x => (x && [...(x.who ?? []), ...(x.with ?? [])].some(w => sameName(w, holdWho, rosterNames)) ? x.text : ''))(pendingLedger.items.find(x => x.kind === '约定' && OPEN_PROMISE.has(x.status) && (x.with ?? []).includes(`pocket:${m.id}`))).slice(0, 40) } : null;
     const scenePlace = board?.camera?.place || confirmedScenePlace(messages, store.stateNotesOf?.(chatKey) ?? [], lastPos, userName);
     const menuLines = drama && store.menuOf ? menuFor(store, chatKey, { records, isCarded: who => !!cardOf(who), speaker: camera ? CAMERA_NAME : name, camera, present, recentUser, userName, today, dayOf, firm: { today, dayOf }, at: lastPos, passive: passiveUser(messages), record: planner?.record !== false, carry, followers: who => (rel ? followersOf(rel, who, rosterNames) : []), face: who => roleOf(roster, who)?.role === '新面孔', stranger: strangerCall(roster, messages),
+        faceCard: who => (e => !!e && String(e.avatar).startsWith('face:') && e.role !== '不用')(roleOf(roster, who)),
         giver: who => (p => (givesWork(p) ? giverLine(p, priceOf) : null))(rel ? personOf(rel, who, rosterNames) : null),
         player: [userName, ...(rel && userName ? (p => (p ? [p.名, ...p.又名] : []))(personOf(rel, userName, rosterNames)) : [])].filter(Boolean), hold: promised?.hold ? { related: m => promised.hold.related(m) || !!pendingHold?.related(m), label: m => (promised.hold.party?.(m, holdWho) ? promised.hold.label(m) : '') || pendingHold?.label(m) || '', today: m => !!promised.hold.strong?.(m) && !!promised.hold.party?.(m, holdWho) } : null, keep: m => !!(pendingHold?.related(m) || promised?.keeps?.(m)),
         // 口袋怎么进场（质量窗 10/5 方案）：到现场的看眼下在哪，镜头外的看时间过没过
@@ -1706,7 +1711,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             store.setMeta?.(`skips:${chatKey}`, JSON.stringify([...kept, skipNew].slice(-6)));
         }
     } catch {}
-    // ③ 口袋：到日子的进口袋（掷骰、份数、让路），放久了沉底
+    // ③ 口袋：到日子的进口袋（容量、类别、让路），放久了沉底
     if (store.menuOf && planner?.record !== false) {
         withdrawIntimateForTier(store, chatKey);
         const allowIntimate = intimateAllowed(store, records, chatKey, { present, record: true });
@@ -1719,7 +1724,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             const contentTier = activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null;
             const scenePlace = board?.camera?.place || confirmedScenePlace(messages, store.stateNotesOf?.(chatKey) ?? [], lastPos, userName);
             const placeNames = nameFinder(rel, rosterNames);
-            for (const c of stepPocket(menu, { today, part: timelineFor(store, records, chatKey, messages).part, dayOf, at: lastPos, timeScale: scaleFor(store, chatKey), pace: paceFor(store, chatKey), contentTier, stacked, firm: { today, dayOf }, hold: promised?.hold ?? null, keep: promised?.keeps ?? (() => false), gone, visible: records.visible(chatKey), messages, notHere: m => !nearPlace(m, scenePlace, placeNames) })) {
+            for (const c of stepPocket(menu, { verified: !!planner?.checkTurn, today, part: timelineFor(store, records, chatKey, messages).part, dayOf, at: lastPos, timeScale: scaleFor(store, chatKey), pace: paceFor(store, chatKey), contentTier, stacked, firm: { today, dayOf }, hold: promised?.hold ?? null, keep: promised?.keeps ?? (() => false), gone, visible: records.visible(chatKey), messages, notHere: m => !nearPlace(m, scenePlace, placeNames) })) {
                 store.updateMenu(chatKey, c.id, c.status === 'pocket' ? { ...c, basisDay: today } : c);
                 if (c.why && (c.status === 'expired' || c.status === 'void')) store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : 'menu_void', { id: c.id, why: c.why });
             }
@@ -1727,7 +1732,10 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             // 挂到门上（找上门、牵头的人有卡又不在场），或者下一次开口那一格最前面一句；知道了却没去的，牵头的人镜头外照常办了、排一件回音
             try {
                 const player = [userName, ...(rel && userName ? (p => (p ? [p.名, ...p.又名] : []))(personOf(rel, userName, rosterNames)) : [])].filter(Boolean);
-                eventStep(store, records, chatKey, { menu: menuDays(store, store.menuOf(chatKey), dayOf), messages, today, firmToday: today, part: timelineFor(store, records, chatKey, messages).part, here, roster, userName, player, node: latestNode(store, chatKey).node });
+                const events = eventStep(store, records, chatKey, { menu: menuDays(store, store.menuOf(chatKey), dayOf).filter(m => deliveryVerified(store, chatKey, m)), messages, today, firmToday: today, part: timelineFor(store, records, chatKey, messages).part, here, roster, userName, player, node: latestNode(store, chatKey).node });
+                // 去随机以后，引子可能已由普通入口进袋；仍保留定日活动的原递送身份。
+                for (const s of events.steps) if (s.how === 'door' && s.lead.status === 'pocket' && !s.lead.pocket_by)
+                    store.updateMenu(chatKey, s.lead.id, { status: 'pocket', pocket_day: today, by: '引子', at: { pos: last.pos, fp: last.fp }, basisDay: today });
             } catch {}
         }
     }
@@ -1839,92 +1847,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
         } catch {}
     }
     if (store.requestPlan && planner?.provider && planner?.record !== false) {
-        try {
-            const stable = stablePlanEdge(messages);
-            const stablePos = stable?.pos ?? -1;
-            const stableView = stable ? planningView(store, records, chatKey, stablePos) : null;
-            const stableStore = stableView && Object.assign(Object.create(stableView.store), {
-                stateNotesOf: key => (store.stateNotesOf?.(key) ?? []).filter(n => key !== chatKey || n.pos <= stablePos),
-            });
-            const stableToday = stable ? confirmedDayFor(stableStore, stableView.records, chatKey)(stablePos + 0.5) : null;
-            const notes = store.notesOf?.(chatKey) ?? [];
-            const openIdeaIds = new Set(records.openIdeas(chatKey).map(r => r.id));
-            const last = store.lastPlan(chatKey);
-            const active = store.menuOf(chatKey).filter(m => m.status === 'waiting' || m.status === 'pocket').length;
-            const newNotes = notes.some(n => n.kind === '聊' && n.used_in_plan == null);
-            const checked = last?.status === 'ready' ? verdictOf(store, chatKey, last.id) : null;
-            const verdict = checked?.at && checked.at.pos <= stablePos ? checked : null;
-            let reason = needsPlan({ lastPlan: last, activeItems: active, newNotes, nodeOver: verdict?.result });
-            const judged = verdict && ['node_done', 'node_failed', 'turn', 'broken', 'shift'].includes(reason);
-            // 第一份规划等开局单确认生效、或者玩家说了第一句再排（用户 10/22：一接入就排，角色还没拉完、开局单还没填，钱就花出去了）
-            if (reason === 'first' && !store.setupOf?.(storyId) && !messages.some(m => m.is_user)) reason = null;
-            // 判定挂在哪条消息上，新规划也跟着挂上：那条删了、改了，新规划就不算，退回原来那份（用户 10/4）
-            if (reason) requestPlanNow(store, records, chatKey, planner, { reason, present: here, verdict: judged ? verdict.why : null, thread: judged ? verdict.thread : null, basis: judged ? stable : null, anchor: judged ? stable : null });
-            else if (last?.status === 'ready' && backFrom(store, chatKey, last)) {
-                // 离开好些天刚回来、这些天推好了：接住这些天留下的事，重新规划（一次离开只叫一次）。
-                const back = backFrom(store, chatKey, last);
-                store.setMeta(`back_planned:${back.id}`, '1');
-                requestPlanNow(store, records, chatKey, planner, { reason: 'back', present: here });
-            } else if (last?.status === 'ready') {
-                // 换了剧情日看一次；一个剧情日里聊得很长（试玩第 5 天一百多条）时，每 NODE_EVERY 条也看一次
-                const dayDue = stable && stableToday > last.story_day && store.getMeta?.(`node_checked:${last.id}`) !== String(stableToday);
-                const posDue = stable && stablePos - Number(store.getMeta?.(`node_checked_pos:${last.id}`) ?? last.anchor_pos ?? 0) >= NODE_EVERY;
-                if (last.node && planner.checkNode && (dayDue || posDue)) {
-                    store.setMeta(`node_checked:${last.id}`, String(stableToday));
-                    store.setMeta(`node_checked_pos:${last.id}`, String(stablePos));
-                    planner.checkNode({ chatKey, planId: last.id, at: stable }).catch(() => {});
-                }
-                // 玩家的角色在这份规划之后新提的想法（记账记下来的）：看一眼是不是认真要长期去做的新方向（N-72：当引力，不当轨道）。
-                if (planner.checkTurn && userName && stable) {
-                    const turnCheckKey = `turn_checked:${chatKey}`;
-                    const outsideKey = `plan_outside_wait:${chatKey}`;
-                    let pendingOutside = [];
-                    try { pendingOutside = JSON.parse(store.getMeta?.(outsideKey) ?? '[]'); } catch {}
-                    if (!Array.isArray(pendingOutside)) pendingOutside = [];
-                    const dueOutside = pendingOutside.filter(x => x.planId === last.id && x.at?.pos <= stablePos && messages.some(m => m.pos === x.at.pos && m.fp === x.at.fp));
-                    // 想法之外也看玩家说的话：拒绝、放弃多半记成"说"（B 段实测："那一单我不接了"记成了说，规划照旧等着那单交货）。
-                    const ideas = visible.filter(r => (r.type === '想法' || r.type === '说') && r.holder_name === userName && r.pos > (last.anchor_pos ?? -1) && r.pos <= stablePos);
-                    // 别的角色起的新念头（D-107）：同一次顺带看，分量够就给眼下这个节点补几件
-                    const others = visible.filter(r => r.type === '想法' && r.holder_name && r.holder_name !== userName && openIdeaIds.has(r.id) && r.pos > (last.anchor_pos ?? -1) && r.pos <= stablePos);
-                    // 关系变了、一直算数的改变（谁的都算，用户 10/4：两人当场在一起了）：看规划设想的局面还成不成立
-                    const changes = visible.filter(r => (r.type === '关系' || (r.type === '改变' && LASTING_CHANGE.has(r.duration))) && r.pos > (last.anchor_pos ?? -1) && r.pos <= stablePos);
-                    // 这一轮各人做了什么、说了什么（D-170，用户 10/6：闹出的动静该在外头发酵）：同一次顺带看会不会传开、引来反应
-                    const counted = new Set([...ideas, ...others, ...changes].map(r => r.id));
-                    const acts = visible.filter(r => ACTS.has(r.type) && !counted.has(r.id) && r.pos > (last.anchor_pos ?? -1) && r.pos <= stablePos);
-                    const seen = Number(store.getMeta?.(turnCheckKey) ?? -1);
-                    const fresh = ideas.filter(r => r.id > seen), freshOthers = others.filter(r => r.id > seen), freshChanges = changes.filter(r => r.id > seen), freshActs = acts.filter(r => r.id > seen).slice(-12);
-                    if (fresh.length || freshOthers.length || freshChanges.length || freshActs.length || dueOutside.length) {
-                        if (fresh.length || freshOthers.length || freshChanges.length || freshActs.length) store.setMeta(turnCheckKey, String(Math.max(...[...fresh, ...freshOthers, ...freshChanges, ...freshActs].map(r => r.id))));
-                        planner.checkTurn({ chatKey, planId: last.id, ideas: fresh, others: freshOthers, changes: freshChanges, acts: freshActs, outside: dueOutside.flatMap(x => x.outside), at: stable }).catch(() => {});
-                    }
-                    if (pendingOutside.length) store.setMeta(outsideKey, JSON.stringify(pendingOutside.filter(x => x.planId === last.id && x.at?.pos > stablePos)));
-                }
-                // 剧情走到了开局单里某条储备线写明的地方（N-293，用户 10/6：一个人去了某个酒吧，开局单里一条储备线的条件写着"在那儿"，规划里却一件都没有）：
-                // 展开那条线，给眼下这个节点补几件此刻就能用上的（规划那档模型，一次七八毛、几分钟，后台跑不等）。同一条线一个剧情日至多一回；
-                // 那条线眼下已经有排着、在口袋里的事就不用。地点只取场面表和本窗口有效的此地记录。
-                if (planner.onPlace) {
-                    const where = board?.camera?.place ?? '';
-                    // 进了那处以后，"此刻的样子"常把地方写成里面更细的一块（试玩 10/9：某家酒吧 → 里面的包厢 → 吧台边，酒吧的名字没了，
-                    // 人还在那儿却认不出）：同一天、四十条以内、上一回"在路上"以后记过的地方都算
-                    const spots = (store.stateNotesOf?.(chatKey) ?? []).filter(n => n.who === '此地' && n.aspect === '地方' && n.pos <= lastPos && lastPos - n.pos <= 40 && dayOf(n.pos) === today).sort((a, b) => a.pos - b.pos);
-                    const here = where && board?.camera?.from !== 'mark'
-                        ? spots.slice(spots.findLastIndex(n => /^(没了|没有了|已经没了|无)$|路上|往.{1,12}去|出了|离开/.test(n.text)) + 1)
-                            .filter(n => !/^(没了|没有了|已经没了|无)$/.test(n.text)).map(n => n.text).join('\n') : '';
-                    const whereNow = [where, here].filter(Boolean).join('\n');
-                    const busy = new Set(store.menuOf(chatKey).filter(m => m.status === 'waiting' || m.status === 'pocket').map(m => m.line));
-                    for (const x of store.setupOf?.(storyId)?.data?.储备线 ?? []) {
-                        const hit = placesIn(x.条件).find(p => whereNow.includes(p));
-                        const key = `reserve_place:${chatKey}:${x.名}`, wait = `reserve_place_wait:${chatKey}:${x.名}`;
-                        if (!hit || busy.has(x.名) || store.getMeta?.(key) === String(today) || lastPos < Number(store.getMeta?.(wait) ?? -1)) continue;
-                        const before = store.getMeta?.(key) ?? null;
-                        store.setMeta?.(key, String(today));
-                        // 没调通：这一天还没算补过，隔六条再试（以前一声不响就算补过了）
-                        planner.onPlace({ chatKey, planId: last.id, line: x.名, place: hit, at: { pos: lastPos, fp: messages.at(-1)?.fp ?? null } })?.catch?.(() => { store.setMeta?.(key, before); store.setMeta?.(wait, String(lastPos + 6)); });
-                        break;
-                    }
-                }
-            }
-        } catch {}
+        evaluatePlanning(store, records, chatKey, planner, { present: here, board, promised, today, dayOf });
     }
     // ⑤ 局势（situation.mjs，Q-8②）：到日子的传开替他补成"听说／消息"（挂在最后一条上）；新的剧情日第一次推一次局势（后台跑，不等）
     if (situation?.sit && situation.record !== false) {
@@ -1995,6 +1918,144 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
 }
 
 // 收期的钟（matters.closeDue）：这一局的收期格数（tempo.close），规划写了续的那几件从那份规划挂的那条重新起算（那条删了就不算）
+function planningWorld(store, chatKey, context) {
+    if (!store.db?.prepare("select 1 from sqlite_master where name = 'situation_ticks'").get()) return [];
+    const { messages, visible, dayOf, chat } = context;
+    const now = situationNow(situationReader(store.db), { storyId: chat.story_id, messages, visibleIds: new Set(visible.map(r => r.id)), dayOf,
+        live: moveLiveCtx(store, chatKey, { records: visible, principal: context.userName }) });
+    const ticks = new Map(now.ticks.map(t => [t.id, t]));
+    const rows = [...now.moves.map(m => ({ kind: '动向', row: m, ids: m.why, text: `${m.who}：${m.what}${m.seen ? `；外面看得到：${m.seen}` : ''}` })),
+        ...[...now.pending, ...now.delivered].map(s => ({ kind: '传播', row: s, ids: [s.source], text: `${s.target}（${s.channel}，${s.due}到）：${s.heard}` }))];
+    return rows.flatMap(({ kind, row, ids, text }) => {
+        const tick = ticks.get(row.tick_id), sources = (ids ?? []).map(id => visible.find(r => r.id === id));
+        if (!tick || !sources.length || sources.some(r => !r)) return [];
+        return [{ worldId: `${kind}:${row.id}`, text, source: { pos: row.pos ?? tick.anchor_pos, fp: messages.find(m => m.pos === (row.pos ?? tick.anchor_pos))?.fp },
+            known: sources.flatMap(r => partsSources(recordParts(r)).map(basis => ({ basis }))),
+            records: sources.map(r => ({ id: r.id, text: r.raw_text ?? r.text, fp: r.fp })) }];
+    });
+}
+export function planningInput(store, records, chatKey, { present = null, board = null, promised = null, today = null, dayOf = null, through = null } = {}) {
+    ({ store, records } = planningView(store, records, chatKey, through));
+    const context = storyContext(store, records, chatKey, { present });
+    const last = store.lastReadyPlan(chatKey), messages = context.messages;
+    const snapshot = verificationSnapshot(store, records, chatKey, last?.id);
+    const menu = store.menuOf(chatKey);
+    board ??= boardFor(store, records, chatKey, { present: context.present, timeline: timelineFor(store, records, chatKey, messages) });
+    context.present = [...new Set([context.userName, ...(board?.people ?? []).filter(p => ['present', 'remote'].includes(p.status)).map(p => p.name)].filter(Boolean))];
+    today ??= context.today; dayOf ??= context.dayOf;
+    promised ??= promisesNow(store, records, chatKey, { visible: context.visible, messages, dayOf, today, present: context.present, rosterNames: context.roster.map(x => x.name), setup: intimateSetup(store, chatKey) });
+    const scene = { today, dayOf, part: timelineFor(store, records, chatKey, messages).part,
+        allowIntimate: intimateAllowed(store, records, chatKey, { present: context.present }),
+        contentTier: activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null,
+        place: board?.camera?.place || confirmedScenePlace(messages, store.stateNotesOf?.(chatKey) ?? [], context.lastPos, context.userName),
+        results: context.visible.filter(r => ['了结', '结果', '改变', '关系', '想法'].includes(r.type)).map(r => [r.id, r.text, r.fp]),
+        world: planningWorld(store, chatKey, context), here: context.present, echoes: dueEchoes(store, records, chatKey, today), hold: promised?.hold, stacked: pocketStack(store, records, chatKey, { menu, messages, today, dayOf }),
+        awaiting: messages.slice(-2).some(m => !m.is_user && records.isDone?.(context.chat.story_id, m.fp) === false),
+        at: context.lastPos, pace: paceFor(store, chatKey), visible: context.visible, messages };
+    return { snapshot, menu, scene, context };
+}
+export function completePlanningBeat(store, records, chatKey, input, empty) {
+    const state = evaluationState(store, chatKey), done = state.echoesDone ?? [];
+    const at = input.context.messages.at(-1);
+    const fresh = (input.scene.echoes ?? []).map(e => ({ key: JSON.stringify(e), at: at && { pos: at.pos, fp: at.fp } }));
+    saveEvaluation(store, chatKey, { echoesDone: [...done, ...fresh.filter(e => !done.some(x => x.key === e.key && JSON.stringify(x.at) === JSON.stringify(e.at)))],
+        failures: 0, coolUntil: 0, pending: [] });
+    const current = planningInput(store, records, chatKey, { through: input.snapshot.through });
+    const basis = evaluationBasis(current.snapshot, current.scene);
+    saveEvaluation(store, chatKey, { empty: empty ? basis : null,
+        ...(empty && state.checked === evaluationBasis(input.snapshot, input.scene) ? { checked: basis } : {}) });
+}
+export function planningEvaluation(store, records, chatKey, planner = {}, options = {}) {
+    const stable = stablePlanEdge(store.currentMessages(chatKey));
+    const input = planningInput(store, records, chatKey, { ...options, board: null, promised: null, today: null, dayOf: null, through: stable?.pos ?? -1 }), { snapshot, scene } = input;
+    let state = evaluationState(store, chatKey);
+    if (state.planId !== snapshot.planId) state = saveEvaluation(store, chatKey, { planId: snapshot.planId, checked: null, checking: null, failures: 0, coolUntil: 0, empty: null });
+    state = { ...state, retryMax: retryKnob(planner.retryMax, 'max') };
+    const lastPlan = store.lastPlan(chatKey);
+    const rawVerdict = lastPlan?.status === 'ready' ? verdictOf(store, chatKey, lastPlan.id) : null;
+    const verdict = rawVerdict?.at?.pos <= (stable?.pos ?? -1) ? rawVerdict : null;
+    let decision = planningDecision({ ...input, state, lastPlan, verdict,
+        running: !!store.activePlanAttempt?.(chatKey, lastPlan?.id) });
+    const seen = Number(store.getMeta?.(`turn_checked:${chatKey}`) ?? -1);
+    const fresh = (snapshot.recent ?? snapshot.history).filter(r => r.id > seen && r.pos > (lastPlan?.anchor_pos ?? -1));
+    const outside = scene.world;
+    if (lastPlan?.status === 'ready' && stable && !state.checking && ((decision.kind === 'beat' && fresh.length)
+        || (state.checked !== decision.basis && outside.length && decision.kind !== 'full'))) decision = { ...decision, kind: 'verify' };
+    return { input, snapshot, scene, state, lastPlan, verdict, stable, fresh, outside, decision };
+}
+export function planningCheckArgs(store, chatKey, evaluation, { mark = true } = {}) {
+    const { input, snapshot, stable, fresh: history, outside, decision } = evaluation, user = input.context.userName;
+    if (mark && history.length) store.setMeta(`turn_checked:${chatKey}`, String(Math.max(...history.map(r => r.id))));
+    return { chatKey, planId: snapshot.planId, verification: true, at: stable, basis: decision.basis,
+        ideas: history.filter(r => ['想法', '说'].includes(r.type) && r.holder_name === user),
+        others: history.filter(r => r.type === '想法' && r.holder_name !== user), changes: history.filter(r => ['关系', '改变'].includes(r.type)),
+        acts: history.filter(r => ACTS.has(r.type) && r.type !== '改变' && !(r.holder_name === user && r.type === '说')), outside };
+}
+export function receivePlanningCheck(store, chatKey, snapshot, result, { at, completed = [], verdict = true } = {}) {
+    const accepted = commitVerification(store, chatKey, snapshot, result);
+    const done = result.done && !!snapshot.node?.算成 && completed.length > 0;
+    if (verdict) writeNodeVerdict(store, chatKey, snapshot.planId, { result: result.turn ? '转向' : result.broke ? '弄断' : done ? '算成' : result.shift ? '变了' : '还没',
+        why: done && !result.turn && !result.broke ? result.doneWhy : result.why, thread: result.thread }, at);
+    return accepted;
+}
+// 退出证据无需重核；材料升版后仍存续的未核候选必须按新投影再核一次。
+export function planningCheckBasis(input, committed) {
+    const recheck = input.snapshot.nodeBasis !== committed.snapshot.nodeBasis
+        && committed.snapshot.menu.some(m => m.verification?.state === '未核');
+    const checked = recheck ? input : committed;
+    return evaluationBasis(checked.snapshot, checked.scene);
+}
+export function evaluatePlanning(store, records, chatKey, planner, options = {}) {
+    const evaluation = planningEvaluation(store, records, chatKey, planner, options);
+    const { input, snapshot, scene, state, lastPlan, verdict, stable, fresh, outside, decision } = evaluation;
+    const dayDue = stable && scene.today > lastPlan?.story_day && store.getMeta?.(`node_checked:${lastPlan?.id}`) !== String(scene.today);
+    const posDue = stable && stable.pos - Number(store.getMeta?.(`node_checked_pos:${lastPlan?.id}`) ?? lastPlan?.anchor_pos ?? 0) >= NODE_EVERY;
+    if (lastPlan?.status === 'ready' && planner.checkNode && stable && (dayDue || posDue) && !state.checking && decision.kind !== 'full' && !fresh.length && !outside.length) {
+        store.setMeta(`node_checked:${lastPlan.id}`, String(scene.today)); store.setMeta(`node_checked_pos:${lastPlan.id}`, String(stable.pos));
+        planner.checkNode({ chatKey, planId: lastPlan.id, at: stable })?.catch?.(() => {});
+        return { ...decision, kind: 'verify', why: '核对节点实际收束' };
+    }
+    saveEvaluation(store, chatKey, { decision: decision.kind, basis: decision.basis, enforce: !!planner.checkTurn, retryMax: state.retryMax });
+    const at = stable;
+    if (decision.kind === 'verify') {
+        if (!planner.checkTurn) return decision;
+        saveEvaluation(store, chatKey, { checking: decision.basis });
+        Promise.resolve(planner.checkTurn(planningCheckArgs(store, chatKey, evaluation)))
+            .then(result => { if (result?.skipped) return; saveEvaluation(store, chatKey, { checked: result?.checked ?? decision.basis }); })
+            .catch(error => store.logEvent?.(chatKey, 'verification_failed', { error: error.message }))
+            .finally(() => saveEvaluation(store, chatKey, { checking: null }));
+    } else if (decision.kind === 'full') {
+        if (decision.why !== 'first' || store.setupOf?.(input.context.chat.story_id) || store.currentMessages(chatKey).some(m => m.is_user))
+            requestPlanNow(store, records, chatKey, planner, { reason: decision.why, present: scene.here, verdict: verdict?.why, thread: verdict?.thread, ...(decision.why === 'first' ? {} : { anchor: at, basis: at }) });
+    } else if (decision.kind === 'beat') {
+        planner.onBeat?.({ chatKey, planId: snapshot.planId, at, basis: decision.basis, input })?.catch?.(() => {});
+    }
+    return decision;
+}
+
+export function beatBrief(store, records, chatKey, input = planningInput(store, records, chatKey)) {
+    const { snapshot, menu, scene, context } = input, node = snapshot.node;
+    const lines = rows => rows.length ? rows : ['（没有）'];
+    const record = r => `[${r.id}] ${JSON.stringify({ 谁: r.holder_name ?? r.holder, 事: partsText(recordParts(r)), 类型: r.type,
+        来源: partsSources(recordParts(r)), 谁知道: r.audience ?? [] })}`;
+    const facts = snapshot.facts.map(f => JSON.stringify({ 编号: f.id, 原前史序号: f.index, 开局单版本: f.setupVersion, 原文: f.text, 作用范围: f.scope, 谁知道: f.knownBy }));
+    const active = activeIntimate(intimateSetup(store, chatKey));
+    const intimate = promptOptionsFor(store, chatKey).tier !== 'SFW' && active.length;
+    const signals = (evaluationState(store, chatKey).pending ?? []).filter(s => !s.at || context.messages.some(m => m.pos === s.at.pos && m.fp === s.at.fp));
+    return ['【正在演的这一场和刚发生的结果】', JSON.stringify({ 在哪: scene.place, 谁在场: scene.here, 现在: scene.part, 剧情日: scene.today }),
+        ...context.messages.slice(-6).map(m => JSON.stringify({ 位置: m.pos, 指纹: m.fp, 谁: m.name, 原文: m.text })),
+        ...lines(context.visible.filter(r => ['做', '说', '了结', '改变', '关系', '消息'].includes(r.type)).slice(-16).map(record)), ...lines(facts), ...lines((scene.world ?? []).map(r => JSON.stringify(r))),
+        '【眼下这个节点】', ...lines(node ? [JSON.stringify({ 目标: node.目标状态 === false ? null : node.目标, 焦点: node.焦点, 焦点线: node.焦点线,
+            线: node.线, 假设: node.假设, 往后: node.往后, 已说出的心事: node.已说出的心事 })] : []),
+        ...(intimate ? ['【本节点已排的亲密件与当前进度】', ...lines(menu.filter(m => m.plan_id === snapshot.planId && m.purpose === '亲密').map(m => JSON.stringify(m))),
+            ...currentIntimateProgress(store, chatKey).map(r => JSON.stringify(r))] : []),
+        '【还挂着的事】', ...lines(context.visible.filter(r => r.type === '想法' || r.promise).slice(-12).map(record)),
+        ...lines(menu.map(m => `[事${m.id}] ${JSON.stringify({ 谁: m.who, 题: m.title, 状态: m.status, 核验: m.verification?.state, 前提: m.premise, 收尾: m.closeText, 来源: m.sourceAt })}`)),
+        ...lines([...(node?.心事 ?? []), ...(node?.已说出的心事 ?? [])].map(h => JSON.stringify(h))),
+        '【相关人物及各自知情】', ...lines(context.roster.filter(p => scene.here.includes(p.name) || menu.some(m => m.who === p.name)).map(p => JSON.stringify({ 谁: p.name, 是谁: p.hook, 档位: p.role }))),
+        ...lines(snapshot.history.map(record)), '【本次待评估信号】', ...lines([...signals, ...(scene.echoes ?? [])].map(s => JSON.stringify(s)))].join('\n');
+}
+
 function closeClock(store, chatKey, { messages, dayOf, today }) {
     const close = paceFor(store, chatKey).close;
     let restart = {};
@@ -2110,10 +2171,10 @@ export function situationMaterial(store, records, sit, chatKey, { day, net = nul
     const results = [
         ...store.menuOf(chatKey).filter(m => m.settled_pos != null && m.settled_pos > from && STATUS[m.status === 'sunk_told' ? 'sunk' : m.status])
             // 沉了的带上"没接会怎样"（外头会有什么动静从这句长）；接了的带上"往后会落下什么"（章程 F2）
-            .map(m => ({ id: `事${m.id}`, line: `${m.who}「${m.title}」：${m.surface} → ${/sunk/.test(m.status) && m.why === SKIP_MISSED ? `${SKIP_MISSED}，沉了` : STATUS[m.status === 'sunk_told' ? 'sunk' : m.status]}${/sunk/.test(m.status) && ifSunkOf(m) ? `（没接会怎样：${ifSunkOf(m)}）` : takenOf(m, s.messages) && ifTakenOf(m) ? `（接了往后：${ifTakenOf(m)}）` : ''}` })),
-        ...promised.filter(p => closedBy.get(p.id)?.pos > from).map(p => ({ id: `约${p.id}`, line: `${[...new Set([...p.doers, ...p.with])].join('和')}说好的：${p.r.text}（约在：${p.when || '没说'}）→ ${closedBy.get(p.id).outcome}：${closedBy.get(p.id).text}` })),
+            .map(m => ({ id: `事${m.id}`, sourceIds: s.visible.filter(r => r.matter?.menu === m.id).flatMap(r => [r.id, r.closed_by?.id]).filter(Number.isSafeInteger), line: `${m.who}「${m.title}」：${m.surface} → ${/sunk/.test(m.status) && m.why === SKIP_MISSED ? `${SKIP_MISSED}，沉了` : STATUS[m.status === 'sunk_told' ? 'sunk' : m.status]}${/sunk/.test(m.status) && ifSunkOf(m) ? `（没接会怎样：${ifSunkOf(m)}）` : takenOf(m, s.messages) && ifTakenOf(m) ? `（接了往后：${ifTakenOf(m)}）` : ''}` })),
+        ...promised.filter(p => closedBy.get(p.id)?.pos > from).map(p => ({ id: `约${p.id}`, sourceIds: [p.id, closedBy.get(p.id)?.id].filter(Number.isSafeInteger), line: `${[...new Set([...p.doers, ...p.with])].join('和')}说好的：${p.r.text}（约在：${p.when || '没说'}）→ ${closedBy.get(p.id).outcome}：${closedBy.get(p.id).text}` })),
         ...promised.filter(p => !closedBy.has(p.id) && p.due && !p.due.soon && (skip ? p.due.end < day && p.due.end >= day - (skip.lumped ? skip.of : 1) : s.today - p.due.end === 1) && [...p.doers, ...p.with].some(x => !onStage(x)))
-            .map(p => ({ id: `约${p.id}`, line: `${[...new Set([...p.doers, ...p.with])].join('和')}说好的：${p.r.text}（约在：${p.when || '没说'}）→ 到日子没办，${[...p.doers, ...p.with].filter(x => !onStage(x)).join('、')}在镜头外等着` })),
+            .map(p => ({ id: `约${p.id}`, sourceIds: [p.id, closedBy.get(p.id)?.id].filter(Number.isSafeInteger), line: `${[...new Set([...p.doers, ...p.with])].join('和')}说好的：${p.r.text}（约在：${p.when || '没说'}）→ 到日子没办，${[...p.doers, ...p.with].filter(x => !onStage(x)).join('、')}在镜头外等着` })),
     ].slice(-10);
     if ((!fresh.length && !heard.length && !errands.length && !results.length && !loudIds.length && !skip) || !anchor) return null;
     const rel = (r => (r ? normalizeRelations(r) : null))(store.relationsOf?.(s.chat.story_id));
@@ -2134,7 +2195,7 @@ export function situationMaterial(store, records, sit, chatKey, { day, net = nul
     return {
         storyId: s.chat.story_id, anchor: { pos: anchor.pos, fp: anchor.fp }, errands: errandOf,
         prompt: situationPrompt({ day, timeScale: s.ts, date: dateIn(start, day)?.week ?? '', firstDay: dayNumber(start, 0), ledgerLines: factionBrief(ledger, { net, today: s.today, relDay: d => relativeDay(d, s.ts) }), records: fresh, heard, pending: now.pending, errands, principal, people, factions, results, loud: loudIds.length ? { ids: loudIds, why: loud?.why ?? '' } : null, open, moves: now.moves.slice(-8), skip: skip ? skipPromptLines(skip, { principal }) : [] }),
-        check: { known: [...people.map(p => p.name), ...factions, ...errands.map(e => e.executor)], main: mainNames, ids: new Set([...fresh, ...open].map(r => r.id)), aware, errands: errandOf, principal, results: new Set(results.map(x => x.id)), loud: new Set(loudIds), liveMoves: new Set(now.moves.slice(-8).map(x => x.id)) },
+        check: { known: [...people.map(p => p.name), ...factions, ...errands.map(e => e.executor)], main: mainNames, ids: new Set([...fresh, ...open].map(r => r.id)), aware, errands: errandOf, principal, results: new Set(results.map(x => x.id)), resultSources: new Map(results.map(x => [x.id, x.sourceIds])), loud: new Set(loudIds), liveMoves: new Set(now.moves.slice(-8).map(x => x.id)) },
     };
 }
 
@@ -2292,6 +2353,13 @@ export function scaleFor(store, chatKey) {
 // 这局的节奏（章程 H2）：开局单"节奏"那一格（快／中／慢）配这一局的尺度算出来的那组数；没写就是中。
 export function paceFor(store, chatKey) {
     try { return paceOf(store.setupOf?.(store.requireChat(chatKey).story_id)?.data ?? null); } catch { return paceOf(null); }
+}
+// 规划的系统提示：通用底＋节奏上限＋型号口味＋亲密档＋人称（main 和 tools/plan-replay.mjs 共用，T118）
+export function planSystemOf(store, chatKey, model, config, { mode = 'full' } = {}) {
+    const options = { ...promptOptionsFor(store, chatKey, config), mode };
+    const base = planSystem(options), pace = paceFor(store, chatKey);
+    const system = [mode === 'beat' ? base : paceCap(base, pace), paceNote(pace)].filter(Boolean).join('\n');
+    return renderPronouns(withIntimate(withTaste(system, { ...options, kind: 'plan', model }), intimateSetup(store, chatKey), options), playerContext(store, chatKey));
 }
 
 export function timeMarksFor(store, records, chatKey, messages = store.currentMessages(chatKey)) {
@@ -2507,7 +2575,7 @@ export function idleLine(store, chatKey, { messages, lastPos, today, userName = 
 // 这个窗口此刻各对人的关系（记账的"关系"记录＋最近一份交回的规划写的关系现状，取更晚的）。
 export function relationsNow(store, chatKey, rel, visible, rosterNames = []) {
     const last = playModeOf(store, chatKey) === 'full' ? store.lastReadyPlan?.(chatKey) : null;
-    const node = last?.node ? JSON.parse(last.node) : null;
+    const node = effectivePlanNode(store, chatKey, last);
     return currentRelations(rel, { records: visible, plan: node?.关系?.length ? { relations: node.关系, pos: last.anchor_pos ?? -1 } : null, roster: rosterNames });
 }
 
@@ -2621,9 +2689,9 @@ const isDoneFor = (store, records, chatKey) => {
 const HOLD_SPAN = 6, AIM_WAIT = 6, ERRAND_GAP = 12, NODE_EVERY = 40, POCKET_KIND = 'pocket';
 const focusNodeFor = (store, chatKey) => {
     const last = playModeOf(store, chatKey) === 'full' ? store.lastReadyPlan?.(chatKey) : null;
-    try { return last?.node ? JSON.parse(last.node) : null; } catch { return null; }
+    return effectivePlanNode(store, chatKey, last);
 };
-function menuFor(store, chatKey, { records = null, isCarded = () => false, scene = '', partAt = () => null, awaySince = () => false, speaker, present, recentUser, userName, today, dayOf = null, firm = null, at = 0, passive = false, record, carry = null, followers = () => [], giver = () => null, face = () => false, player = [], hold = null, keep = () => false, stranger = () => null, named = () => [], same = () => false, camera = false, carded = () => false, arrive = null, board = null, wentOff = null, anchorAt = null, anchorMsg = null, upto = null, given = null, hide = () => false }) {
+function menuFor(store, chatKey, { records = null, isCarded = () => false, scene = '', partAt = () => null, awaySince = () => false, speaker, present, recentUser, userName, today, dayOf = null, firm = null, at = 0, passive = false, record, carry = null, followers = () => [], giver = () => null, face = () => false, faceCard = () => false, player = [], hold = null, keep = () => false, stranger = () => null, named = () => [], same = () => false, camera = false, carded = () => false, arrive = null, board = null, wentOff = null, anchorAt = null, anchorMsg = null, upto = null, given = null, hide = () => false }) {
     // 在同一条上换了个人开口：前一个人那一步（他那条回复删了）不算，那件回到之前那一步（store.menuOf）
     const allowed = intimateAllowed(store, records, chatKey, { present });
     const allMenu = menuDays(store, store.menuOf(chatKey, { speaker }), dayOf);
@@ -2644,7 +2712,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     const menuTs = scaleFor(store, chatKey);
     const dated = m => (Number.isFinite(m.said_day) && m.said_day !== today ? { ...m, ...Object.fromEntries(['surface', 'respond', 'know', 'sink', 'fit'].map(k => [k, m[k] == null ? m[k] : retime(m[k], m.said_day, today, menuTs)])) } : m);
     const visible = (records?.visible?.(chatKey) ?? []).filter(r => r.pos <= (anchorAt ?? at));
-    const eligible = m => !afterBlocked(m, allMenu, x => x.status, { visible, messages: upto ?? store.currentMessages(chatKey) });
+    const eligible = m => deliveryVerified(store, chatKey, m) && !afterBlocked(m, allMenu, x => x.status, { visible, messages: upto ?? store.currentMessages(chatKey) });
     const causeText = m => {
         const r = m.cause?.type === 'record' ? visible.find(x => x.id === m.cause.id)
             : m.cause?.type === 'menu_result' ? menuResultRecord(visible, m.cause.id) : null;
@@ -2660,6 +2728,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     // 口袋里可以同时有几件（份数看事态，见 stepPocket）。这一格只给和他有关的：他牵头的，外加至多一两件不在场的人或"世界"牵头的。
     // 玩家牵头的事（规划写成了"V 查账户""V 去找谁"）：没有哪个角色是玩家，交给在场开口的人，从他眼里带出来（试玩 9/30）
     const isPlayer = who => player.includes(who);
+    const faceLead = m => camera && m.who !== WORLD && !isPlayer(m.who) && !isCarded(m.who) && faceCard(m.who);
     const sameAs = (a, b) => a === b || same(a, b);
     // 别人牵头的事递给谁（N-277，用户 10/2：在场的卡一多，下一个开口的人拿到同一件、再演一遍；记账认出"写出来了"要攒几条才记）：
     // 递出去就先锁给他；他走了、或者隔了 HOLD_SPAN 条他都没再开口，才放给别人。
@@ -2679,8 +2748,8 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     // 牵头的是不在场的有卡的人（他发来的消息、他的事）：后半截是他的话，只交给他本人——他从门上进来（发消息、打电话、上门）时拿；
     // 镜头、别的人不替他说（试玩 10/9：他发来的消息拿出来了，后半截交给了先开口的旁白，他本人一直拿不到）
     for (const m of menu.filter(m => m.status === 'shown' && mine(m) && mayTake(m) && !(carded(m.who) && !sameAs(m.who, speaker)))) {
-        add(0, [...shownLines(shownAs(m), { userName: userName ?? '玩家', speaker }), ...intimateLines(m), ...aside(m)], 'now', { carry: true, sourceKey: sourceKey(m) });
-        if (record) store.updateMenu(chatKey, m.id, step('used'));
+        add(0, [...shownLines(shownAs(m), { userName: userName ?? '玩家', speaker, faceLead: faceLead(m) }), ...intimateLines(m), ...aside(m)], 'now', { carry: true, sourceKey: sourceKey(m) });
+        if (record) store.updateMenu(chatKey, m.id, { ...step('used'), ...(m.conditionStep ? { conditionStep: m.conditionStep } : {}) });
     }
     // 在这一条上交给他、他这一条又删了重来的（试玩 10/7：#287 删了重新生成，那件挂在 #286 上一直算用过，后面几版都拿不到）：
     // 交的那一步就在眼下这一条上、交给的就是他——这一版照样给他，当它还在口袋里
@@ -2731,7 +2800,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
         if (entry === '到现场' && !nearPlace(pocket, scene, placeNames)) continue;
         if (recentUser && reachedFor(pocket, recentUser)) {
             // 玩家伸手了：眼下开口的人接（冲着别人来的照样写明只写自己那份）
-            add(0, [...respondLines(shownAs(pocket), { userName: userName ?? '玩家', speaker }), ...intimateLines(pocket), ...aside(pocket)], 'now', { carry: true, sourceKey: sourceKey(pocket) });
+            add(0, [...respondLines(shownAs(pocket), { userName: userName ?? '玩家', speaker, faceLead: faceLead(pocket) }), ...intimateLines(pocket), ...aside(pocket)], 'now', { carry: true, sourceKey: sourceKey(pocket) });
             carry?.push(pocketCarry(shownAs(pocket), { userName: userName ?? '玩家', speaker }));
             if (record) store.updateMenu(chatKey, pocket.id, step('used'));
         } else if ((!hold || hold.related(pocket) || pocket.motif === NOW_MOTIF) && mayTake(pocket) && !awaiting(pocket) && !(camera && (pocket.offscreen || OFFSCREEN_FIT.test(pocket.fit ?? '')))) offered.push(pocket);   // 今天有说好的事：和它无关的先放着（N-268）；镜头跟着玩家，玩家不在时发生在别人身上的不归它
@@ -2744,7 +2813,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
         // 镜头那一格：不在场的、有卡的人牵头的事，镜头不替他演——改成"这一段让他来"，那件事留在口袋里，等他来了自己拿出来（N-292）
         if (camera && arrive && carded(pocket.who)) { arrive(pocket); return; }
         const call = stranger(pocket.who);
-        const [head, ...body] = pocketLines(shownAs(pocket), { userName: userName ?? '玩家', speaker, camera });
+        const [head, ...body] = pocketLines(shownAs(pocket), { userName: userName ?? '玩家', speaker, camera, faceLead: faceLead(pocket) });
         const playerNames = [...new Set([...player, ...(store.playerNames?.(store.requireChat(chatKey).story_id) ?? [])])];
         const recent = recentPlayerCause(pocket, { visible, lastPos: at, players: playerNames, names: [...present, speaker], span: paceFor(store, chatKey).sinkMsgs });
         const ownRank = pocket.who === speaker ? 0 : holder(pocket) && sameAs(holder(pocket), speaker) ? 1
@@ -2945,13 +3014,13 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
     const digest = storyDigest(s.visible, { dayOf: s.dayOf, today: s.today, when: d => relativeDay(d, s.ts) });
     const rel = (r => (r ? normalizeRelations(r) : null))(store.relationsOf?.(s.chat.story_id));
     const setup = staleBackstory(withSecretLeaks(intimateSetup(store, chatKey), activeLeaks(store, records, chatKey)), s.visible, s.userName);
-    const lastNode = last?.node ? JSON.parse(last.node) : null;
+    const lastNode = effectivePlanNode(store, chatKey, last, { messages: s.messages });
     // 三样对账（章程 J1，用户 10/12：基调写的轻松热闹，规划连着几份排伤病；开局单写好要来的主线在"往后"里推了六份）：
     // 最近几份交回的规划（新的在前）的节点和事件，交给 planner 里的纯函数数——类别排了几件、拖着的线、该来的还没来
     // （每份排过的事要全的：menuOf 只留眼下还算数的，旧规划里没放出来、被新规划接手的不在里面）
     const recentRows = ready.filter(p => !replaced.has(p.id)).slice(-LOOKBACK_PLANS).reverse();
     const planned = store.planItems?.(chatKey, recentRows.map(p => p.id)) ?? menu;
-    const recentPlans = recentRows.map((p, i) => ({ node: (() => { try { return p.node ? JSON.parse(p.node) : null; } catch { return null; } })(), items: planned.filter(m => m.plan_id === p.id) }));
+    const recentPlans = recentRows.map((p, i) => ({ node: effectivePlanNode(store, chatKey, p, { messages: s.messages }), items: planned.filter(m => m.plan_id === p.id) }));
     const castNames = s.roster.map(e => e.name).filter(Boolean);
     // 关系的最新变化（规划写的、记账记下的）：简报的关系表那一段和【主角团】里团里两两的关系都用
     const current = relationsNow(store, chatKey, rel, s.visible, castNames);
@@ -2988,8 +3057,8 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
         dragging: draggingLines(recentPlans, { names: castNames }),
         overdue: overdueAhead(recentPlans, { names: castNames }),
         reason: reason ?? store.lastPlan(chatKey)?.reason ?? null, verdict, thread,
-        lastNode, drive: driveMaterial(store, records, chatKey, { seeds, prices, sit, context: s, node: lastNode }),
-        pastNodes: replaced.size ? ready.filter(p => !replaced.has(p.id)).slice(0, -1).filter(p => p.node).map(p => ({ id: p.id, 目标: JSON.parse(p.node).目标, verdict: verdictOf(store, chatKey, p.id) })).filter(n => n.目标) : pastNodesOf(store, chatKey),
+        lastNode, drive: driveMaterial(store, records, chatKey, { seeds, prices, sit, context: s, node: lastNode, planId: last?.id ?? null }),
+        pastNodes: replaced.size ? ready.filter(p => !replaced.has(p.id)).slice(0, -1).filter(p => p.node).map(p => ({ id: p.id, 目标: effectivePlanNode(store, chatKey, p)?.目标, verdict: verdictOf(store, chatKey, p.id) })).filter(n => n.目标) : pastNodesOf(store, chatKey),
         story: digest.days, storyCut: digest.cut,
         dice: rollDice(`${chatKey}:${s.lastPos}:${(store.readyPlans?.(chatKey) ?? []).length}`, 3),   // 同一处再要一份（比如弄断后接着要）也换一组骰子
         motifs: motifLedger((store.menuOf?.(chatKey) ?? []).filter(m => !unseen(m) && (m.plan_id === last?.id || m.status !== 'waiting'))),
@@ -3034,7 +3103,7 @@ const SCENE_MESSAGES = 8, SCENE_CHARS = 500;
 
 // 之前的节点（上一个以前的，从早到晚）：每个带编号、目标、结局
 export const pastNodesOf = (store, chatKey) => (store.readyPlans?.(chatKey) ?? []).slice(0, -1).filter(p => p.node)
-    .map(p => ({ id: p.id, 目标: JSON.parse(p.node).目标, verdict: verdictOf(store, chatKey, p.id) })).filter(n => n.目标);
+    .map(p => ({ id: p.id, 目标: effectivePlanNode(store, chatKey, p)?.目标, verdict: verdictOf(store, chatKey, p.id) })).filter(n => n.目标);
 export const RECENT_NODES = 5;   // 之前的节点压过时，最近几个一行
 export const ACTIVE_MESSAGES = 300;   // 名册、关系表压过时：最近多少条消息里露过面、被提到的算活着（条数，不分时间尺度）
 // "开局到现在"的大意（main 里便宜那档续写，存 story_sofar:<局>）：{ ids: [盖到的节点编号，从早到晚], text }
@@ -3105,11 +3174,15 @@ function squeezeBrief(store, chatKey, s, base, { budget, last, lastNode, menu })
 }
 
 // 节点检查那一问的材料：规划之后记下的事（至多 60 条，太长的截断）。
-export function nodeCheckLines(store, records, chatKey, planId, through = null) {
+export function nodeCheckLines(store, records, chatKey, planId, through = null, { withSources = false } = {}) {
     const s = storyContext(store, records, chatKey, { through });
     const plan = store.planById(planId);
     const since = plan?.anchor_pos ?? -1;
-    return s.visible.filter(r => r.pos > since && r.type !== '时间').slice(-60).map(r => `· ${s.when(r)} ${r.holder_name ?? r.holder}：${String(r.text).slice(0, 200)}`);
+    return s.visible.filter(r => r.pos > since && r.type !== '时间').slice(-60).map(r => {
+        const text = `· ${s.when(r)} ${r.holder_name ?? r.holder}：${String(r.text).slice(0, 200)}`;
+        // 保留记录已有的身份、引用和派生依据，统一由转向检查的材料收口取来源。
+        return withSources ? { ...r, text } : text;
+    });
 }
 // 节点检查顺带看的（章程 K1，替换 F2 的"接了的有没有后续"）：这一份规划"口子"里答了续的那几件——原来那件 → 接着它的那件（这一份里同题的那件到了哪一步）；
 // 和眼下还排着的事。不再挑"接了却没后续的"（每件事只往下长、收不住）
@@ -3117,7 +3190,7 @@ const STEP_WORDS = { waiting: '还排着', pocket: '在口袋里', shown: '拿�
 export function nodeCheckTaken(store, records, chatKey, planId) {
     const plan = store.planById(planId);
     let node = null;
-    try { node = plan?.node ? JSON.parse(plan.node) : null; } catch {}
+    node = effectivePlanNode(store, chatKey, plan);
     const menu = store.menuOf(chatKey);
     const bare = t => String(t ?? '').trim();
     const continued = (Array.isArray(node?.口子) ? node.口子 : []).filter(g => g?.处理 === '续' && bare(g.题)).slice(0, 12).map(g => {
@@ -3212,9 +3285,11 @@ export function advanceImpulse(store, records, chatKey, id, at, { expected = nul
     return item;
 }
 // 来源由现有调用方带入；这里只读已有结果，不补跑任何推演。
-export function driveMaterial(store, records, chatKey, { seeds = [], prices = null, sit = null, context = null, node = undefined } = {}) {
-    const s = context ?? storyContext(store, records, chatKey), plan = store.lastReadyPlan?.(chatKey);
-    node ??= plan?.node ? JSON.parse(plan.node) : null;
+export function driveMaterial(store, records, chatKey, { seeds = [], prices = null, sit = null, context = null, node = undefined, planId = undefined } = {}) {
+    const s = context ?? storyContext(store, records, chatKey);
+    const plan = planId === undefined ? (node === undefined ? store.lastReadyPlan?.(chatKey) : null) : store.planById?.(planId);
+    if (node === undefined) node = effectivePlanNode(store, chatKey, plan, { messages: s.messages });
+    else node = effectiveNode(node, staleMindReasons(store, plan?.id), { ...nodeContext(store, chatKey), messages: s.messages });
     const meta = (key, fallback) => { try { return JSON.parse(store.getMeta?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
     const menu = menuDays(store, store.menuOf(chatKey), s.dayOf);
     const names = s.roster.map(p => p.name), rows = [];
@@ -3242,8 +3317,8 @@ export function driveMaterial(store, records, chatKey, { seeds = [], prices = nu
             if (r) add('环境', `record:${r.id}`, owner(r), r.text, { pos: r.pos, links: linksOf(r) });
         }
     }
-    for (const [i, h] of (node?.心事 ?? []).entries()) if (!saidSince(h, s.visible, { name: h.谁, since: plan?.anchor_pos ?? -1 }))
-        add('人', `held:${plan?.id}:${i}`, [h.谁], [h.处置, h.开口条件, h.事, h.说的场合].filter(Boolean).join('；'), { kind: '候选', pos: plan?.anchor_pos });
+    for (const [i, h] of (node?.心事 ?? []).entries())
+        add('人', h.编号 ?? `held:${plan?.id}:${i}`, [h.谁], [h.处置, h.开口条件, h.事, h.说的场合].filter(Boolean).join('；'), { kind: '候选', pos: plan?.anchor_pos });
     for (const p of [...(node?.主角团 ?? []), ...(node?.要紧的人 ?? [])]) {
         const mind = p.心思 ? Object.entries(p.心思).filter(([, v]) => typeof v === 'string').map(([k, v]) => `${k}：${v}`).join('；') : '';
         add('人', `mind:${plan?.id}:${p.谁}`, [p.谁], [p.想干, p.下一步, mind].filter(Boolean).join('；'), { kind: '候选', pos: plan?.anchor_pos });
@@ -3310,8 +3385,9 @@ export function sceneMaterial(store, records, chatKey, sources = {}) {
     try { told = JSON.parse(store.getMeta?.(`told:${s.chat.story_id}`) ?? '[]'); } catch {}
     // 讲过的往事挂在写它的那条消息上：那条还在本窗口才算讲过（分叉前共有的 fp 相同所以继承，分叉后各自不同所以不串，删回去也撤得掉）。旧数据只有 at 没有 fp，stillThere 按位置算。
     told = told.filter(t => t && stillThere({ pos: t.at, fp: t.fp }, s.messages, (a, b) => !!store.sameMessage?.(a, b)));
-    const { node } = latestNode(store, chatKey);
-    const drive = driveMaterial(store, records, chatKey, { ...sources, context: s, node });
+    const { plan, node: originalNode } = latestNode(store, chatKey);
+    const node = originalNode;
+    const drive = driveMaterial(store, records, chatKey, { ...sources, context: s, node, planId: plan?.id ?? null });
     return {
         drive, focus: node?.焦点线 ?? null, goal: node?.目标 ?? '',
         userName: s.userName ?? '玩家', today: s.today, setup: staleBackstory(store.setupOf?.(s.chat.story_id)?.data ?? null, s.visible, s.userName), present, offstage, recent, told,
@@ -3400,18 +3476,20 @@ export function prefetchFor(store, records, deps, { chatKey, recentUser, present
 
 async function prefetchOthers(store, records, { assembler, keyMaker }, { chatKey, speaker, recent, recentUser, present, only = null }) {
     if (!assembler || !records || !recentUser) return;
+    const rev = correctionRev(store, chatKey);
+    const keyFor = avatar => aheadKey(store, chatKey, avatar, recentUser, rev);
     const picked = Array.isArray(only) ? new Set(only.filter(Boolean)) : null;
-    const others = memberList(store, chatKey).filter(m => !m.disabled && m.avatar !== speaker && !ahead.has(aheadKey(chatKey, m.avatar, recentUser))
+    const others = memberList(store, chatKey).filter(m => !m.disabled && m.avatar !== speaker && !ahead.has(keyFor(m.avatar))
         && (!picked || picked.has(m.avatar) || picked.has(m.name)));
     if (!others.length) return;
     const queryKeys = await queryKeysFor(store, keyMaker, { chatKey, recent, recentUser, present });
     const boardAt = lazyBoardAt(store, records, chatKey);
     for (const m of others) {
-        if (ahead.has(aheadKey(chatKey, m.avatar, recentUser))) continue;
+        if (ahead.has(keyFor(m.avatar))) continue;
         const name = m.name || m.avatar;
         const { material, messageText } = materialFor(store, records, { chatKey, speaker: m.avatar, name, recent, recentUser, present, queryKeys, pool: true, boardAt });
         if (!material.hits.length || !material.pool.length) continue;
-        once(aheadKey(chatKey, m.avatar, recentUser),
+        once(keyFor(m.avatar),
             () => assembler({ chatKey, speaker: m.avatar, anchor: 'ahead', name, present, recent, recentUser, material, messageText })).catch(() => {});
     }
 }
@@ -3440,11 +3518,18 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
         // 旧格的版本照旧；新进场供料的有效集合变了才重组。
         const arrivalsVersion = tracked ? `:arrival:${createHash('sha1').update(JSON.stringify([store.getMeta?.(`arrived:${chatKey}`), store.getMeta?.(`arrivals:${chatKey}`)])).digest('hex').slice(0, 16)}` : '';
         const menu = store.menuOf?.(chatKey) ?? [];
+        const conditions = menu.filter(m => m.showCondition).map(m => [m.id, m.sourceAt, m.conditionSteps ?? []]);
+        const conditionVersion = conditions.length ? ':condition:' + createHash('sha1').update(JSON.stringify(conditions)).digest('hex').slice(0, 16) : '';
+        const checks = menu.filter(m => (store.getRawMeta ?? store.getMeta)?.(`menu_checks:${chatKey}:${m.id}`)).map(m => [m.id, m.verification?.state ?? '未核']);
+        const checkVersion = checks.length ? ':checked:' + createHash('sha1').update(JSON.stringify(checks)).digest('hex').slice(0, 16) : '';
         const dependent = menu.filter(m => m.after_title);
         const proof = dependent.length ? { visible: records?.visible?.(chatKey) ?? [], messages: store.currentMessages(chatKey) } : null;
         const causalVersion = dependent.length ? ':after:' + createHash('sha1').update(dependent.map(m => `${m.id}:${afterBlocked(m, menu, x => x.status, proof) ? 0 : 1}`).join('|')).digest('hex').slice(0, 16) : '';
         const repair = Number((store.getRawMeta ?? store.getMeta)?.(`swipe_repair_rev:${chatKey}`)) || 0;
-        return intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion + causalVersion + (repair ? `:swipe:${repair}` : '');
+        const correction = correctionRev(store, chatKey);
+        const plan = store.lastReadyPlan?.(chatKey);
+        const mindVersion = plan ? ':mind:' + createHash('sha1').update(nodeProjection(effectivePlanNode(store, chatKey, plan))).digest('hex').slice(0, 16) : '';
+        return intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion + causalVersion + mindVersion + conditionVersion + checkVersion + (repair ? `:swipe:${repair}` : '') + (correction ? `:fix:${correction}` : '');
     };
     const version = versionNow();
     const pinned = store.getSlot({ chatKey, speaker, anchor, ver: version });

@@ -9,6 +9,147 @@ import { personWord } from './pronoun.mjs';
 export const HOLD_KINDS = ['瞒着', '闷着', '挑时候说', '直说'];
 export const HOLD_KEYS = ['处置', '开口条件', '不说时外显', '说的场合'];
 const str = v => (typeof v === 'string' ? v.trim() : '');
+export const correctionRev = (store, chatKey) => Number((store.getRawMeta ?? store.getMeta)?.call(store, `correction_rev:${store.requireChat(chatKey).story_id}`)) || 0;
+
+// 身份按原节点、原序号生成；投影过滤不重编。跨规划只认显式沿用。
+export function identifyNode(node, planId) {
+    if (!node) return node;
+    const rows = (key, prefix) => Array.isArray(node[key]) ? { [key]: node[key].map((r, i) => ({ ...r, 编号: r.编号 || `${prefix}:${planId}:${i + 1}` })) } : {};
+    return { ...node, 目标编号: node.目标编号 || `目标:${planId}`, ...rows('线', '线'), ...rows('心事', '心事'), ...rows('假设', '假设') };
+}
+export function confirmedFacts(store, chatKey) {
+    const story = store.requireChat?.(chatKey)?.story_id;
+    if (story == null) return [];
+    const setup = store.setupOf?.(story);
+    if (!setup || setup.status !== 'confirmed') return [];
+    return (setup.data?.前史 ?? []).flatMap((row, i) => row?.常驻 === true && !row.过时 && str(row.事) && Array.isArray(row.谁知道)
+        ? [{ id: `前史:${setup.id}:${i + 1}`, index: i + 1, setupVersion: setup.id, text: row.事, scope: { story }, knownBy: row.谁知道,
+            objective: row.层 !== '某人记得的版本', layer: row.层 ?? '' }] : []);
+}
+export const factKnownTo = (fact, who, same = (a, b) => a === b) => Array.isArray(fact?.knownBy) && (!fact.knownBy.length || fact.knownBy.some(n => same(n, who)));
+export function nodeContext(store, chatKey) {
+    const facts = confirmedFacts(store, chatKey);
+    return { messages: store.currentMessages?.(chatKey) ?? [], facts,
+        factLive: f => facts.some(x => JSON.stringify(x) === JSON.stringify(f)), recordLive: r => store.recordEvidenceLive?.(chatKey, r) === true };
+}
+export function verificationProofLive(row, ctx) {
+    const evidence = row?.evidence ?? [], facts = row?.facts ?? [], records = row?.records ?? [];
+    return Array.isArray(evidence) && Array.isArray(facts) && Array.isArray(records) && evidence.length + facts.length > 0
+        && evidence.every(a => ctx.messages?.some(m => m.pos === a.pos && m.fp === a.fp))
+        && facts.every(f => ctx.factLive?.(f)) && records.every(r => ctx.recordLive?.(r));
+}
+export function liveMindRevisions(revisions, { messages = [], factLive = () => false, recordLive = () => false } = {}) {
+    const live = a => a && Number.isInteger(a.pos) && !!a.fp && messages.some(m => m.pos === a.pos && m.fp === a.fp);
+    return (Array.isArray(revisions) ? revisions : []).filter(r => {
+        if (!r || (r.at != null && !live(r.at))) return false;
+        // 旧日志保持原来的末端锚点语义；新日志每项带实际送出的完整来源。
+        if (!r.ref) return live(r.at) && (r.evidence == null || (Array.isArray(r.evidence) && r.evidence.length > 0 && r.evidence.every(live)));
+        return verificationProofLive(r, { messages, factLive, recordLive });
+    });
+}
+const mindStates = ['已说出', '机会已到过', '还成立', '拿不准'];
+export function validNodeRevision(row, node) {
+    if (!row || !str(row.because)) return false;
+    if (row.type === '目标') return row.ref === node?.目标编号 && typeof row.value === 'boolean';
+    const rows = key => node?.核验条目?.[key] ?? node?.[key] ?? [];
+    if (row.type === '线') return rows('线').some(x => x.编号 === row.ref) && ['还在', '暂停'].includes(row.value);
+    if (row.type === '假设') return rows('假设').some(x => x.编号 === row.ref) && ['还在', '被推翻', '拿不准'].includes(row.value);
+    if (row.type !== '心事' || !rows('心事').some(x => x.编号 === row.ref) || !mindStates.includes(row.value?.状态)) return false;
+    const heart = rows('心事').find(x => x.编号 === row.ref);
+    return row.value.状态 === '机会已到过' ? str(row.value.机会) && heart.开口条件 === row.value.机会 : row.value.机会 === '';
+}
+export function effectiveNode(node, revisions, ctx = {}) {
+    if (!node) return node;
+    if (ctx.store && ctx.chatKey) ctx = { ...nodeContext(ctx.store, ctx.chatKey), ...ctx };
+    if (ctx.planId != null) node = identifyNode(node, ctx.planId);
+    const base = node.核验条目 ? { ...node, ...node.核验条目 } : node;
+    const live = liveMindRevisions(revisions, ctx), same = ctx.same ?? ((a, b) => a === b);
+    const revise = p => {
+        if (!p?.心思 || !live.some(r => !r.ref && same(r.who, p.谁) && r.why === p.心思.出发点)) return p;
+        const { 想要, 出发点, ...mind } = p.心思;
+        return { ...p, 心思: mind };
+    };
+    const fresh = live.filter(r => validNodeRevision(r, base));
+    const result = id => {
+        const rows = fresh.filter(r => r.ref === id);
+        if (!rows.length) return null;
+        const last = Math.max(...rows.map(r => r.through ?? r.at?.pos ?? -1));
+        const latest = rows.filter(r => (r.through ?? r.at?.pos ?? -1) === last);
+        const priority = r => r.type === '心事' ? ({ 已说出: 3, 机会已到过: 2, 还成立: 1, 拿不准: 0 })[r.value.状态] : 0;
+        const best = Math.max(...latest.map(priority)), winners = latest.filter(r => priority(r) === best);
+        if (new Set(winners.map(r => JSON.stringify(r.value))).size > 1) return null;
+        return winners[0];
+    };
+    const apply = (key, state) => (base[key] ?? []).map(row => {
+        const r = result(row.编号);
+        return { ...row, 状态: r ? state(r.value) : '未核', ...(r ? { 核验依据: r.because } : {}) };
+    });
+    const lines = apply('线', x => x), assumptions = apply('假设', x => x);
+    const hearts = (base.心事 ?? []).map(row => {
+        const r = result(row.编号);
+        if (!r) return { ...row, 状态: '未核' };
+        const out = { ...row, 状态: r.value.状态, 核验依据: r.because };
+        if (r.value.状态 === '机会已到过') {
+            out.开口条件 = '';
+            // 只撤掉场合中逐字相同的机会截段；其余倾向仍在。
+            out.说的场合 = str(row.说的场合).replace(r.value.机会, '').replace(/^[，；、\s]+|[，；、\s]+$/g, '');
+        }
+        return out;
+    });
+    const target = result(base.目标编号);
+    const changed = fresh.length || node.核验条目;
+    return { ...node, ...(Array.isArray(base.主角团) ? { 主角团: base.主角团.map(revise) } : {}),
+        ...(Array.isArray(base.要紧的人) ? { 要紧的人: base.要紧的人.map(revise) } : {}),
+        ...(changed || base.目标编号 ? { 目标状态: target ? target.value : '未核',
+            线: lines.filter(x => x.状态 !== '暂停'), 假设: assumptions.filter(x => x.状态 !== '被推翻'),
+            心事: hearts.filter(x => x.状态 !== '已说出'), 已说出的心事: hearts.filter(x => x.状态 === '已说出'),
+            核验条目: { 线: lines, 假设: assumptions, 心事: (base.心事 ?? []).map((row, i) => ({ ...row, 状态: hearts[i].状态 })) } } : {}) };
+}
+export function effectivePlanNode(store, chatKey, plan, ctx = {}) {
+    let node = null, revisions = [];
+    try { node = JSON.parse(plan?.node ?? 'null'); } catch { return null; }
+    try { revisions = JSON.parse(store.getMeta?.(`mind_stale:${plan?.id}`) ?? '[]'); } catch {}
+    if (!node) return null;
+    const context = { ...nodeContext(store, chatKey), ...ctx }, history = [], inherited = [];
+    for (const old of store.readyPlans?.(chatKey) ?? []) {
+        if (old.id >= plan.id) continue;
+        let base, rows;
+        try { base = identifyNode(JSON.parse(old.node), old.id); rows = JSON.parse(store.getMeta?.(`mind_stale:${old.id}`) ?? '[]'); } catch { continue; }
+        if (!Array.isArray(rows)) continue;
+        inherited.push(...rows.filter(r => r?.type === '心事'));
+        history.push(...(effectiveNode(base, [...inherited, ...rows], context)?.已说出的心事 ?? []));
+    }
+    const value = effectiveNode(identifyNode(node, plan.id), [...inherited, ...(Array.isArray(revisions) ? revisions : [])], context);
+    value.已说出的心事 = [...new Map([...history, ...(value.已说出的心事 ?? [])].map(r => [r.编号, r])).values()];
+    return value;
+}
+export const nodeProjection = node => JSON.stringify(node, (key, value) => ['核验条目', '核验依据'].includes(key) ? undefined : value);
+export function nodeBasis(node, store, chatKey, planId) {
+    const value = nodeProjection(node && { 目标: node.目标, 状态: node.目标状态, 线: node.核验条目?.线 ?? node.线, 假设: node.核验条目?.假设 ?? node.假设,
+        心事: node.心事, 已说出的心事: node.已说出的心事 });
+    if (!store?.setMeta) return value;
+    const key = `plan_eval:${chatKey}`;
+    let state; try { state = JSON.parse(store.getMeta(key) ?? '{}'); } catch { return value; }
+    const old = state.material;
+    const material = old && old.planId === planId && old.value === value ? old : { planId, value, rev: (old?.rev ?? 0) + 1 };
+    if (material !== old) store.setMeta(key, JSON.stringify({ ...state, material }));
+    return JSON.stringify(material);
+}
+export function menuVerification(store, chatKey, item, ctx = nodeContext(store, chatKey)) {
+    let rows;
+    try { rows = JSON.parse(store.getMeta(`menu_checks:${chatKey}:${item.id}`) ?? '[]'); } catch { return { state: '未核' }; }
+    if (!Array.isArray(rows)) return { state: '未核' };
+    const valid = rows.filter(r => r.source === JSON.stringify(item.sourceAt ?? null) && verificationProofLive(r, ctx));
+    const completed = valid.filter(r => ['办完了', '前提没了', '演过了'].includes(r.state));
+    const plan = store.lastReadyPlan(chatKey);
+    const basis = nodeBasis(effectivePlanNode(store, chatKey, plan), store, chatKey, plan?.id);
+    const candidates = completed.length ? completed : valid.filter(r => r.nodeBasis === basis);
+    const last = candidates.length ? Math.max(...candidates.map(r => r.through ?? -1)) : -1;
+    const latest = candidates.filter(r => (r.through ?? -1) === last);
+    const states = [...new Set(latest.map(r => r.state))];
+    if (states.includes('办完了') && states.every(x => ['办完了', '演过了'].includes(x))) return { state: '办完了', proofs: latest };
+    return states.length === 1 ? { state: states[0], proofs: latest } : { state: '未核' };
+}
 
 // 一条里的那四格（只留写了的；处置不认得的不要）；一格都没有就 null
 export function holdOf(x, max = 120) {
@@ -64,7 +205,7 @@ export function secretCandidates(store, chatKey, records = null) {
         const denied = x.不让谁知道.includes('除知道的人以外') ? people.filter(n => !x.谁知道.includes(n)) : x.不让谁知道.filter(n => people.includes(n) && !x.谁知道.includes(n));
         rows.push({ source: 'setup', 事: x.事, 知道: x.谁知道, 不让: denied });
     }
-    const plan = store.lastReadyPlan(chatKey), node = plan?.node ? JSON.parse(plan.node) : null;
+    const plan = store.lastReadyPlan(chatKey), node = effectivePlanNode(store, chatKey, plan);
     for (const x of node?.心事 ?? node?.心里压着的事 ?? []) if (x.处置 === '瞒着' && str(x.事) && str(x.对谁)) rows.push({ source: 'plan', 事: x.事, 知道: [x.谁], 不让: str(x.对谁).split(/[、,，]/).map(s => s.trim()).filter(n => people.includes(n) && n !== x.谁) });
     return rows.map(x => ({ ...x, 不让: x.不让.filter(n => !leaked.some(l => l.事 === x.事 && l.谁知道了 === n)) })).filter(x => x.不让.length);
 }

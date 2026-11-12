@@ -64,26 +64,14 @@ const unitWord = (pace, timeScale) => (timeScale ? scaleOf(timeScale).word : pac
 // 规划提示词里"这一份排多少、怎么摊"那一句（章程 H3：上一版"只排前半段最先会发生的"被读成"今天明天"，头两格挤了大半）：
 // 按节奏表摊开——这个节点跨几格（nodeSpan）、一格几件（perUnit）、至多几件（maxEvents）；单位词从这一局的时间尺度取。
 export function spreadLine(pace = null, timeScale = null) {
-    const p = paceOf(pace, timeScale), w = unitWord(pace, timeScale);
-    const one = p.nodeSpan[0] === 1 && p.nodeSpan[1] === 1;
-    const hint = p.nodeSpan[1] > 2 ? `别都压在头两${w}` : '前后摊开，别都挤在开头';
-    return `这一份排到这个节点跨的${span(p.nodeSpan)}${w}里，${one ? '排' : `每${w}`}${span(p.perUnit)}件，${hint}；至多 ${p.maxEvents} 件，排不下的等这些放完了下次再排。`;
+    const p = paceOf(pace, timeScale);
+    return `这一份只排从此刻出发、眼前几场就用得上的事，至多 ${p.maxEvents} 件；往后的事等演出了结果再排，不替未来几天排场面。约好的事、定了日子的事照日子排。`;
 }
-const SPREAD = /这一份排到这个节点跨的[^；\n]*；至多\s*\d+\s*件，排不下的等这些放完了下次再排。/;
-// 规划提示词（planner.PLAN_SYSTEM）里那一句换成这一局的节奏和尺度（中档、按天就是原样）；
-// 没有那一句的文字只把"至多 12 件"换成这一档的件数，中档原样
-export const paceCap = (note, pace, timeScale = null) => {
-    if (SPREAD.test(String(note))) return String(note).replace(SPREAD, () => spreadLine(pace, timeScale));
-    const n = paceOf(pace).maxEvents;
-    return n === TABLE[MID].maxEvents ? note : String(note).replace(/至多\s*\d+\s*件/, `至多 ${n} 件`);
-};
-// 规划简报里那一行（中档不加：提示词和以前一字不差）
+export const paceCap = (note, pace) => String(note).replace(/至多\s*\d+\s*件/, `至多 ${paceOf(pace).maxEvents} 件`);
 export function paceNote(pace, timeScale = null) {
     const p = paceOf(pace, timeScale);
     if (p.name === MID) return '';
-    const w = p.unit;
-    if (p.name === '慢') return `【这局的节奏】慢——一${w}排${span(p.perUnit)}件左右，一个主线节点跨${span(p.nodeSpan)}${w}，这个节点至多 ${p.maxEvents} 件；氛围、关系的事多些，意外少；留白多，没事的时候就让日子空着过。`;
-    return `【这局的节奏】快——一${w}排${span(p.perUnit)}件，一个主线节点一${w}之内走完；主线、意外的事多些，氛围少；留白少，事接着事来。`;
+    return p.name === '慢' ? "【这局的节奏】慢——氛围、关系的事多些，意外少；留白多，没事的时候就让日子空着过。" : "【这局的节奏】快——主线、意外的事多些，氛围少；留白少，事接着事来。";
 }
 
 // 回执、面板上的半句

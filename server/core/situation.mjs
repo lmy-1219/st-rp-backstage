@@ -26,7 +26,7 @@ export const SITUATION_SYSTEM = [
     '一、动向：各方按自己知道的，这一天在镜头外做了什么。只写势力、组织这一层的动作和压力（加强戒备、收缩或扩张地盘、放出风声、派人去查、换个说法、按兵不动、翻脸、找新盟友），不替【认得的人】里标了"主要"的人物做决定。一方不知道实情，就照它以为的那样行事：被瞒着的照样信、照样合作。没有缘由就不动，可以一条都没有；局势可以升温，也可以僵住、降温、反噬。至多三条。',
     '二、传开：这一天发生的事，哪些会传到谁耳朵里。要有人传、要有渠道、要花时间：在场的人转告、手下报告、内线、街面传闻、公开的消息（这个世界里说得通的那种）；越私密的越难传，传得越远越走样；没人会说出去的就不传。约定的双方、当时在场的人本来就知道，不用写。至多六条。',
     '三、托付：【托出去还没了结的事】里，由不在场的人去办的那一份，到了该办的时候（照约定里说的时间、答应了几天、【今天】是几号星期几来判断；说的是星期几、几号、几点的，没到那一刻就不写——周二下午的事，周一不出结果），这一天办得怎么样：成了、失手、变卦（他不干了或反水）、漏风（办了，但走漏了风声）。照这个人、这件事的难处和他知道的来，不一定都顺。只写那个人那一份，主角自己要做的那一份不写。结果要让谁知道（包括【主角】：主角会经什么渠道得知，比如对方来消息、有人来报信），写进"传开"，"哪件"写这件托付的编号。至多四条。',
-    '四、后续：【刚有了结果的事】、【闹大了的事】，以及这一天记下的事里会在外头引起反应的，哪件会在故事里留下后续——谁因此高兴、失望、起疑、借机、改主意、找上门、捎来话、当面提起；说好了却没办成的，等着的一方照他的性子反应（打来问、记下了、不在乎、自己找上门）。镜头外的动作写进动向或传开；要在主角这边冒出来的，写成一件"后续"：谁牵头（认得的人，或者"世界"）、题（几个字）、露面（一句看得见的事）、应答（主角那边伸手、问起时它的内容）、知情（牵头的人这时知道什么、看到什么）、来由（这件后续背后是怎么回事，一句；牵头的人不知道的也写——它只在有人追查时才露出来）、几天后（0～3）、分量（一句或半轮）。小事也算；没什么影响的不写；不写成责备，也不替主角那边做决定。【闹大了的事】是刚闹出的大动静：照谁看见了、谁会听说、离得多远、各方的性子，排一两件会回到主角这边的（找上门、捎来话、打来电话、有人当面提起），近处的当天就可以（几天后 0），远处的晚一两天；【还开着的话头】里早先担心过的事，这回对得上就照它兑现。至多三件。',
+    '四、回响：【刚有了结果的事】、【闹大了的事】，以及这一天记下的事里会在外头引起反应的，哪件会在故事里留下回响——谁因此高兴、失望、起疑、借机、改主意、打算找上门；说好了却没办成的，等着的一方照他的性子打算怎么做。每条写来源记录编号、谁、打算、知情（谁经什么渠道已经知道哪件事）、几天后（0～3）。菜单和托付结果也要沿材料里的来路指回来源记录，不编编号。打算只是可能接着排的方向，不算已经做了；镜头外已经做了的写进动向或传开。真到主角这边冒出来的那一件，由规划去写。【闹大了的事】照谁看见、谁已听到、距离和渠道保留时间差，近处可当天，远处等消息到；还没传到的不当成已经知情。【还开着的话头】这回对得上才接。没什么影响的不写，不责备，不替主角决定。至多三条。',
     '五、名声：这一天的事让谁在哪个圈子里有了名声（D-172：街面上做生意的、某个行当、某栋楼的住户、某一伙人）——他们往后怎么看他、怎么待他：开价（不敢抬价、按实价，或者反过来往上抬）、让路、巴结、躲着、找上门试试。要有人传开、圈子里真会知道；小事、没人看见的不算。"关键词"写几个能认出这个圈子的人或场面的词（两个字以上：行当、称呼、地方）。至多两条。',
     '六、旧动向：【上回还在的动向】里每一条（带编号），照这一天的情形答一句：还在（还在继续，不用多写）、停了（办完了、不了了之、对方已经和主角当面见过了、被后来的事盖过了）、变了（换了做法或有了新进展，给新的一句，外人看得到的样子也写）。拿不准就答还在。不用重新写一遍。',
     '写到开局单、世界书、账里已经有的事，时间、数目、谁、什么东西照原文写，别换说法、别改数（"将近半年里陆续……"别写成"半年前……"）：你写的会一字不差递给前台，换一个说法前台就跟着换，再被记成新的事实。',
@@ -35,7 +35,7 @@ export const SITUATION_SYSTEM = [
     ' "传开": [{"哪件": 记录编号或托付编号, "传到": "人名、势力名或主角", "渠道": "怎么传到的", "几天后": 0到7的整数, "听到的": "他听到的样子，一句；可以和实情不一样"}],',
     ' "托付": [{"哪件": 托付编号, "结果": "成了、失手、变卦、漏风之一", "发生了什么": "一句"}],',
     ' "名声": [{"谁": "有了名声的人", "在谁那儿": "哪个圈子", "怎么看": "一句", "怎么待": "往后怎么待他，一句", "关键词": [""], "缘由": [记录编号]}],',
-    ' "后续": [{"哪件": "事几、约几，或记下的事的编号", "谁": "牵头的人或世界", "题": "几个字", "露面": "一句", "应答": "...", "知情": "一句", "来由": "一句", "几天后": 0, "分量": "一句或半轮"}],',
+    ' "回响": [{"哪件": "事1", "来源记录": [1], "谁": "角色甲", "打算": "找角色乙问清资料的来由", "知情": [{"谁": "角色甲", "渠道": "角色乙当面转告", "知道": "资料已经查阅完毕"}], "几天后": 0}],',
     ' "旧动向": [{"编号": 旧动向的编号, "还在吗": "还在、停了、变了之一", "现在": "变了时写新的一句，其他留空", "外人看得到": "变了时外人能看到的样子，一句；没有就留空"}]}',
     '没有就给空数组。',
 ].join('\n');
@@ -78,14 +78,14 @@ export function situationPrompt({ day, date = '', firstDay = 1, ledgerLines = []
 // ids：这一天给过的记录编号；aware(id)：那件事当时已经知道的人（传到他们就不算传开）；
 // errands：Map(编号 → {executor, key})，托出去还没了结的事；principal：主角的名字（传到主角＝给在场的人一条"这边收到的消息"）。
 // seen：给模型的材料全文——材料里写着的名字（记录里的帮派、地名）也算认得，素材包的势力网不全（实测少了一个帮）。
-export function parseSituation(text, { known = [], main = [], ids = new Set(), aware = () => [], day = 0, errands = new Map(), principal = null, seen = '', results = new Set(), loud = new Set(), liveMoves = new Set() } = {}) {
+export function parseSituation(text, { known = [], main = [], ids = new Set(), aware = () => [], day = 0, errands = new Map(), principal = null, seen = '', results = new Set(), resultSources = new Map(), loud = new Set(), liveMoves = new Set() } = {}) {
     const s = String(text ?? '');
     const body = /```(?:json)?\s*([\s\S]*?)```/i.exec(s)?.[1] ?? /\{[\s\S]*\}/.exec(s)?.[0] ?? '';
     let obj = null;
     try { obj = JSON.parse(body); } catch { return { moves: [], spreads: [], outcomes: [], followups: [], reviews: [], dropped: [{ reason: 'not_json' }] }; }
     const knownSet = new Set(known), mainSet = new Set(main);
     const isKnown = n => knownSet.has(n) || [...knownSet].some(k => samePerson(k, n)) || (n.length >= 2 && String(seen).includes(n));
-    const dropped = [], moves = [], spreads = [], outcomes = [], followups = [], reps = [], reviews = [];
+    const dropped = [], moves = [], spreads = [], outcomes = [], followups = [], reps = [], reviews = [], echoes = [];
     // 旧动向（章程第 11 条）：回头看上回还在的动向，每条答还在、停了、变了；编号得是给过的，变了要写新的一句
     for (const x of Array.isArray(obj?.['旧动向']) ? obj['旧动向'].slice(0, 10) : []) {
         const id = Number(x?.['编号']), verdict = clip(x?.['还在吗'], 4), what = clip(x?.['现在'], 140), outside = clip(x?.['外人看得到'], 140);
@@ -156,7 +156,22 @@ export function parseSituation(text, { known = [], main = [], ids = new Set(), a
         if (followups.length >= 3) { dropped.push({ item: f, reason: '一天至多三件后续' }); continue; }
         followups.push({ source, who, title, surface, respond, know, ...(origin ? { origin } : {}), afterDays: after >= 0 && after <= 3 ? after : 0, weight: /半轮/.test(f?.['分量'] ?? '') ? '半轮' : '一句', ...(fromLoud ? { loud: true } : {}) });
     }
-    return { moves, spreads, outcomes, followups, reps, reviews, dropped };
+    for (const row of Array.isArray(obj.回响) ? obj.回响.slice(0, 3) : []) {
+        const sourceIds = row?.来源记录, knowledge = row?.知情;
+        const who = typeof row?.谁 === 'string' ? row.谁.trim() : '';
+        const source = String(row?.哪件 ?? '').replace(/^#(?=[1-9]\d*$)/, '');
+        const linked = results.has(source) ? resultSources.get(source) : /^\d+$/.test(source) && ids.has(Number(source)) ? [Number(source)] : null;
+        if (!who || (who !== '世界' && !isKnown(who)) || typeof row?.打算 !== 'string' || !row.打算.trim()
+            || !Array.isArray(sourceIds) || !sourceIds.length || sourceIds.some(id => !Number.isSafeInteger(id) || !ids.has(id))
+            || !Array.isArray(linked) || !linked.length || sourceIds.some(id => !linked.includes(id))
+            || !Number.isInteger(row.几天后) || row.几天后 < 0 || row.几天后 > 3
+            || !Array.isArray(knowledge) || !knowledge.length || !knowledge.every(k => k && typeof k.谁 === 'string' && typeof k.渠道 === 'string' && k.渠道.trim() && typeof k.知道 === 'string' && k.知道.trim()
+                && (k.谁 === '世界' || sourceIds.every(id => aware(id).includes(k.谁)))) || !knowledge.some(k => k.谁 === who)) {
+            dropped.push({ item: row, reason: '回响来源、知情或字段不成立' }); continue;
+        }
+        echoes.push({ source, sourceIds, who, intention: row.打算.trim(), knowledge, afterDays: row.几天后 });
+    }
+    return { moves, spreads, outcomes, followups, reps, reviews, echoes, dropped };
 }
 // 名声记成一条一直算数的改变（世界那边的事：那个圈子里的人都知道，挂在推演那一刻的最后一条消息上）
 export const repRecord = (x, { storyId, anchor }) => ({ storyId, fp: anchor.fp, type: '改变', duration: '直到被改变', text: `${x.among}那儿传开了：${x.view || `${x.who}的名声`}；往后待${x.who}：${x.deal}`.slice(0, 200),
@@ -194,8 +209,6 @@ export function openSituation(db) {
     try { db.exec('alter table situation_ticks add column lag integer'); } catch {}
     const q = sql => db.prepare(sql);
     const now = () => new Date().toISOString();
-    const inTicks = (table, tickIds, extra = '') => (tickIds.length
-        ? q(`select x.*, t.day from ${table} x join situation_ticks t on t.id = x.tick_id where x.tick_id in (${tickIds.map(() => '?').join(',')}) ${extra} order by x.id`).all(...tickIds) : []);
     function putTick({ storyId, chatKey, day, anchor, raw, moves = [], spreads = [], outcomes = [], reviews = [], lag = 0 }) {
         db.exec('begin');
         try {
@@ -208,6 +221,16 @@ export function openSituation(db) {
             return id;
         } catch (error) { db.exec('rollback'); throw error; }
     }
+    function setDelivered(id, recordId) { q('update situation_spreads set record_id = ? where id = ?').run(recordId, id); }
+    function setOutcomeRecord(id, recordId) { q('update situation_outcomes set record_id = ? where id = ?').run(recordId, id); }
+    return { ...situationReader(db), putTick, setDelivered, setOutcomeRecord };
+}
+
+// 规划只读现有推演，不建表、不补跑世界。
+export function situationReader(db) {
+    const q = sql => db.prepare(sql);
+    const inTicks = (table, tickIds, extra = '') => (tickIds.length
+        ? q(`select x.*, t.day from ${table} x join situation_ticks t on t.id = x.tick_id where x.tick_id in (${tickIds.map(() => '?').join(',')}) ${extra} order by x.id`).all(...tickIds) : []);
     // 这个窗口看得见的推演：挂的那条消息还在它的序列里（删到那条之前、换到没有它的分支，就当没推过）。
     function ticksFor(storyId, fps) {
         return q('select * from situation_ticks where story_id = ? order by id').all(storyId).filter(t => fps.has(t.anchor_fp));
@@ -216,9 +239,7 @@ export function openSituation(db) {
     const reviewsOf = tickIds => inTicks('situation_move_reviews', tickIds);
     const spreadsOf = tickIds => inTicks('situation_spreads', tickIds);
     const outcomesOf = tickIds => inTicks('situation_outcomes', tickIds);
-    function setDelivered(id, recordId) { q('update situation_spreads set record_id = ? where id = ?').run(recordId, id); }
-    function setOutcomeRecord(id, recordId) { q('update situation_outcomes set record_id = ? where id = ?').run(recordId, id); }
-    return { putTick, ticksFor, movesOf, reviewsOf, spreadsOf, outcomesOf, setDelivered, setOutcomeRecord };
+    return { ticksFor, movesOf, reviewsOf, spreadsOf, outcomesOf };
 }
 
 // 一条动向还作不作数（章程第 11 条：推出来的每一样都有过期；读时判，不改库）。收法三种：
@@ -337,4 +358,31 @@ export function situationSlotLines(now, { name, today, records, dayOf, notices =
     if (heard.length) lines.push(`${name}最近听说的（传到${personWord(name)}耳朵里的样子，不一定是实情；提不提、信不信由${name}）：`, ...heard.map(s => `· ${tidy(s.heard)}（${s.channel}）`));
     // 外面的动静：前一天、今天的，而且挂的那条离现在不到 MOVE_WINDOW 条（剧情日走得慢时，同一条不要挂几百条消息）
     return lines;
+}
+
+// 回响只是候选信号，复用推演关联 meta；不写正文记录或菜单。
+export function saveEchoes(store, records, chatKey, echoes, { anchor, day, tickId = null }) {
+    if (!echoes?.length) return;
+    const key = `situation_echoes:${chatKey}`;
+    let old;
+    try { old = JSON.parse(store.getMeta(key) ?? '[]'); } catch { store.logEvent?.(chatKey, 'echo_invalid_log', {}); return; }
+    if (!Array.isArray(old)) return;
+    const visible = records.visible(chatKey);
+    const fresh = echoes.flatMap((e, i) => {
+        const sources = e.sourceIds.map(id => visible.find(r => r.id === id));
+        return sources.every(Boolean) ? [{ ...e, id: `${tickId ?? anchor.fp}:${i}`, anchor, due: day + e.afterDays,
+            sources: sources.map(r => ({ id: r.id, text: r.raw_text ?? r.text, fp: r.fp, pos: r.pos })) }] : [];
+    });
+    store.setMeta(key, JSON.stringify([...old, ...fresh.filter(e => !old.some(x => x.id === e.id))]));
+}
+export function dueEchoes(store, records, chatKey, today) {
+    let rows;
+    try { rows = JSON.parse(store.getMeta?.(`situation_echoes:${chatKey}`) ?? '[]'); } catch { return []; }
+    if (!Array.isArray(rows)) return [];
+    const messages = store.currentMessages(chatKey), visible = records.visible(chatKey);
+    let evaluated = [];
+    try { evaluated = JSON.parse(store.getMeta?.(`plan_eval:${chatKey}`) ?? '{}').echoesDone ?? []; } catch {}
+    return rows.filter(e => e.due <= today && messages.some(m => m.pos === e.anchor?.pos && m.fp === e.anchor?.fp)
+        && Array.isArray(e.sources) && e.sources.length && e.sources.every(s => visible.some(r => r.id === s.id && r.fp === s.fp && (r.raw_text ?? r.text) === s.text))
+        && !evaluated.some(x => x.key === JSON.stringify(e) && messages.some(m => m.pos === x.at?.pos && m.fp === x.at?.fp)));
 }

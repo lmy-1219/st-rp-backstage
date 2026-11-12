@@ -29,7 +29,6 @@ const tidy = t => String(t ?? '').trim();
 const read = (store, key, fallback) => { try { return JSON.parse(store.getMeta?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
 export const SHOWN_KEY = chatKey => `guide_shown:${chatKey}`;
 export const PICKS_KEY = chatKey => `guide_picks:${chatKey}`;
-export const REFILL_KEY = planId => `guide_refill:${planId}`;
 
 // ── 新事 ──────────────────────────────────────────────
 // events：[{ pos, fp, kind }]，调用方按当前消息核过的（见 eventsOf）。返回最近一件新事的位置（没有就 -1）。

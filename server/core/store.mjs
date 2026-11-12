@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { liveEpisodes } from './episodes.mjs';
 import { liveAnchors } from './landing.mjs';
+import { identifyNode, menuVerification } from './held.mjs';
 
 // 这几种重新规划（玩家转向、弄断、局面变了）交回以后，旧节点里还在口袋里的事一并撤下（menuOf），要用的规划者重写进新的事件（用户 10/4）。
 export const RETIRES_POCKET = new Set(['turn', 'broken', 'shift']);
@@ -1195,11 +1196,18 @@ export function openStore(file) {
         const happened = new Set(rows.filter(r => r.type === '做' && fromJson(r.matter)?.menu === cause.id && !fromJson(r.matter)?.kind).map(r => r.id));
         return rows.find(r => r.type === '了结' && r.outcome && happened.has(r.idea_ref)) ?? null;
     }
+    function putMenuContract(id, item) {
+        if (item.contract === 1) setMeta(`menu_contract:${id}`, JSON.stringify({ version: 1, conditions: item.conditions ?? [] }));
+    }
+    function recordEvidenceLive(chatKey, record) {
+        const current = causeFor(chatKey, { type: 'record', id: record?.id });
+        return !!current && current.text === record.text && current.fp === record.fp;
+    }
     // 交回的菜单落账。旧菜单里还没放出来的由新菜单接手（见 menuOf），口袋里那一样留着。
     // crew、romance、gaps（章程 K1）：规划交回的"主角团""感情线""口子"，存进 node（node.主角团、node.感情线、node.口子；没写的不加这一格）
     // keyPeople（用户 10/12，M 数据约定第 2 条）：规划交回的"要紧的人"（主角团以外有自己打算的，带心思），存进 node.要紧的人；没写的不加这一格
     function submitPlanCore(id, { goal, node: planNode = null, items: offeredItems, bringNext, raw, dropped = [], olds = [], warnings = [], crew = [], keyPeople = [], romance = '', gaps = [], intimateProgress = [] }, rerollOf = null) {
-        const node = planNode ? { ...planNode, ...(crew?.length ? { 主角团: crew } : {}), ...(keyPeople?.length ? { 要紧的人: keyPeople } : {}), ...(romance ? { 感情线: romance } : {}), ...(gaps?.length ? { 口子: gaps } : {}) } : null;
+        const node = planNode ? identifyNode({ ...planNode, ...(crew?.length ? { 主角团: crew } : {}), ...(keyPeople?.length ? { 要紧的人: keyPeople } : {}), ...(romance ? { 感情线: romance } : {}), ...(gaps?.length ? { 口子: gaps } : {}) }, id) : null;
         const plan = planById(id);
         if (!plan) throw new Error('no_such_plan');
         if (plan.status !== 'requested' || !stillWanted(plan)) throw Object.assign(new Error('plan_withdrawn'), { status: 409 });
@@ -1220,11 +1228,11 @@ export function openStore(file) {
         const before = menuOf(plan.chat_key, view);
         const rerolled = rerollOf ? menuOf(plan.chat_key, { ...view, all: true }).filter(m => chain.has(m.plan_id) && ['waiting','pocket'].includes(m.status)) : [];
         const open = before.filter(m => !chain.has(m.plan_id) && m.plan_id !== id && (m.status === 'waiting' || m.status === 'pocket'));
-        const offeredTitle = t => offeredItems.find(n => nameOf(n.title) === nameOf(t)) ?? offeredItems.find(n => bare(n.title) === bare(t));
+        const offeredTitle = t => { const hits = offeredItems.filter(n => typeof t === 'string' && t.trim() && n.title === t); return hits.length === 1 ? hits[0] : null; };
         const answer = new Map();   // 旧件 id → { how, by }
         const unmatched = [];
         for (const o of olds ?? []) {
-            const hits = open.filter(m => bare(m.title) === bare(o.title));
+            const hits = open.filter(m => Number.isSafeInteger(o.id) ? m.id === o.id : bare(m.title) === bare(o.title));
             if (!hits.length) { unmatched.push(`「${o.title}」（${o.how}）`); continue; }
             const by = o.how === '换' ? offeredTitle(o.to) : null;
             if (o.how === '换' && !by) { unmatched.push(`「${o.title}」换成「${o.to}」，那件没收下`); continue; }
@@ -1238,16 +1246,15 @@ export function openStore(file) {
         const retire = RETIRES_POCKET.has(plan.reason);
         const stays = m => follow(m) || m.kept_pos != null || answer.get(m.id)?.how === '留';   // 换了规划也留着的：局势排的后续、规划者留下的
         const alive = before.filter(m => !chain.has(m.plan_id) && ((m.status === 'pocket' && (stays(m) || !retire)) || (m.status === 'waiting' && stays(m))));
-        const items = [], replaced = [];
+        const items = [];
         for (const n of offeredItems) {
             // 撤了、换了的旧件不算活着（换的那件就是接替它的，照收）；答了留的，新件和它同一拍子就不收（说了留，又写了一遍）
             const old = alive.find(o => sameBeat(o, n) && !['撤', '换'].includes(answer.get(o.id)?.how));
-            if (old && (old.status === 'pocket' || answer.get(old.id)?.how === '留')) { log(plan.chat_key, 'plan_dropped', { plan: id, items: [`「${n.title}」和${old.status === 'pocket' ? '口袋里' : '留下'}的「${old.title}」是同一拍子（${old.line}／${old.purpose}），不收`] }); continue; }
+            if (old) { log(plan.chat_key, 'plan_dropped', { plan: id, items: [`「${n.title}」和${old.status === 'pocket' ? '口袋里' : '留下'}的「${old.title}」是同一拍子（${old.line}／${old.purpose}），不收`] }); continue; }
             // 答了留的旧件，新件和它同题、或题互相包含又是同一个人牵头（章程 H5：说了留，又换条线、换个用意重写一遍）：新件不收
             const keptOld = open.find(o => answer.get(o.id)?.how === '留'
                 && (bare(o.title) === bare(n.title) || (near(bare(o.title), bare(n.title)) && nameOf(o.who) === nameOf(n.who))));
             if (keptOld) { log(plan.chat_key, 'plan_dropped', { plan: id, items: [`「${n.title}」留的旧件已有（「${keptOld.title}」），不收`] }); continue; }
-            if (old) replaced.push({ old, by: n });
             items.push(n);
         }
         const removedTitles = [...offeredItems.filter(m => !items.includes(m)).map(m => m.title),
@@ -1264,19 +1271,17 @@ export function openStore(file) {
         // "推完以后的读数"排上了，"三天后的读数"还挂在门上）。这一步记在要这份规划的那条消息上：那条删了，规划退了，旧件也回来
         // 只看新规划落账以后还留着的旧件（旧规划没放出来的本来就由新规划接手，见 menuOf；这里收的是还挂着的口袋、局势排的后续）
         // 规划者答过的旧件照它的答办，不再按这条猜
-        const overtakenBy = old => items.find(n => nameOf(n.who) && nameOf(n.who) === nameOf(old.who)
-            && ((nameOf(n.line) && nameOf(n.line) === nameOf(old.line)) || near(nameOf(n.title), nameOf(old.title))));
         (rerollOf ? (fn => fn()) : tx)(() => {
             const ins = q(`insert into menu(plan_id, chat_key, who, title, surface, respond, sink, fit, weight, know, line, after_title, motif, promise_ref, offscreen, ready_day, updated_at, entry, place, goer, errand, origin, signpost, cause_ref, entry_basis, ${CELL_COLS}) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${CELL_MARKS})`);
-            for (const m of items) ins.run(id, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, plan.story_day + m.afterDays, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, causeFor(plan.chat_key, m.cause) ? JSON.stringify(m.cause) : null, m.entryBasis ? JSON.stringify(m.entryBasis) : null, ...cellValues(m));
+            for (const m of items) {
+                const itemId = ins.run(id, plan.chat_key, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, plan.story_day + m.afterDays, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, causeFor(plan.chat_key, m.cause) ? JSON.stringify(m.cause) : null, m.entryBasis ? JSON.stringify(m.entryBasis) : null, ...cellValues(m)).lastInsertRowid;
+                if (m.showCondition) setMeta(`menu_condition:${itemId}`, String(m.showCondition).slice(0, 120));
+                putMenuContract(itemId, m);
+            }
             q("update plans set status = 'ready', goal = ?, node = ?, bring_next = ?, raw = ?, ready_at = ? where id = ?").run(goal ?? null, node ? JSON.stringify(node) : null, JSON.stringify(bringNext ?? []), raw ?? null, now(), id);
             q('update notes set used_in_plan = ? where chat_key = ? and kind = ? and used_in_plan is null').run(id, plan.chat_key, '聊');
             if (items.length) putIntimateProgress(plan.chat_key, intimateProgress, { planId: id, storyDay: plan.story_day });
         });
-        for (const { old, by } of plan.anchor_pos == null ? [] : replaced.filter(r => items.includes(r.by))) {
-            updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', byPlan: id, why: `新规划里同一拍子的「${by.title}」替换了它`, at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
-            log(plan.chat_key, 'menu_void', { id: old.id, title: old.title, plan: id, why: `同一拍子（${old.line}／${old.purpose}）新规划又写了一回「${by.title}」，留新的，旧的「${old.title}」收了` });
-        }
         // 照规划者的答办：撤 → 撤下；换 → 旧件撤下（接替它的那件上面照收了）；留 → 不动——旧规划里还排着的本来由新规划接手（menuOf），
         // 答了留的记一步"留下"，换了规划也接着排。都记在要这份规划的那条消息上：那条删了，规划退了，这几步也跟着不算
         const at = { pos: plan.anchor_pos, fp: plan.anchor_fp };
@@ -1287,11 +1292,6 @@ export function openStore(file) {
             const why = how === '撤' ? '规划者撤的' : `规划者换成了「${by.title}」`;
             updateMenu(plan.chat_key, oldId, { status: 'void', by: '规划', byPlan: id, why, at });
             log(plan.chat_key, 'menu_void', { id: oldId, title: old?.title ?? '', plan: id, why });
-        }
-        const left = plan.anchor_pos == null ? [] : menuOf(plan.chat_key).filter(m => !chain.has(m.plan_id) && m.plan_id !== id && (m.status === 'waiting' || m.status === 'pocket') && !answer.has(m.id));
-        for (const { old, by } of left.map(old => ({ old, by: overtakenBy(old) })).filter(x => x.by)) {
-            updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', byPlan: id, why: `新规划给${old.who}排了后续「${by.title}」`, at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
-            log(plan.chat_key, 'menu_void', { id: old.id, title: old.title, plan: id, why: `新规划给${old.who}排了后续「${by.title}」${nameOf(by.line) && nameOf(by.line) === nameOf(old.line) ? `（同一条线：${old.line}）` : ''}，旧的「${old.title}」收了` });
         }
         if (rerollOf) {
             for (const old of rerolled) updateMenu(plan.chat_key, old.id, { status: 'void', by: '规划', byPlan: id, why: '被重新规划替换', at: { pos: plan.anchor_pos, fp: plan.anchor_fp } });
@@ -1314,6 +1314,8 @@ export function openStore(file) {
             for (const m of items) {
                 const id = ins.run(planId, chatKey, m.who, m.title, m.surface, m.respond, m.sink || null, m.fit || null, m.weight || null, m.know || null, m.line || null, m.after || null, m.motif || null, m.promiseRef ?? null, m.offscreen ? 1 : 0, storyDay + m.afterDays, at.pos, at.fp, now(), m.entry ?? null, m.place || null, m.goer || null, m.errand || null, m.origin || null, m.signpost || null, causeFor(chatKey, m.cause) ? JSON.stringify(m.cause) : null, m.entryBasis ? JSON.stringify(m.entryBasis) : null, ...cellValues(m)).lastInsertRowid;
                 if (source) setMeta(`event_source:${id}`, JSON.stringify(source));
+                if (m.showCondition) setMeta(`menu_condition:${id}`, String(m.showCondition).slice(0, 120));
+                putMenuContract(id, m);
             }
             if (items.length) putIntimateProgress(chatKey, intimateProgress, { planId, storyDay, at });
         });
@@ -1383,10 +1385,31 @@ export function openStore(file) {
         const ids = plans.map(p => p.id), marks = ids.map(() => '?').join(', ');
         const items = q(`select * from menu where plan_id in (${marks}) order by id`).all(...ids)
             .filter(m => menuItemLive(chatKey, m, h));
-        const steps = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids)
-            .filter(s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && basisLive(chatKey, s.pos, s.story_day, s.basis_part) && replied(s));
+        for (const m of items) readMenuCondition(chatKey, m, plans.find(p => p.id === m.plan_id));
+        const messages = currentMessages(chatKey);
+        const strict = a => a && Number.isInteger(a.pos) && (a.pos === -1 ? a.fp == null : !!a.fp && messages.some(m => m.pos === a.pos && m.fp === a.fp));
+        const logs = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids);
+        const proofs = new Map(logs.map(s => [s.id, fromJson(getMeta(`menu_proof:${s.id}`))]));
+        const baseLive = s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && basisLive(chatKey, s.pos, s.story_day, s.basis_part) && replied(s);
+        const conditionLive = (s, p) => {
+            const item = items.find(m => m.id === s.item_id), source = item?.sourceAt;
+            return p?.condition === true && s.status === 'shown' && strict(p.evidence) && p.evidence.pos >= 0
+                && s.pos === p.evidence.pos && s.fp === p.evidence.fp && strict(p.source)
+                && source && p.source.pos === source.pos && p.source.fp === source.fp && p.evidence.pos > source.pos;
+        };
+        const steps = logs.filter(s => {
+            if (!baseLive(s)) return false;
+            const proof = proofs.get(s.id);
+            if (!proof) return true;
+            if (proof.condition) return conditionLive(s, proof);
+            const parent = logs.find(p => p.id === proof.conditionStep && p.item_id === s.item_id && p.id < s.id);
+            return !!parent && baseLive(parent) && conditionLive(parent, proofs.get(parent.id));
+        });
         for (const m of items) {
             readCells(m);
+            const contract = fromJson(getMeta(`menu_contract:${m.id}`));
+            if (contract?.version === 1) { m.contract = 1; m.conditions = contract.conditions; }
+            if (m.showCondition) m.conditionSteps = steps.filter(s => s.item_id === m.id && proofs.get(s.id)?.condition).map(s => s.id);
             m.cause = causeFor(chatKey, fromJson(m.cause_ref)) ? fromJson(m.cause_ref) : null;
             m.entryBasis = fromJson(m.entry_basis);
             if (all) { const stopped = steps.filter(s => s.item_id === m.id && s.why?.startsWith('/停：')).at(-1); if (stopped) m.intimate_stop = { pos: stopped.pos, fp: stopped.fp }; }
@@ -1396,12 +1419,15 @@ export function openStore(file) {
             // pocket_by：谁把它放进口袋的（"引子"＝活动快到了替它挂上门的；门上按它判引子自己到点没，T073）
             for (const s of steps) if (s.item_id === m.id && s.status === 'offered') Object.assign(m, { held_by: s.by_name, held_pos: s.pos });
             else if (s.item_id === m.id && s.status === KEPT) m.kept_pos = s.pos;
-            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_step: null, pocket_by: null, held_by: null, held_pos: null, settled_step: null, settled_pos: null, settled_by: null, settled_day: null, early_why: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_step: s.id, pocket_by: s.by_name ?? null, early_why: s.by_name === '兴头' ? s.why ?? null : m.early_why } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_step: s.id, settled_by: s.by_name ?? null, settled_day: s.story_day } : {});
+            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null, conditionStep: s.status === 'shown' && proofs.get(s.id)?.condition ? s.id : null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_step: null, pocket_by: null, held_by: null, held_pos: null, settled_step: null, settled_pos: null, settled_by: null, settled_day: null, early_why: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_step: s.id, pocket_by: s.by_name ?? null, early_why: s.by_name === '兴头' ? s.why ?? null : m.early_why } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_step: s.id, settled_by: s.by_name ?? null, settled_day: s.story_day } : {});
             // offered_n（T077）：递出过几次——按不同消息位置去重（同一楼换人开口、左滑重来只算一次）；没递过的件不加这个字段
             // 退回 waiting 的那一步（/停 撤回、重新规划）把这件重新算起：撤掉的递送没成，不计
             const offeredAt = new Set();
             for (const s of steps) if (s.item_id === m.id) { if (s.status === 'waiting') offeredAt.clear(); else if (s.status === 'offered') offeredAt.add(s.pos); }
             if (offeredAt.size) m.offered_n = offeredAt.size;
+            m.verification = menuVerification({ getMeta, setMeta, currentMessages, requireChat, setupOf, recordEvidenceLive, readyPlans, lastReadyPlan }, chatKey, m);
+            if (['办完了', '前提没了'].includes(m.verification.state)) { m.beforeVerification = m.status; m.status = 'void'; }
+            else if (m.verification.state === '演过了' && ['waiting', 'pocket'].includes(m.status)) m.status = 'shown';
         }
         const active = plans.filter(p => !replaced.has(p.id)).at(-1);
         const current = active?.id;
@@ -1418,12 +1444,21 @@ export function openStore(file) {
         const source = getMeta(`event_source:${m.id}`);
         return (m.anchor_pos == null || h.sees(m.chat_key, m.anchor_pos, m.anchor_fp)) && (!source || sourceLive(chatKey, fromJson(source)));
     }
+    function readMenuCondition(chatKey, m, plan) {
+        const condition = getMeta(`menu_condition:${m.id}`);
+        if (!condition) return;
+        m.showCondition = condition;
+        const pos = m.anchor_pos ?? plan?.anchor_pos;
+        // 补件用自己的锚点；普通件用规划锚点。继承关系仍由原来的 menuItemLive/plansOf 管。
+        const current = currentMessages(chatKey).find(x => x.pos === pos);
+        m.sourceAt = pos === -1 ? { pos: -1, fp: null } : current ? { pos, fp: current.fp } : null;
+    }
     function planItems(chatKey, planIds = []) {
         const ids = planIds.filter(Number.isInteger);
         if (!ids.length) return [];
         const h = historyOf(chatKey);
         return q(`select * from menu where plan_id in (${ids.map(() => '?').join(', ')}) order by id`).all(...ids)
-            .filter(m => menuItemLive(chatKey, m, h)).map(m => { readCells(m); m.entryBasis = fromJson(m.entry_basis); return m; });
+            .filter(m => menuItemLive(chatKey, m, h)).map(m => { readCells(m); readMenuCondition(chatKey, m, planById(m.plan_id)); m.entryBasis = fromJson(m.entry_basis); return m; });
     }
     // 菜单日志走到哪了；某一步之后拿出来、交出去过的那几件（碰上的事从启用那一刻起算，旧的不补，matters.mjs）
     // 菜单项改挂到另一条消息上（landing.relinkArrivals：进场时顺带排的那件挂到他那条回复上）。返回动了几件
@@ -1446,8 +1481,14 @@ export function openStore(file) {
             if (last && last.status === 'offered' && last.pos === at.pos && last.fp === at.fp && (last.by_name ?? null) === (patch.by ?? null)) return;
         }
         // pending：交给某人那一格里的一步，等他那条回复（见 menuOf）；只有写了是谁的才等
-        q('insert into menu_log(chat_key, item_id, status, story_day, basis_part, pos, fp, by_name, pending, why, created_at, by_plan) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-            .run(chatKey, id, patch.status, patch.pocket_day ?? patch.basisDay ?? null, patch.basisPart ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now(), Number.isSafeInteger(patch.byPlan) && patch.byPlan > 0 ? patch.byPlan : null);
+        const write = () => {
+            const stepId = q('insert into menu_log(chat_key, item_id, status, story_day, basis_part, pos, fp, by_name, pending, why, created_at, by_plan) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                .run(chatKey, id, patch.status, patch.pocket_day ?? patch.basisDay ?? null, patch.basisPart ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now(), Number.isSafeInteger(patch.byPlan) && patch.byPlan > 0 ? patch.byPlan : null).lastInsertRowid;
+            if (patch.conditionProof) setMeta(`menu_proof:${stepId}`, JSON.stringify(patch.conditionProof));
+            else if (patch.conditionStep) setMeta(`menu_proof:${stepId}`, JSON.stringify({ conditionStep: patch.conditionStep }));
+        };
+        // 重排落账已经在事务里；沿用它，避免另开嵌套事务。
+        if (db.isTransaction) write(); else tx(write);
     }
 
     // ---------- 外援（API 没响应时交给桌面应用里的 AI 窗口做的活） ----------
@@ -1547,5 +1588,5 @@ export function openStore(file) {
         };
     }
 
-    return { setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    return { recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

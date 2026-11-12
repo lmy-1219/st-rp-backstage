@@ -42,6 +42,29 @@ export const DANGLING = /[这那](?:条|个)(?:规矩|要求|约定)|[这那]条
 export const REF_OPEN = '（指的是';
 export const bareText = t => { const i = String(t ?? '').indexOf(REF_OPEN); return i < 0 ? String(t ?? '') : String(t).slice(0, i); };
 
+// 正文与来源共用片段；截断只切这份序列，不再按成品字符串反推来源。
+// 符号属性不进入 JSON。来源可指向另一份片段序列（证实依据），由同一收口展开。
+export const TEXT_PARTS = Symbol('record text parts');
+export const partsText = parts => parts.map(p => p.text).join('');
+export const materialSources = row => [row, row?.source, row?.sourceAt, ...(row?.known ?? []).map(k => k?.basis)].filter(Boolean);
+export const recordParts = row => row?.[TEXT_PARTS] ?? [{ text: String(typeof row === 'object' && row !== null ? row.text ?? '' : row ?? ''), sources: materialSources(row) }];
+export function sliceParts(parts, limit = Infinity) {
+    const out = [];
+    let left = limit;
+    for (const part of parts) {
+        if (left <= 0) break;
+        const text = part.text.slice(0, left);
+        if (text) out.push({ text, sources: part.sources });
+        left -= text.length;
+    }
+    return out;
+}
+export function partsSources(parts, seen = new Set()) {
+    if (seen.has(parts)) return [];
+    seen.add(parts);
+    return parts.flatMap(p => p.text ? p.sources.flatMap(s => s?.parts ? partsSources(s.parts, seen) : [s]) : []);
+}
+
 // 两句话说的是不是同一件事：两字组重合的比例（按短的那句算）。
 export function similar(a, b) {
     const grams = s => { const t = String(s ?? '').replace(/[\s\p{P}]/gu, ''); const out = new Set(); for (let i = 0; i < t.length - 1; i++) out.add(t.slice(i, i + 2)); return out; };
@@ -244,21 +267,52 @@ export function openRecords(db) {
         if (status !== 'ok') return out;
         const { closed, answered, superseded, outgoing } = linksOf(chatKey, rawBasis, through);
         const byId = new Map(out.map(r => [r.id, r]));
-        const targetOf = id => byId.get(id) ?? q('select id, text, holder_name from records where id = ?').get(id) ?? null;
+        const targetOf = id => {
+            if (byId.has(id)) return byId.get(id);
+            const row = q('select id, text, fp, known, holder_name from records where id = ?').get(id);
+            return row ? { ...row, known: row.known ? JSON.parse(row.known) : [] } : null;
+        };
+        const proofs = [];
+        for (const r of out) Object.defineProperty(r, TEXT_PARTS, { value: recordParts(r) });
         for (const r of out) {
             Object.defineProperty(r, 'raw_text', { value: r.text });
             // 只说了"这条规矩他认""那件事她答应了"的（用户 10/8：前台看不出认的是哪条，规矩的内容和这句分开给，会误会）：
             // 它接上的那条（回答、改掉……）就是"这条"，读出来带上那条说的是什么
             const ref = DANGLING.test(r.text) ? (outgoing.get(r.id) ?? []).map(l => targetOf(l.to)).find(Boolean) : null;
             if (ref) Object.defineProperty(r, 'ref_id', { value: ref.id });
-            if (ref) { r.refers = ref.id; r.text = `${r.text}${REF_OPEN}${ref.holder_name ?? ''}那句：${String(ref.text).replace(/[。．.]+$/, '').slice(0, 80)}）`; }
+            if (ref) {
+                r.refers = ref.id;
+                const refParts = recordParts(ref);
+                const length = String(ref.text).replace(/[。．.]+$/, '').length;
+                r[TEXT_PARTS].push({ text: `${REF_OPEN}${ref.holder_name ?? ''}那句：`, sources: materialSources(ref) },
+                    ...sliceParts(refParts, Math.min(80, length)), { text: '）', sources: [] });
+            }
             if (closed.has(r.id)) r.closed_by = closed.get(r.id);
             if (answered.has(r.id)) r.answered_by = answered.get(r.id);
             if (superseded.has(r.id)) r.superseded_by = superseded.get(r.id);
             // 猜的（用户 10/7：防住猜测被当成真的）：读出来就带着这是谁猜的——没人证实过的要他拿不准先问；证实了标出来；被否定的跟改掉一样不再给
-            if (r.guess) r.text = `${r.text}${r.closed_by?.kind === '证实' ? `（${r.holder_name ?? '他'}猜的，后来证实了）` : `（这是${r.holder_name ?? '他'}猜的，没人证实过——拿不准就先问一句，别当成真的）`}`;
+            if (r.guess) {
+                const sources = materialSources(r), confirmed = r.closed_by?.kind === '证实';
+                if (confirmed) proofs.push({ id: r.closed_by.id, sources });
+                r[TEXT_PARTS].push({ text: confirmed ? `（${r.holder_name ?? '他'}猜的，后来证实了）`
+                    : `（这是${r.holder_name ?? '他'}猜的，没人证实过——拿不准就先问一句，别当成真的）`, sources });
+            }
+            r.text = partsText(r[TEXT_PARTS]);
+        }
+        // 证实账可能排在猜测之后；引用共享来源容器，等同一轮正文生成完再接上其完整依据。
+        for (const proof of proofs) {
+            const row = byId.get(proof.id) ?? sourceRecord(chatKey, proof.id);
+            if (row) proof.sources.push({ parts: recordParts(row) });
         }
         return all ? out : out.filter(r => !r.superseded_by);
+    }
+
+    // 仅供材料追溯来源；旧账已不可见时仍返回保存的指纹，不能把失效来源当成没有来源。
+    function sourceRecord(chatKey, id) {
+        const current = visible(chatKey, { all: true, rawBasis: true }).find(r => r.id === id);
+        if (current) return current;
+        const row = q('select r.id, r.fp, r.known from records r join chats c on c.story_id = r.story_id where c.key = ? and r.id = ?').get(chatKey, id);
+        return row ? { ...row, known: row.known ? JSON.parse(row.known) : [] } : null;
     }
 
     // 看得见的了结和链接：关上了谁（了结、回答）、换掉了谁（改掉）。只认发起那条记录还看得见的。
@@ -444,5 +498,5 @@ export function openRecords(db) {
         q('update chats set extract = ? where key = ?').run(on ? 1 : 0, chatKey);
     }
 
-    return { setSourceLive, setPromise, correct, isDone, startJob, setServed, failJob, finishJob, replaceJobRecords, spentToday, spentTodayOn, logAssemble, assembleCalls, visible, openIdeas, openTodos, jobs, failures, recentFailures, skipped, unskip, skip, retireDerived, setKeys, setWide, setExtract, addDerived, seedsAt, retire, moveDerived };
+    return { sourceRecord, setSourceLive, setPromise, correct, isDone, startJob, setServed, failJob, finishJob, replaceJobRecords, spentToday, spentTodayOn, logAssemble, assembleCalls, visible, openIdeas, openTodos, jobs, failures, recentFailures, skipped, unskip, skip, retireDerived, setKeys, setWide, setExtract, addDerived, seedsAt, retire, moveDerived };
 }

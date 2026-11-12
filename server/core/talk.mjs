@@ -156,6 +156,10 @@ export function createTalk({ store, records, context, client, log = () => {}, pl
                 store.addNote({ chatKey, kind: p.kind === 'plan' ? '聊' : '玩', text: p.text, storyDay: s.today, pos: s.lastPos });
                 if (p.kind === 'plan') plan(chatKey);
             }
+            if (['fix', 'void', 'fact', 'play'].includes(p.kind)) {
+                const key = `correction_rev:${chat.story_id}`;
+                store.setMeta(key, String((Number(store.getRawMeta(key)) || 0) + 1));
+            }
             p.status = 'done';
         }
         save(chatKey, v);

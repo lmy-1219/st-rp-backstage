@@ -8,6 +8,49 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { extractZip, ZIP_MAX_BYTES } from './zip.mjs';
 import { readLocal } from './local.mjs';
+import { loadPriceTable } from './pricing.mjs';
+import { loadSeeds } from './world.mjs';
+import { loadAnchors, indexAnchors } from './years.mjs';
+import { loadFactionNet } from './factions.mjs';
+import { loadFacts } from './facts.mjs';
+
+// 读一局用的素材包（从 main 挪来，T118：回放工具也要同一份）。
+// 价表、种子表按路径和改动时间缓存，改了文件自动重读。
+// 素材包按局选（D-104，T-22：换个题材不能带出别的题材的价码、时事、年表、专名）。meta pack:<局> 记这一局用 素材包/ 下哪个目录；
+// 没选就什么都不给。包里的文件都可有可无：物价.json、年表/时事种子.csv、年表/纪年锚点.json、专名对照表.csv；整个目录当参谋的开卷资料。
+// dir：配置里的 packs.dir（调用方每次现读配置传进来）
+export const packsDirOf = ({ home, repo, dir }) => (dir === '素材包' ? path.join(home, '素材包') : path.resolve(repo, dir));
+const packRoots = ({ home, repo, dir }) => [...new Set([packsDirOf({ home, repo, dir }), path.resolve(repo, dir), path.join(repo, '素材包')])];
+const packFiles = new Map();
+const cachedFile = (file, load) => {
+    if (!file) return null;
+    let key = null;
+    try { key = `${file}@${fs.statSync(file).mtimeMs}`; } catch { return null; }
+    const hit = packFiles.get(file);
+    if (hit?.key === key) return hit.value;
+    const value = load(file);
+    packFiles.set(file, { key, value });
+    return value;
+};
+export function listPacks(opts) {
+    return [...new Set(packRoots(opts).flatMap(dir => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name); } catch { return []; } }))];
+}
+export function packFor(store, chatKey, opts) {
+    let storyId = null;
+    try { storyId = store.requireChat(chatKey).story_id; } catch { return null; }
+    const name = store.getMeta(`pack:${storyId}`);
+    if (!name || !listPacks(opts).includes(name)) return null;
+    const dir = packRoots(opts).map(root => path.join(root, name)).find(d => { try { return fs.statSync(d).isDirectory(); } catch { return false; } });
+    const file = rel => (fs.existsSync(path.join(dir, rel)) ? path.join(dir, rel) : null);
+    return {
+        name, dir, nameTable: file('专名对照表.csv'),
+        table: cachedFile(file('物价.json'), loadPriceTable),
+        seeds: cachedFile(file('年表/时事种子.csv'), loadSeeds),
+        anchors: cachedFile(file('年表/纪年锚点.json'), f => indexAnchors(loadAnchors(f))),
+        factions: cachedFile(file('势力网.json'), loadFactionNet),
+        facts: cachedFile(file('常识.json'), loadFacts),
+    };
+}
 
 const MANIFEST = ['开局包.json', 'opening-pack.json'];
 

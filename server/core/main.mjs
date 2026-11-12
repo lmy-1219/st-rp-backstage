@@ -1,3 +1,4 @@
+import { effectivePlanNode } from './held.mjs';
 import { renderPronouns, playerContext } from './pronoun.mjs';
 // 启动本机后台：node --disable-warning=ExperimentalWarning core/main.mjs [--home 目录] [--port 端口]
 // 数据默认放在仓库的 .runtime/core/（不进仓）。
@@ -8,7 +9,7 @@ import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { openStore, fingerprint, planFailure, freshAncestorIn } from './store.mjs';
-import { openRecords } from './records.mjs';
+import { openRecords, TEXT_PARTS, recordParts, materialSources, sliceParts, partsText, partsSources } from './records.mjs';
 import { loadConfig } from './config.mjs';
 import { createStagesAdmin } from './stages.mjs';
 import { addFaces } from './cast.mjs';
@@ -24,21 +25,17 @@ import { createTuning } from './tuning.mjs';
 import { checkRelease, applyRelease } from './update.mjs';
 import { createWorker } from './worker.mjs';
 import { createAssembler, createKeyMaker } from './assemble.mjs';
-import { loadPriceTable } from './pricing.mjs';
-import { loadSeeds } from './world.mjs';
-import { loadFactionNet } from './factions.mjs';
-import { loadFacts } from './facts.mjs';
-import { openSituation, SITUATION_SYSTEM, parseSituation, recordOutcomes, repRecord } from './situation.mjs';
-import { loadAnchors, indexAnchors, planYearFlags, yearFlagText } from './years.mjs';
+import { openSituation, SITUATION_SYSTEM, parseSituation, recordOutcomes, repRecord, saveEchoes } from './situation.mjs';
+import { planYearFlags, yearFlagText } from './years.mjs';
 import { storyYear } from './world.mjs';
-import { turnWorth, planRetryDue } from './planner.mjs';   // 转向检查先程序初筛（10/16）；规划连不上自己再试（T074）
-import { NOW_MOTIF, PLAN_SYSTEM, withIntimate, API_PLAN_NOTE, placePrep, parsePlan, verifiedPlanSourceIds, NODE_CHECK_SYSTEM, nodeCheckPrompt, parseNodeCheck, TURN_CHECK_SYSTEM, turnCheckPrompt, parseTurnCheck, premiseWaiting, premiseVoids, mindReasons } from './planner.mjs';
+import { turnWorth, planRetryDue, verificationSnapshot, commitVerification, signalEvaluation, evaluationState, saveEvaluation, evaluationBasis, facesForItems, retryKnob } from './planner.mjs';   // 转向检查先程序初筛（10/16）；规划连不上自己再试（T074）
+import { NOW_MOTIF, PLAN_SYSTEM, API_PLAN_NOTE, placePrep, parsePlan, verifiedPlanSourceIds, NODE_CHECK_SYSTEM, nodeCheckPrompt, parseNodeCheck, TURN_CHECK_SYSTEM, turnCheckPrompt, parseTurnCheck, premiseWaiting, premiseVoids, mindReasons } from './planner.mjs';
 import { planRoster, normalizeRelations, personOf, leaderOf } from './relations.mjs';
 import { ARRIVAL_SYSTEM, arrivalPrompt, parseArrival, groundedArrivalReason, lastLeave, awaySpan, validAwayPlan, LEAVE_SYSTEM, leavePrompt, parseLeave, isRemote, metInPerson, justLeft, openNow } from './arrival.mjs';
 import { enteredSince, landSent } from './landing.mjs';
 import { intentRecord, closeIntents } from './matters.mjs';
 import { SETTLE_SYSTEM, settlePrompt, parseSettle } from './settle.mjs';
-import { crewOf, crewEntry, latestNode, crewPushDue, pushedMeta, pushKey, pushText } from './crew.mjs';
+import { crewOf, crewEntry, latestNode, crewPushDue, pushedMeta, pushKey, pushText, effectiveNode } from './crew.mjs';
 import { secretCandidates, recordSecretLeaks, activeLeaks, secretLeakLines } from './held.mjs';
 import { bodyGate, holdBodyContact, heldContactText } from './body.mjs';
 import { ASK_SYSTEM, askPrompt, parseAsk, knownFor, exchangeRecords, INFORM_SYSTEM, informPrompt, parseInform } from './offstage.mjs';
@@ -49,7 +46,7 @@ import { unansweredLine, promisesFor, pullOf, placeNow } from './waiting.mjs';
 import { doorFor } from './door.mjs';
 import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFor, autoLeave, markLeft, waitingKnock, pendingKnock, knocksOf, sourceStep, recentLapsed, leaveDoubts, answerLeaves, cameDoubts, answerCame, takePendingLeft, acknowledgeLeaves, KNOCK_JUDGE_SYSTEM, knockJudgePrompt, parseKnockJudge } from './auto.mjs';   // 自动进离场与调度（D-201）
 import { pendingFor } from './pending.mjs';
-import { planBrief, planningView, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimateSetup, intimatePlanOptions } from './slot.mjs';
+import { beatBrief, planningInput, completePlanningBeat, receivePlanningCheck, planningCheckBasis, planBrief, planningView, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimatePlanOptions } from './slot.mjs';
 import { AWAY_SYSTEM, AWAY_REVISE_SYSTEM, parseAway, awayPrompt, revisePrompt, pinNames, actualDaysOf } from './away.mjs';
 import { FRESH_SYSTEM, freshPrompt, staleSpans, applyFresh, freshAnswerValid, voiceOf, PREVIOUS } from './fresh.mjs';
 import { STAY_SYSTEM, stayPrompt, parseStay, applyStay } from './stay.mjs';
@@ -64,12 +61,11 @@ import { LORE_SYSTEM, lorePrompt, parseLore, LORE_VERSION, loreBatch, loreTried,
 import { createMaterials, createRelationsDrafts, LOOK_SYSTEM, lookPrompt, parseLook, RELATIONS_SYSTEM } from './materials.mjs';
 import { weekOf, rollLong, activeLong, LONG_SYSTEM, longPrompt, parseLong } from './drift.mjs';
 import { briefSection } from './setup.mjs';
-import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stablePlanEdge, stateBlock, timelineFor, confirmedDayFor, settledBy, CAMERA_NAME, scaleFor, paceFor, pastNodesOf, RECENT_NODES, sofarOf } from './slot.mjs';
-import { paceCap } from './tempo.mjs';
+import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stablePlanEdge, stateBlock, timelineFor, confirmedDayFor, settledBy, CAMERA_NAME, scaleFor, pastNodesOf, RECENT_NODES, sofarOf, planSystemOf } from './slot.mjs';
 import { withTaste } from './taste.mjs';   // 模型口味层：规划、检查的通用底后面按型号补几句口味（用户 10/15）
-import { planSystem } from './planner.mjs';
 import { extractSystem } from './extract.mjs';
 import { bindPromptEnvironment, promptOptionsFor } from './prompt-slots.mjs';
+import { packFor, packsDirOf, listPacks as listPacksIn } from './pack-import.mjs';
 import { renderPacket } from './handoff.mjs';
 import { dayNumber } from './timeline.mjs';
 import { EPISODE_SYSTEM, episodePrompt, parseEpisodes, spanOf, coveredUpTo } from './episodes.mjs';
@@ -149,7 +145,7 @@ const advisorNote = id => (advisor.ready() ? [
 // strict：年份和年表对不上就退回让写的人改（窗口写的）；调 API 写的没人能改，照收并记一笔。
 const planOptions = chatKey => intimatePlanOptions(store, chatKey, planRoster(store, store.requireChat(chatKey).story_id, { chatKey }));
 const planSourceIds = (chatKey, brief, through = null) => verifiedPlanSourceIds(store, records, chatKey, brief, through);
-const planSystemFor = (chatKey, model, config) => { const options = promptOptionsFor(store, chatKey, config); return renderPronouns(withIntimate(withTaste(paceCap(planSystem(options), paceFor(store, chatKey)), { ...options, kind: 'plan', model }), intimateSetup(store, chatKey), options), playerContext(store, chatKey)); };
+const planSystemFor = (chatKey, model, config, options) => planSystemOf(store, chatKey, model, config, options);
 const requirePlanAttempt = id => { if (!store.ownsPlanAttempt(id)) throw Object.assign(new Error('plan_late：迟到作废'), { status: 409 }); };
 const observePlanAttempt = id => {
     const previous = store.planAttemptTimings(id);
@@ -172,7 +168,7 @@ const applyPlan = (planId, text, { strict = true, strictFormat = false, attempt 
     requirePlanAttempt(attempt);
     store.updatePlanAttempt(attempt, { stage: '解析', outputChars: text.length });
     const chat = store.requireChat(plan.chat_key);
-    const parsed = parsePlan(text, { ...planOptions(plan.chat_key), strictFormat, sourceIds: planSourceIds(plan.chat_key, plan.brief, plan.anchor_pos) });
+    const parsed = parsePlan(text, { ...planOptions(plan.chat_key), mode: 'full', strictFormat, sourceIds: planSourceIds(plan.chat_key, plan.brief, plan.anchor_pos) });
     if (!parsed.items.length) throw Object.assign(new Error(`规划里的事一件都没过：${parsed.dropped.map(d => d.reason).join('；')}`), { status: 400 });
     const anchors = packOf(plan.chat_key)?.anchors;
     const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(chat.story_id)?.data).map(yearFlagText) : [];
@@ -182,12 +178,14 @@ const applyPlan = (planId, text, { strict = true, strictFormat = false, attempt 
     if (parsed.warnings?.length) log(`plan ${planId} warnings: ${parsed.warnings.join('；')}`);   // 只提醒、不退件（章程 H5：头一格太密）
     requirePlanAttempt(attempt);
     store.updatePlanAttempt(attempt, { stage: '落账' });
+    const before = new Set(store.menuOf(plan.chat_key).map(m => m.id));
     store.submitPlan(plan.id, { ...parsed, raw: text });
-    const faces = addFaces(store, chat.story_id, parsed.faces);
+    const stored = store.menuOf(plan.chat_key).filter(m => !before.has(m.id) && m.plan_id === plan.id);
+    const faces = addFaces(store, chat.story_id, facesForItems(parsed.faces, stored));
     if (faces.length) log(`plan ${planId} new faces: ${faces.join('、')}`);
     extendSofar(plan.chat_key).catch(error => log(`story so far ${plan.chat_key} failed: ${error.message}`));   // 章程 H4：之前的节点多了，更早的并成一段大意
     if (own) store.finishPlanAttempt(attempt);
-    return { goal: parsed.goal, items: parsed.items.length, dropped: [...parsed.dropped.map(d => d.reason), ...(parsed.warnings ?? [])], years };
+    return { goal: parsed.goal, items: stored.length, dropped: [...parsed.dropped.map(d => d.reason), ...(parsed.warnings ?? [])], years };
     } catch (error) {
         if (own) { const failure = planFailure(error); store.finishPlanAttempt(attempt, { status: failure === 'late' ? 'late' : 'failed', failure }); }
         throw error;
@@ -524,32 +522,76 @@ async function turnMemo({ chatKey, verdict, thread }) {
 // 玩家的角色提了新想法（记账记下来的）：便宜模型看一眼是不是认真要长期去做的新方向、对不对得上哪条储备线。是就记下判定，
 // 下一次开口时重新规划（needsPlan → 'turn'）。不排外援：调不通就算了，下一个想法再看；/聊 和面板也能手动要。
 // changes：这份规划之后新记下的关系变化、一直算数的改变（谁的都算）——看规划设想的局面还成不成立（用户 10/4）。
-async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [], acts = [], outside = [], at = null }) {
+async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [], acts = [], outside = [], at = null, verification: requestedVerification = false, basis = null }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), a = cfg.stages.judge, p = cfg.planner;
-    if (!p.judge || !a.baseUrl || !a.apiKey || !p.judgeModel || !(ideas.length || others.length || changes.length || acts.length || outside.length)) return;
-    if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) return;
+    if (!p.judge || !a.baseUrl || !a.apiKey || !p.judgeModel || (!requestedVerification && !(ideas.length || others.length || changes.length || acts.length || outside.length))) return { skipped: true };
+    if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) return { skipped: true };
     // 程序初筛（planner.turnWorth；面板能关）：筛掉的这一轮不问，记录照样算看过（slot 那边已经记了）
-    if (p.turnScreen) {
+    if (p.turnScreen && !requestedVerification) {
         const lastPos = at?.pos ?? store.currentMessages(chatKey).at(-1)?.pos ?? 0;
         const w = turnWorth({ ideas, others, changes, acts, outside, lastPos, actsAt: store.getMeta(`turn_acts_at:${chatKey}`) });
         if (!w.worth) { log(`plan ${planId} turn check skipped: ${w.why}`); return; }
         if (w.actsOnly) store.setMeta(`turn_acts_at:${chatKey}`, String(lastPos));
     }
     const plan = store.planById(planId);
-    const node = plan?.node ? JSON.parse(plan.node) : null;
+    const nodeText = plan?.node;
+    const originalNode = nodeText ? JSON.parse(nodeText) : null;
+    const messagesAtRequest = store.currentMessages(chatKey).map(m => ({ pos: m.pos, fp: m.fp }));
+    let revisions = [];
+    try { revisions = JSON.parse(store.getMeta(`mind_stale:${planId}`) ?? '[]'); } catch {}
+    const node = effectiveNode(originalNode, revisions, { store, chatKey, planId, messages: messagesAtRequest });
+    const reasons = mindReasons(node);
     const setup = store.setupOf(store.requireChat(chatKey).story_id)?.data ?? null;
     const started = Date.now();
     // 还等着的事连前提（章程 F1）：本来就要跑这一问，顺带看前提还在不在；不另加调用
     const waiting = premiseWaiting(store.menuOf(chatKey));
-    const checkedAt = at ?? store.currentMessages(chatKey).at(-1);
-    const completed = nodeCheckLines(store, records, chatKey, planId, checkedAt?.pos);
+    const tipAtRequest = at ?? messagesAtRequest.at(-1);
+    const checkedAt = tipAtRequest ? { pos: tipAtRequest.pos, fp: tipAtRequest.fp } : null;
+    const evidence = [];
+    let invalidMaterial = false;
+    const onEvidence = (row, parts) => {
+        const sources = partsSources(parts).flatMap(r => {
+            // 普通件沿用规划锚点，补件有自己的锚点；旧件没有露面条件时也有这份既存来源。
+            const anchor = r?.anchor_pos != null ? r : r?.plan_id != null ? store.planById(r.plan_id) : null;
+            return [r, anchor && { pos: anchor.anchor_pos, fp: anchor.anchor_fp }];
+        }).filter(s => s?.fp || (Number.isInteger(s?.pos) && s.pos >= 0));
+        if (!sources.length) log(`plan ${planId} turn material has no message source`);
+        for (const source of sources) {
+            const m = messagesAtRequest.find(m => (!Number.isInteger(source.pos) || m.pos === source.pos) && (!source.fp || m.fp === source.fp));
+            if (!m) {
+                invalidMaterial = true;
+                log(`plan ${planId} turn material source is no longer live`);
+            } else if (!evidence.some(a => a.pos === m.pos && a.fp === m.fp)) evidence.push({ pos: m.pos, fp: m.fp });
+        }
+    };
+    // 阶段事实在组装时就保留来源，200 字正文与随后 240 字整行截断都切同一序列。
+    const stage = storyContext(store, records, chatKey, { through: checkedAt?.pos });
+    const completed = stage.visible.filter(r => r.pos > (plan?.anchor_pos ?? -1) && r.type !== '时间').slice(-60).map(r => {
+        const parts = [{ text: `· ${stage.when(r)} ${r.holder_name ?? r.holder}：`, sources: materialSources(r) },
+            ...sliceParts(recordParts(r), 200)];
+        return { ...r, raw_text: r.raw_text ?? r.text, text: partsText(parts), [TEXT_PARTS]: parts };
+    });
+    const verification = verificationSnapshot(store, records, chatKey, planId, checkedAt?.pos);
+    const prompt = turnCheckPrompt({ node, reserve: setup?.储备线 ?? [], main: setup?.主线 ?? [], ideas, others, changes, acts, outside, waiting, completed, onEvidence, verification });
+    // 已知来源失效的材料不能送出；没有历史来源的材料仍按兼容路径处理。
+    if (invalidMaterial) return;
     try {
-        const r = await createModelClient({ ...a, maxOutputTokens: 400 })
-            .complete({ system: withTaste(TURN_CHECK_SYSTEM, { kind: 'judge', model: a.model ?? p.judgeModel, config: cfg }), user: turnCheckPrompt({ node, reserve: setup?.储备线 ?? [], main: setup?.主线 ?? [], ideas, others, changes, acts, outside, waiting, completed }) });
+        const r = await createModelClient({ ...a, maxOutputTokens: Math.min(8000, 1200 + 250 * (verification.menu.length + verification.hearts.length)) })
+            .complete({ system: withTaste(TURN_CHECK_SYSTEM, { kind: 'judge', model: a.model ?? p.judgeModel, config: cfg }), user: prompt });
+        const currentMessages = store.currentMessages(chatKey);
+        const staleReply = store.lastReadyPlan(chatKey)?.id !== planId || store.lastPlan(chatKey)?.id !== planId
+            || store.planById(planId)?.node !== nodeText
+            || !checkedAt
+            || ![checkedAt, ...evidence].every(a => currentMessages.some(m => m.pos === a.pos && m.fp === a.fp));
         const costUsd = ((r.usage?.input ?? 0) * p.judgePriceInPerM + (r.usage?.output ?? 0) * p.judgePriceOutPerM) / 1e6;
+        // 先完成有效性核对。失效回包仍记实际用量，但不再产生剧情侧副作用。
         records.logAssemble({ chatKey, speaker: '(转向检查)', model: p.judgeModel, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
         const v = parseTurnCheck(r.text);
+        const beforeCommit = basis && planningInput(store, records, chatKey, { through: stablePlanEdge(currentMessages)?.pos ?? -1 });
+        const sameInput = beforeCommit && evaluationBasis(beforeCommit.snapshot, beforeCommit.scene) === basis;
+        receivePlanningCheck(store, chatKey, verification, v, { at: checkedAt, completed, verdict: !staleReply });
+        if (staleReply) return;
         const done = v.done && !!node?.算成 && completed.length > 0;
         log(`plan ${planId} turn check on ${[...ideas, ...others, ...changes, ...acts].map(i => i.id).join(',')}: ${v.turn ? '转向' : v.broke ? '弄断' : done ? '算成' : v.shift ? '局面变了' : '没有'}${v.thread ? `（${v.thread}）` : ''}${v.why ? `（${v.why}）` : ''}${v.idea ? `；念头：${v.idea.who}——${v.idea.what}` : ''}${v.loud ? `；发酵：${v.loud.ids.join(',')}（${v.loud.why}）` : ''}`);
         // 闹出了大动静（D-170，用户 10/6）：不等换天，当场让局势跑一次——各方动起来、消息传开、给玩家这边排一两件后续。一个剧情时段至多一次
@@ -559,12 +601,7 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
         if (v.loud && !outside.length && cfg.situation.enabled) loudSituation({ chatKey, ids: loudIds.length ? loudIds : acts.map(r => r.id), why: v.loud.why }).catch(error => log(`situation (loud) failed: ${error.message}`));
         // 结论挂在调用前固定的证据快照上；回包时由共用入口校验，不能改挂到后来消息上。
         const tip = checkedAt;
-        // 前提没了的那几件撤掉，记一句为什么；挂在最后一条上（删回去就回来）
-        for (const m of premiseVoids(waiting, v.gone)) {
-            if (tip) store.updateMenu(chatKey, m.id, { status: 'void', by: '转向检查', why: m.why, at: { pos: tip.pos, fp: tip.fp } });
-            log(`plan ${planId} menu ${m.id}「${m.title}」void: ${m.why}`);
-        }
-        if (tip && v.stale?.ids.length) {
+        if (tip && evidence.length && v.stale?.ids.length) {
             const messages = store.currentMessages(chatKey);
             if (messages.some(m => m.pos === tip.pos && m.fp === tip.fp)) {
                 const key = `mind_stale:${planId}`;
@@ -572,13 +609,12 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
                 let previous = [];
                 try { previous = raw == null ? [] : JSON.parse(raw); } catch { previous = null; }
                 if (Array.isArray(previous)) {
-                    const live = previous.filter(x => x?.at && messages.some(m => m.pos === x.at.pos && m.fp === x.at.fp));
-                    const reasons = mindReasons(node);
                     const fresh = v.stale.ids.map(id => reasons.find(r => r.id === id)).filter(Boolean)
-                        .filter(r => !live.some(x => x.who === r.who && x.why === r.why))
-                        .map(r => ({ who: r.who, why: r.why, at: { pos: tip.pos, fp: tip.fp }, because: v.stale.why }));
+                        .filter(r => r.why && !previous.some(x => x.who === r.who && x.why === r.why
+                            && JSON.stringify(x.at) === JSON.stringify(tip) && JSON.stringify(x.evidence) === JSON.stringify(evidence)))
+                        .map(r => ({ who: r.who, why: r.why, at: { pos: tip.pos, fp: tip.fp }, evidence, because: v.stale.why }));
                     if (fresh.length) {
-                        store.setMeta(key, JSON.stringify([...live, ...fresh]));
+                        store.setMeta(key, JSON.stringify([...previous, ...fresh]));
                         for (const r of fresh) log(`plan ${planId} mind stale: ${r.who}（${r.because}）`);
                     }
                 }
@@ -588,74 +624,76 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
         // 角色起的新念头（玩家没转向、没弄断时）：给眼下这个节点补几件，不整个重排（D-107）
         if (v.idea && !v.turn && !v.broke && !v.shift && !done) {
             const src = others.filter(r => r.holder_name === v.idea.who).at(-1) ?? others.at(-1);
-            if (src) supplement({ chatKey, planId, idea: v.idea, at: { pos: src.pos, fp: src.fp } }).catch(error => log(`plan ${planId} supplement failed: ${error.message}`));
+            if (src) signalEvaluation(store, chatKey, { kind: 'idea', idea: v.idea, at: { pos: src.pos, fp: src.fp } });
         }
-        const result = v.turn ? '转向' : v.broke ? '弄断' : done ? '算成' : v.shift ? '变了' : '还没';
-        writeNodeVerdict(store, chatKey, planId, { result, why: result === '算成' ? v.doneWhy : v.why, thread: v.thread }, checkedAt);
+        // 请求期间有新材料仍沿用旧依据；本次提交是否还需重核由生产/回放共用边界判断。
+        if (sameInput) {
+            const committed = planningInput(store, records, chatKey, { through: stablePlanEdge(store.currentMessages(chatKey))?.pos ?? -1 });
+            return { checked: planningCheckBasis(beforeCommit, committed) };
+        }
     } catch (error) {
         records.logAssemble({ chatKey, speaker: '(转向检查)', model: p.judgeModel, status: 'failed', ms: Date.now() - started, error: error.message });
     }
 }
 
-// 给眼下这个节点补几件（角色认真起了新念头，D-107）：同一份规划至多补两回；用规划那档、同一个每日上限；
-// 补进来的挂在起念头那条消息上，删到它之前就撤回。出来的事按"事件"那套核对，新面孔照样入册。
-const SUPPLEMENTS = 2;
+// 给眼下这个节点补几件：念头、停住与地点只合并评估信号；是否短拍由 advance 的同一个决定控制。
 async function supplement({ chatKey, planId, idea, at }) {
-    return addToPlan({ chatKey, planId, at, counter: `plan_supplements:${chatKey}:${planId}`, max: SUPPLEMENTS, reason: 'idea', verdict: `${idea.who}：${idea.what}`, line: `${idea.who}的念头`, label: `for ${idea.who}（${idea.what}）` });
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
+    signalEvaluation(store, chatKey, { kind: 'idea', planId, idea, at });
 }
-// 剧情走到了开局单里某条储备线写明的地方（N-293）：展开那条线，给眼下这个节点补几件此刻就能用上的；同一份规划至多两回（同一条线一个剧情日一回，slot 那边管）
-// 玩家停得够久还没新事（路标卡的 guide.stall 倍数，T077）：往眼下这个节点补几件此刻就能用上的；记号 guide_refill 由 server 管（同一份规划至多一回），
-// 这里的计数器单独走一个，不占念头、储备线的两回
 async function stallSupplement({ chatKey, planId, at }) {
-    return addToPlan({ chatKey, planId, at, counter: `plan_stall:${chatKey}:${planId}`, max: 1, reason: 'stall', verdict: '玩家连着好几轮都没有新的事情发生', line: '停住补货', label: 'stall' });
+    const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
+    signalEvaluation(store, chatKey, { kind: 'stall', planId, at });
 }
 async function placeSupplement({ chatKey, planId, line, place, at }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
-    return addToPlan({ chatKey, planId, at, counter: `plan_place:${chatKey}:${planId}`, max: SUPPLEMENTS, reason: 'place', verdict: `储备线「${line}」写明的地方到了：${place}`, thread: line, line, label: `at ${place}（${line}）` });
+    signalEvaluation(store, chatKey, { kind: 'place', planId, line, place, at });
 }
-async function addToPlan({ chatKey, planId, at, counter, max, reason, verdict, thread = null, line, label }) {
+async function addToPlan({ chatKey, planId, at, basis, input: offeredInput = null }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
-    const key = counter, done = Number(store.getMeta(key) ?? 0);
-    if (done >= max) return;
     const cfg = getConfig(), e = cfg.extractor, p = cfg.planner, s = cfg.stages.plan;
     if (p.provider !== 'api' || !s.baseUrl || !s.apiKey) return;
-    if (records.spentToday() >= e.dailyBudgetUsd || records.spentTodayOn('(规划)') >= p.budgetUsd) return;
-    const attempt = store.beginPlanAttempt(planId, { entry: 'supplement', model: s.model ?? p.model, thinks: !!(s.extraBody?.reasoning_effort || s.extraBody?.output_config?.effort), supplement: true, chatKey });
+    if (records.spentToday() >= e.dailyBudgetUsd || records.spentTodayOn('(规划)') + records.spentTodayOn('(规划·修格式)') >= p.budgetUsd) return;
+    const input = planningInput(store, records, chatKey, { present: offeredInput?.scene.here ?? null, through: offeredInput?.snapshot.through ?? at?.pos ?? null });
+    if (input.snapshot.planId !== planId || input.snapshot.requested !== planId || evaluationBasis(input.snapshot, input.scene) !== basis) return;
+    const state = evaluationState(store, chatKey);
+    if (state.empty === basis || (state.failures ?? 0) >= retryKnob(p.retryMax, 'max') || Date.now() < (state.coolUntil ?? 0)) return;
+    const attempt = store.beginPlanAttempt(planId, { entry: 'supplement', model: s.model ?? p.model, supplement: true, chatKey });
     if (!attempt) return;
-    try {
-    store.setMeta(key, String(done + 1));
-    const chat = store.requireChat(chatKey);
-    const brief = planBrief(store, records, chatKey, { reason, verdict, thread, seeds: packOf(chatKey)?.seeds ?? [], sit: cfg.situation?.enabled ? situation : null, prices: packOf(chatKey)?.table ?? null, facts: packOf(chatKey)?.facts ?? null, budget: p.briefChars, through: at?.pos ?? null });
-    store.updatePlanAttempt(attempt, { briefChars: brief.length });
     const started = Date.now();
-    // 调不通（中转掐断、没回话）：记一笔失败、这一回不算数，抛给叫它的那边（储备线到了地方那一路会过几条再试）——
-    // 以前一声不响就没了，次数却记上了（试玩 10/8：到了那个地方那一回没调通，那一天、那份规划就再也不补）
-    let r;
-    try { r = await completePlan(createModelClient({ ...e, ...s, maxOutputTokens: 6000, timeoutMs: 600000, stream: true, idleMs: 300000 }), { system: planSystemFor(chatKey, s.model ?? p.model, cfg), user: brief }, attempt); }
-    catch (error) {
-        store.setMeta(key, String(done));
-        records.logAssemble({ chatKey, speaker: '(规划)', model: p.model, status: 'failed', usage: error.usage ?? null, ms: Date.now() - started, error: error.message });
-        log(`plan ${planId} supplement ${label} failed: ${error.message}`);
+    store.setMeta(`plan_attempt_context:${attempt}`, JSON.stringify({ mode: 'beat', basis }));
+    try {
+        const brief = beatBrief(store, records, chatKey, input);
+        store.updatePlanAttempt(attempt, { briefChars: brief.length });
+        const r = await completePlan(createModelClient({ ...e, ...s, maxOutputTokens: 6000, timeoutMs: 600000, stream: true, idleMs: 300000 }),
+            { system: planSystemFor(chatKey, s.model ?? p.model, cfg, { mode: 'beat' }), user: brief }, attempt);
+        const costUsd = ((r.usage?.input ?? 0) * p.priceInPerM + (r.usage?.output ?? 0) * p.priceOutPerM) / 1e6;
+        records.logAssemble({ chatKey, speaker: '(规划)', model: p.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
+        requirePlanAttempt(attempt);
+        const current = planningInput(store, records, chatKey, { through: Math.max(input.snapshot.through, stablePlanEdge(store.currentMessages(chatKey))?.pos ?? -1) });
+        if (store.lastPlan(chatKey)?.id !== planId || current.snapshot.requested !== planId || evaluationState(store, chatKey).basis !== basis || evaluationBasis(current.snapshot, current.scene) !== basis
+            || !input.context.messages.slice(-6).every(a => store.currentMessages(chatKey).some(m => m.pos === a.pos && m.fp === a.fp))) throw new Error('plan_late：短拍依据已变');
+        store.updatePlanAttempt(attempt, { ...r.telemetry, stage: '解析', outputChars: r.text.length });
+        const parsed = parsePlan(r.text, { ...planOptions(chatKey), mode: 'beat', sourceIds: planSourceIds(chatKey, brief, at?.pos ?? null) });
+        if (!parsed.ok) { store.savePlanPartial(attempt, { partial: r.text, kind: 'format' }); throw new Error(parsed.failure); }
+        if (!parsed.empty) {
+            const before = new Set(store.menuOf(chatKey).map(m => m.id));
+            store.appendMenu(planId, parsed.items, { chatKey, storyDay: input.scene.today, at });
+            const stored = store.menuOf(chatKey).filter(m => !before.has(m.id));
+            addFaces(store, store.requireChat(chatKey).story_id, facesForItems(parsed.faces, stored));
+        }
+        store.setMeta(`plan_attempt_context:${attempt}`, JSON.stringify({ mode: 'beat', basis, empty: parsed.empty }));
+        completePlanningBeat(store, records, chatKey, input, parsed.empty);
+        store.finishPlanAttempt(attempt);
+    } catch (error) {
+        const failure = planFailure(error), current = evaluationState(store, chatKey);
+        store.finishPlanAttempt(attempt, { ...error.telemetry, status: failure === 'late' ? 'late' : 'failed', failure });
+        if (failure !== 'late') {
+            saveEvaluation(store, chatKey, { failures: (current.failures ?? 0) + 1, coolUntil: Date.now() + retryKnob(p.retryGapMin, 'gapMin') * 60000, failure: error.message });
+            records.logAssemble({ chatKey, speaker: '(规划)', model: p.model, status: 'failed', usage: error.usage ?? null, ms: Date.now() - started, error: error.message });
+        }
         throw error;
     }
-    const costUsd = ((r.usage?.input ?? 0) * p.priceInPerM + (r.usage?.output ?? 0) * p.priceOutPerM) / 1e6;
-    records.logAssemble({ chatKey, speaker: '(规划)', model: p.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
-    requirePlanAttempt(attempt);
-    store.updatePlanAttempt(attempt, { ...r.telemetry, stage: '解析', outputChars: r.text.length });
-    const parsed = parsePlan(r.text, { ...planOptions(chatKey), sourceIds: planSourceIds(chatKey, brief, at?.pos ?? null) });
-    // 到了那个地方补的、当天就用的：此刻就在那儿才用得上，不排在口袋里别的事后头（按"当下"放：到了就进口袋、不占份数，先递）——
-    // 试玩 10/9：吧台那几件补进来以后，口袋被两件别处的事占满，一直进不来
-    const items = parsed.items.slice(0, 4).map(m => ({ ...m, line: m.line || line, ...(reason === 'place' && !(m.afterDays > 0) ? { motif: NOW_MOTIF } : {}) }));
-    if (!items.length) { store.finishPlanAttempt(attempt, { status: 'failed', failure: 'bad_answer' }); log(`plan ${planId} supplement ${label}: nothing passed (${parsed.dropped.map(d => d.reason).join('；')})`); return; }
-    const today = storyContext(store, records, chatKey, { through: at?.pos ?? null }).today;
-    requirePlanAttempt(attempt);
-    store.updatePlanAttempt(attempt, { stage: '落账' });
-    store.appendMenu(planId, items, { chatKey, storyDay: today, at, intimateProgress: parsed.intimateProgress,
-        removedTitles: [...parsed.items.slice(4).map(m => m.title), ...(parsed.dropped ?? []).filter(d => !d.kept).map(d => d.item?.title ?? d.item?.['题']).filter(Boolean)] });
-    addFaces(store, chat.story_id, parsed.faces);
-    log(`plan ${planId} supplement ${label}: ${items.map(m => m.title).join('、')} $${costUsd.toFixed(3)}`);
-    store.finishPlanAttempt(attempt);
-    } catch (error) { const failure = planFailure(error); store.finishPlanAttempt(attempt, { ...error.telemetry, status: failure === 'late' ? 'late' : 'failed', failure }); throw error; }
 }
 
 // 兴头（D-109 第 2 步，scene.mjs）：进来一条新的角色回复，看一眼场面。每条只看一次；
@@ -1774,7 +1812,7 @@ async function checkNode({ chatKey, planId, at = null }) {
     if (!p.judge || !a.baseUrl || !a.apiKey || !p.judgeModel) return;
     if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) return;
     const plan = store.planById(planId);
-    const node = plan?.node ? JSON.parse(plan.node) : null;
+    const node = effectivePlanNode(store, chatKey, plan);
     if (!node?.目标) return;
     const checkedAt = at ?? store.currentMessages(chatKey).at(-1);
     const lines = nodeCheckLines(store, records, chatKey, planId, checkedAt?.pos);
@@ -1836,38 +1874,13 @@ async function situationOnce({ chatKey, day, loud = null, skip = null }) {
         const costUsd = ((r.usage?.input ?? 0) * a.priceInPerM + (r.usage?.output ?? 0) * a.priceOutPerM) / 1e6;
         const v = parseSituation(r.text, { ...m.check, day, seen: m.prompt });
         const lag = skip && !skip.lumped ? Math.max(0, skip.toDay - day) : 0;
-        situation.putTick({ storyId: m.storyId, chatKey, day, anchor: m.anchor, raw: r.text, moves: v.moves, spreads: v.spreads, outcomes: v.outcomes, reviews: v.reviews, lag });
+        const tickId = situation.putTick({ storyId: m.storyId, chatKey, day, anchor: m.anchor, raw: r.text, moves: v.moves, spreads: v.spreads, outcomes: v.outcomes, reviews: v.reviews, lag });
         const addSituation = data => records.addDerived({ ...data, known: [...(data.known ?? []), { basis: { pos: m.anchor.pos, fp: m.anchor.fp, day: day + lag, exact: true } }] });
         recordOutcomes(situation, v.outcomes, { anchor: m.anchor, storyId: m.storyId, addRecord: addSituation, errands: m.errands });
         for (const x of v.reps ?? []) addSituation(repRecord(x, { storyId: m.storyId, anchor: m.anchor }));
-        // 后续（N-268：事事有着落）：刚有了结果的事留下的后续，补进眼下这个节点（挂在推演那条消息上，删到它之前就撤回），由合适的人挑时候拿出来
-        const plan = store.lastReadyPlan(chatKey);
-        if (v.followups.length && plan) {
-            const visible = records.visible(chatKey);
-            const causeOf = source => {
-                if (/^事[1-9]\d*$/.test(source)) return { type: 'menu_result', id: Number(source.slice(1)) };
-                if (/^约[1-9]\d*$/.test(source)) {
-                    const result = visible.find(r => r.type === '了结' && r.idea_ref === Number(source.slice(1)) && r.outcome);
-                    return result ? { type: 'record', id: result.id } : null;
-                }
-                return /^[1-9]\d*$/.test(source) ? { type: 'record', id: Number(source) } : null;
-            };
-            store.appendMenu(plan.id, v.followups.map(f => ({ who: f.who, title: f.title, surface: f.surface, respond: f.respond, sink: null, fit: null, weight: f.weight, know: f.know || null, origin: f.origin || null, cause: causeOf(f.source), line: '后续', after: null, motif: f.loud ? NOW_MOTIF : '后续', afterDays: f.afterDays })), { chatKey, storyDay: day, at: m.anchor });
-            log(`situation ${chatKey} day ${day}: follow-ups ${v.followups.map(f => `${f.source}→${f.who}「${f.title}」`).join('、')}`);
-        }
-        // 镜头外有了动静（D-171，用户 10/6："发酵有了但整体规划反而落后"）：让每轮那次检查看一眼，规划设想的局面还成不成立；不成立就照常重新规划
-        if (plan && (v.moves.length || v.spreads.length) && cfg.planner.provider !== 'off') {
-            const outside = [...v.moves.map(x => `${x.who}：${x.what}${x.seen ? `（外面看得到：${x.seen}）` : ''}`), ...v.spreads.map(x => `${x.heard}（传到${x.target}，${x.channel}）`)];
-            const at = stablePlanEdge(store.currentMessages(chatKey));
-            if (at && m.anchor?.pos <= at.pos) checkTurn({ chatKey, planId: plan.id, outside, at }).catch(error => log(`plan ${plan.id} outside check failed: ${error.message}`));
-            else if (m.anchor?.fp) {
-                const key = `plan_outside_wait:${chatKey}`;
-                let pending = [];
-                try { pending = JSON.parse(store.getMeta(key) ?? '[]'); } catch {}
-                if (!Array.isArray(pending)) pending = [];
-                store.setMeta(key, JSON.stringify([...pending, { planId: plan.id, at: m.anchor, outside }].slice(-4)));
-            }
-        }
+        saveEchoes(store, records, chatKey, v.echoes, { anchor: m.anchor, day, tickId });
+        if (v.moves.length || v.spreads.length || v.echoes?.length)
+            signalEvaluation(store, chatKey, { kind: 'world', at: m.anchor, tickId });
         records.logAssemble({ chatKey, speaker: '(局势)', model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, lines: v.moves.length + v.spreads.length + v.outcomes.length + v.followups.length, dropped: v.dropped.length, raw: r.text });
         log(`situation ${chatKey} day ${day}${loud ? ' (loud)' : ''}${skip ? ` (skip ${skip.nth}/${skip.of})` : ''}: ${v.moves.length} move(s), ${v.spreads.length} spread(s), ${v.followups.length} follow-up(s), ${v.reps?.length ?? 0} name(s), ${v.reviews?.length ?? 0} old move review(s)${v.dropped.length ? `, dropped ${v.dropped.map(d => d.reason).join('; ')}` : ''}`);
     } catch (error) {
@@ -1988,42 +2001,11 @@ function planAutoRetryRound(store, handoffs, planRetryOrigins, cfg = getConfig()
 }
 setInterval(() => planAutoRetryRound(store, handoffs, planRetryOrigins), 60 * 1000).unref();
 
-// 价表、种子表按路径和改动时间缓存，改了文件自动重读。
-// 素材包按局选（D-104，T-22：换个题材不能带出别的题材的价码、时事、年表、专名）。meta pack:<局> 记这一局用 素材包/ 下哪个目录；
-// 没选就什么都不给（以前 config 里 economy.priceTable、world.*、advisor.library／nameTable 是全局的，每一局都拿同一个包——不再用）。
-// 包里的文件都可有可无：物价.json、年表/时事种子.csv、年表/纪年锚点.json、专名对照表.csv；整个目录当参谋的开卷资料。
-const packsDir = () => { const configured = loadConfig(home).packs.dir; return configured === '素材包' ? path.join(home, '素材包') : path.resolve(repo, configured); };
-const packRoots = () => [...new Set([packsDir(), path.resolve(repo, loadConfig(home).packs.dir), path.join(repo, '素材包')])];
-const packFiles = new Map();
-const cachedFile = (file, load) => {
-    if (!file) return null;
-    let key = null;
-    try { key = `${file}@${fs.statSync(file).mtimeMs}`; } catch { return null; }
-    const hit = packFiles.get(file);
-    if (hit?.key === key) return hit.value;
-    const value = load(file);
-    packFiles.set(file, { key, value });
-    return value;
-};
-function listPacks() {
-    return [...new Set(packRoots().flatMap(dir => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name); } catch { return []; } }))];
-}
-function packOf(chatKey) {
-    let storyId = null;
-    try { storyId = store.requireChat(chatKey).story_id; } catch { return null; }
-    const name = store.getMeta(`pack:${storyId}`);
-    if (!name || !listPacks().includes(name)) return null;
-    const dir = packRoots().map(root => path.join(root, name)).find(d => { try { return fs.statSync(d).isDirectory(); } catch { return false; } });
-    const file = rel => (fs.existsSync(path.join(dir, rel)) ? path.join(dir, rel) : null);
-    return {
-        name, dir, nameTable: file('专名对照表.csv'),
-        table: cachedFile(file('物价.json'), loadPriceTable),
-        seeds: cachedFile(file('年表/时事种子.csv'), loadSeeds),
-        anchors: cachedFile(file('年表/纪年锚点.json'), f => indexAnchors(loadAnchors(f))),
-        factions: cachedFile(file('势力网.json'), loadFactionNet),
-        facts: cachedFile(file('常识.json'), loadFacts),
-    };
-}
+// 素材包（按局选、文件缓存）的读法在 pack-import.mjs（T118 挪过去，回放工具共用）；这里每次现读配置里的 packs.dir。
+function packOpts() { return { home, repo, dir: loadConfig(home).packs.dir }; }
+function packsDir() { return packsDirOf(packOpts()); }
+function listPacks() { return listPacksIn(packOpts()); }
+function packOf(chatKey) { return packFor(store, chatKey, packOpts()); }
 // 跟后台说话（N-104）：用"跟后台说话"那一环节（不另选就是记账那档）；带着这一局的设定、此刻、和那句话有关的记录。
 const talk = createTalk({
     store, records, log,
@@ -2203,7 +2185,7 @@ async function autoAnswer({ chatKey, who, answer }) {
 const settings = () => {
     const config = loadConfig(home);
     const split = { ...config.extractor, ...config.stages.setup };
-    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, guide: config.guide, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onPlace: placeSupplement, onStall: stallSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, seeds: chatKey => packOf(chatKey)?.seeds ?? [], prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation: config.situation.enabled ? situation : null }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null, inform: informAway } };
+    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, guide: config.guide, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onBeat: addToPlan, onPlace: placeSupplement, onStall: stallSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, seeds: chatKey => packOf(chatKey)?.seeds ?? [], prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation: config.situation.enabled ? situation : null }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null, inform: informAway } };
 };
 const server = createServer(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
 server.on('error', error => {

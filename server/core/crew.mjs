@@ -10,6 +10,8 @@ import { personWord } from './pronoun.mjs';
 // 只私下递给本人（他开口时），别人那一格、旁白那一格都没有；"被识破了"那一格不递（留给规划和后续）。递之前过一道换词（tone.mjs）。
 import * as setupAll from './setup.mjs';
 import { warmWords } from './tone.mjs';
+import { effectivePlanNode } from './held.mjs';
+export { effectiveNode, liveMindRevisions } from './held.mjs';
 
 const tidy = x => String(x ?? '').trim().replace(/[。．.；;，,\s]+$/, '');
 
@@ -33,7 +35,7 @@ export function planNode(plan) {
 // 这个窗口最新的一份规划和它的节点
 export function latestNode(store, chatKey) {
     const plan = store.lastReadyPlan?.(chatKey) ?? (store.readyPlans?.(chatKey) ?? []).at(-1) ?? null;
-    return { plan, node: planNode(plan) };
+    return { plan, node: effectivePlanNode(store, chatKey, plan) };
 }
 // 他那一份（主角团里"谁"是他的那一项）
 export function crewEntry(node, who, same = (a, b) => a === b) {

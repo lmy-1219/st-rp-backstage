@@ -52,7 +52,17 @@ export function createWorker({ store, records, getConfig, clientFactory = create
         } catch { return () => []; }
     };
     const markShown = (chatKey, shown = [], voided = []) => {
-        for (const s of shown) store.updateMenu(chatKey, s.id, { status: 'shown', at: { pos: s.pos, fp: s.fp } });
+        // 同一回包内各条引文独立成立；落第一条shown不能使后续证据失去候选身份。
+        const candidates = pocketOf(chatKey);
+        for (const s of shown) {
+            if (s.conditionProof) {
+                const messages = store.currentMessages(chatKey), p = s.conditionProof;
+                const item = candidates.find(m => m.id === s.id);
+                if (!item || item.showCondition !== p.conditionText || JSON.stringify(item.sourceAt) !== JSON.stringify(p.source)
+                    || !messages.some(m => m.pos === s.pos && m.fp === s.fp)) continue;
+            }
+            store.updateMenu(chatKey, s.id, { status: 'shown', at: { pos: s.pos, fp: s.fp }, ...(s.conditionProof ? { conditionProof: s.conditionProof } : {}) });
+        }
         for (const v of voided) { store.updateMenu(chatKey, v.id, { status: 'void', why: v.why, at: { pos: v.pos, fp: v.fp } }); log(`menu ${v.id} void at ${v.pos}: ${v.why}`); }
     };
 

@@ -82,6 +82,7 @@ export const SYSTEM_PROMPT = `你在给一部长篇角色扮演做"记账"。这
 一个人对他没亲眼见到的事的猜测，永远不要记成那件事本身——要么照"猜的"记成"某某猜……"，要么不记。
 
 另外，"口袋里的事"是幕后排好、由角色挑时候拿出来的事（有的已经在口袋里，有的还排着没到时候）。要记的消息里如果有角色把一件"在口袋里"的拿了出来（照着它做了、说了、让它发生了；只是字面沾边不算；"还排着"的不算露面），另输出一条 {"消息号": 数字, "型": "露面", "对应": "袋编号"}；
+带"露面条件"的件，不管在口袋里还是还排着，正文（角色的，或玩家亲口叙述的实际行动）照条件出现了，也输出这条露面，并加 "引文": "原文里的那一句"；只是打算、假设、没做成的不算。
 如果要记的消息让其中一件已经不成立了（它要催、要办、要等的事已经在别处办完或者黄了，要见的人已经走了、死了，它的前提被推翻了；被角色拿出来、照着办了的算露面，不算作废；发来消息、打来电话、托人带话不等于人来过、见过面），另输出一条 {"消息号": 数字, "型": "作废", "对应": "袋编号", "为什么": "一句"}。只是还没发生、换个时候也还说得通的，不算作废；拿不准就不写。这两种都不用填别的格，不算记录。
 不要用原作或任何外部知识补全或纠正这里的设定。只输出一个 JSON 数组，不要任何别的文字；"内容"里要引人说的话时用「」，不要用英文双引号。`;
 
@@ -189,7 +190,7 @@ export function buildUserPrompt({ window, context, openIdeas, openItems = null, 
     const before = context.length ? context.map(m => block(m, t => clean(t).slice(0, 800), presenceOf(m), farOf(m))).join('\n\n') : '无';
     const target = window.map(m => block(m, clean, presenceOf(m), farOf(m))).join('\n\n');
     const only = onlyTypes ? `【这一遍只补记"${onlyTypes.join('"、"')}"型；别的型已经记过了，不要再记。没有就输出 []】\n\n` : '';
-    const bag = pocket.length ? `【口袋里的事】（供对照：角色把哪件拿出来了、哪件已经不成立了）\n${pocket.map(m => `袋${m.id}${(m.status ?? 'pocket') === 'pocket' ? '（在口袋里）' : '（还排着）'} ${m.who}「${m.title}」：${String(m.surface ?? '').slice(0, 120)}`).join('\n')}\n\n` : '';
+    const bag = pocket.length ? `【口袋里的事】（供对照：角色把哪件拿出来了、哪件已经不成立了）\n${pocket.map(m => `袋${m.id}${(m.status ?? 'pocket') === 'pocket' ? '（在口袋里）' : '（还排着）'} ${m.who}「${m.title}」：${String(m.surface ?? '').slice(0, 120)}${m.showCondition ? `；露面条件：${m.showCondition}` : ''}`).join('\n')}\n\n` : '';
     const pacts = deals.length ? `【进行中的约定】（名目照这里写；有进展才再记）\n${deals.map(d => `${d.parties.join(' 和 ')}「${d.title}」：${d.stage}`).join('\n')}\n\n` : '';
     return `${only}${bag}${pacts}${given}${head}\n${ideas}\n\n【前文】（只供理解）\n${before}\n\n【要记的消息】\n${target}`;
 }
@@ -621,7 +622,9 @@ export function prepareWindow({ records, config, chat, window, context, names, o
     const deals = factionLedger(records.visible(chat.key)).deals.filter(d => !['了了', '破裂'].includes(d.stage));
     const givenKnown = onlyTypes ? [] : knownFor(known, { window, clean });
     const user = buildUserPrompt({ window, context, openIdeas, openItems, known: givenKnown, clean, presenceOf, remoteOf, onlyTypes, pocket: onlyTypes ? [] : pocket, deals });
-    return { clean, presenceOf, remoteOf, facePresentOf, openIdeas, linkIds: new Set(openItems.map(r => r.id)), linkRows: new Map(openItems.map(r => [r.id, { holder: r.holder_name ?? r.holder, guess: !!r.guess, matter: !!r.matter }])), recent, known: givenKnown, pocketIds: new Set(pocket.filter(m => (m.status ?? 'pocket') === 'pocket').map(m => m.id)), menuIds: new Set(pocket.map(m => m.id)), user, system: windowSystem(config, chat.key) };
+    const conditionItems = new Map(pocket.filter(m => String(m.showCondition ?? '').trim()).map(m => [m.id,
+        { condition: m.showCondition, source: m.sourceAt ? { ...m.sourceAt } : null }]));
+    return { clean, presenceOf, remoteOf, facePresentOf, openIdeas, linkIds: new Set(openItems.map(r => r.id)), linkRows: new Map(openItems.map(r => [r.id, { holder: r.holder_name ?? r.holder, guess: !!r.guess, matter: !!r.matter }])), recent, known: givenKnown, pocketIds: new Set(pocket.filter(m => (m.status ?? 'pocket') === 'pocket').map(m => m.id)), menuIds: new Set(pocket.map(m => m.id)), conditionItems, user, system: windowSystem(config, chat.key) };
 }
 
 // 拿到回答以后：解析、核对、落账。模型答的和窗口交回的走同一条路。
@@ -630,8 +633,17 @@ export function applyReply({ records, config, chat, window, prepared, jobId, raw
     // 一大段一条都没记，多半是模型整段放弃（比如碰到敏感内容），不当作"记完了"，让它重试或最终跳过留痕。
     if (!onlyTypes && !items.length && window.length >= 4 && window.reduce((s, m) => s + m.text.length, 0) >= 2000) throw new Error('suspicious_empty');
     // "露面"不是记录：认出哪条角色的消息把口袋里的哪件拿了出来（用户的消息不算；编号得是这次给过的）。
-    const shown = items.filter(i => i?.['型'] === '露面').map(i => ({ m: window.find(w => w.pos === Number(i['消息号'])), id: Number(String(i['对应'] ?? '').replace(/^袋/, '')) }))
-        .filter(x => x.m && !x.m.is_user && prepared.pocketIds?.has(x.id)).map(x => ({ id: x.id, pos: x.m.pos, fp: x.m.fp }));
+    const shown = items.filter(i => i?.['型'] === '露面').flatMap(i => {
+        const m = window.find(w => w.pos === Number(i['消息号'])), id = Number(String(i['对应'] ?? '').replace(/^袋/, ''));
+        if (!m) return [];
+        const item = prepared.conditionItems?.get(id);
+        if (!item) return !m.is_user && prepared.pocketIds?.has(id) ? [{ id, pos: m.pos, fp: m.fp }] : [];
+        const quote = typeof i['引文'] === 'string' ? i['引文'].trim() : '';
+        if (!Number.isSafeInteger(id) || !prepared.menuIds?.has(id) || !item.source || !Number.isInteger(item.source.pos)
+            || m.pos <= item.source.pos || !squash(quote) || !squash(prepared.clean(m.text)).includes(squash(quote))) return [];
+        return [{ id, pos: m.pos, fp: m.fp, conditionProof: { condition: true, evidence: { pos: m.pos, fp: m.fp },
+            source: item.source, quote, conditionText: item.condition } }];
+    });
     // "作废"：要记的消息让口袋里或排着的哪件已经不成立了（一单已经交了，"催这单"那件就撤掉），记在让它不成立的那条消息上。
     const voided = items.filter(i => i?.['型'] === '作废').map(i => ({ m: window.find(w => w.pos === Number(i['消息号'])), id: Number(String(i['对应'] ?? '').replace(/^袋/, '')), why: String(i['为什么'] ?? '').slice(0, 200) }))
         .filter(x => x.m && (prepared.menuIds ?? prepared.pocketIds)?.has(x.id) && !shown.some(s => s.id === x.id)).map(x => ({ id: x.id, pos: x.m.pos, fp: x.m.fp, why: x.why }));
