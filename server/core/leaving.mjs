@@ -4,6 +4,7 @@
 // 换场景：玩家的叙述把镜头挪走（移动词复用 board.movement），没写带着他 → 他留在原地，算不在场；写了带着他、和他一起 → 跟着。
 // 只读消息、返回判定 { left, how: '挂断'|'走了'|'换场景'|null, at, sure, why }；关区间、记去向、静音、/isolate-leave 是主窗 1b、1c 的事。
 // 后来的消息重新提供证据：明确回来算还在，新的含糊叙述保留没判。题材无关。
+import { resolveIdentity, messageIsPerson } from './cast.mjs';
 import { LEAVE, callsOf } from './camera-turn.mjs';
 import { hasCard } from './arrival.mjs';
 import { movement } from './board.mjs';
@@ -72,7 +73,8 @@ export function leftAt(messages = [], who, { aliases = [], avatar = null, userNa
         return true;
     });
     const list = messages.filter(m => m && !m.hidden && (since == null || m.pos >= since)).sort((a,b) => a.pos-b.pos);
-    const isHis = m => !m.is_user && (m.name === who || (!!avatar && m.speaker === avatar) || calls.includes(m.name));
+    const identity = resolveIdentity(roster, { name: who, avatar }).person ?? { name: who, avatar };
+    const isHis = m => messageIsPerson(m, identity, roster);
     const remote = status === 'remote';
     const phone = /电话|来电|通话/.test(way ?? '');
     const unknown = (m, why) => ({ left: null, sure: false, how: null, at: m.pos, why });
@@ -103,6 +105,9 @@ export function leftAt(messages = [], who, { aliases = [], avatar = null, userNa
             continue;
         }
         const nar = narrationOf(text);
+        if (isNarrator(m) && nar && !named && !group && !mentions(text, otherCalls)) {
+            result = unknown(m, '无主体的叙述不能确认该角色仍在，需要复核');
+        }
         if (own) {
             result = unknown(m, !nar && !hasQuote(text) ? '普通散文，需要复核离场' : '他这条是否离场要复核');
             const clauses = clausesOf(nar).filter(c => c.replace(/[（）()*\s]/g, '').length);

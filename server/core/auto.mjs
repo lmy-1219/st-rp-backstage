@@ -1,4 +1,5 @@
 import { personWord } from './pronoun.mjs';
+import { createHash } from 'node:crypto';
 // 自动进离场与调度的后台接口层（方案 自动进离场与调度 第七节 1b，N-377～N-379，D-201）。
 // 判定都在 director.mjs（谁接话）、knock.mjs（叩门状态机）、leaving.mjs（走了没有）、visibility.mjs（谁看得见）里，这儿只管：
 // · 发起叩门：门上到时候了的那一项（doorFor）＋时机（knockTiming）→ 候着的一条（knock_pending），进场那份先理（arrive prepare），扩展叫他写那一条；
@@ -13,13 +14,15 @@ import { knockState, knockTiming, wayOf as knockWayOf } from './knock.mjs';
 import { leftAt } from './leaving.mjs';
 import { callsOf } from './camera-turn.mjs';
 import { normalizeRelations } from './relations.mjs';
-import { boardFor } from './board.mjs';
+import { boardFor, sourceVersion, factBasis, factCurrent, factInput } from './board.mjs';
 import { capFresh } from './door.mjs';
 import { pendingFor } from './pending.mjs';
 import { timelineFor, paceFor, playModeOf } from './slot.mjs';
 import { isOpenMatter, INTENT, closeIntents } from './matters.mjs';
 import { sameName } from './setup.mjs';
 import { hasCard } from './arrival.mjs';
+import { resolveIdentity, sameIdentity, messageIsPerson } from './cast.mjs';
+import { isPrivate } from './visibility.mjs';
 
 export const KNOCKS = chatKey => `knocks:${chatKey}`;
 export const PENDING = chatKey => `knock_pending:${chatKey}`;
@@ -32,14 +35,179 @@ const read = (store, key, fallback) => { try { return JSON.parse(store.getMeta?.
 const readRaw = (store, key, fallback) => { try { return JSON.parse((store.getRawMeta ?? store.getMeta)?.(key) ?? 'null') ?? fallback; } catch { return fallback; } };
 const write = (store, key, value) => store.setMeta?.(key, value == null ? null : JSON.stringify(value));
 const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
-const isHis = (m, k) => !!m && !m.is_user && (m.name === k.who || (!!k.avatar && m.speaker === k.avatar));
+const isHis = (m, k) => messageIsPerson(m, { ...k, name: k.who });
 const userOf = messages => [...messages].reverse().find(m => m.is_user)?.name ?? '玩家';
 const live = messages => messages.filter(m => !m.hidden);
 const rowsOf = tl => pos => (tl.firmRows ?? tl.rows).filter(r => r.pos <= pos).at(-1) ?? { day: tl.firmToday ?? tl.today, part: tl.firmPart ?? tl.part };
 
+function currentSource(store, chatKey, item, log = true) {
+    const ok = !item.sourceVersion || item.sourceVersion === sourceVersion(store, chatKey, item.through ?? item.checkedAt ?? item.at);
+    if (!ok && log) store.logEvent?.(chatKey, 'auto_stale_result', { avatar: item.avatar, at: item.at, reason: '来源版本已改变，保留当前状态' });
+    return ok;
+}
+
+// 一轮的执行凭据挂在现有聊天元数据上；发令和落消息分别记账。
+function executionBasis(store, chatKey, item) {
+    const chat=store.requireChat(chatKey), board=boardFor(store,null,chatKey);
+    let members=[],anchors={};try{members=JSON.parse(chat.members??'[]');anchors=JSON.parse(chat.anchors??'{}');}catch{}
+    const person=board.people.find(p=>p.avatar===item.avatar);
+    const scope=store.getCast?.(chat.story_id)??[];
+    return { person:person ? [person.avatar,person.status,person.since,person.way,person.manualAway??null] : null,
+        plan:person?.plan??null, arrivals:readRaw(store,`arrivals:${chatKey}`,[]).filter(p=>sameIdentity(p,item,scope)),
+        member:members.some(p=>(typeof p==='string'?p:p.avatar)===item.avatar), segments:anchors?.[item.avatar]?.segments??[] };
+}
+function executionCurrent(store, chatKey, e) {
+    const current=executionBasis(store,chatKey,e),before=e.eligibility;
+    if(!before||JSON.stringify(before)===JSON.stringify(current))return true;
+    if(!['enter','back','knock'].includes(e.action)||!current.member)return false;
+    // 凭据明确授权的准备动作只可新增这一段；其他进离场和人工裁决仍使它失效。
+    const added=current.segments.at(-1);
+    if(current.segments.length!==before.segments.length+1||added?.from!==e.openAt||added.to!=null
+        ||JSON.stringify(current.segments.slice(0,-1))!==JSON.stringify(before.segments))return false;
+    const samePerson=JSON.stringify(current.person)===JSON.stringify(before.person);
+    if(!samePerson&&!(current.person?.[1]==='present'&&current.person[2]===e.openAt&&!current.person[4]))return false;
+    return JSON.stringify({...current,segments:before.segments,member:before.member,person:before.person})===JSON.stringify(before);
+}
+function executionSource(messages, through) {
+    return createHash('sha256').update(JSON.stringify([through, messages.find(m => m.pos === through)?.fp ?? null])).digest('hex');
+}
+export function executionFor(store, chatKey, item, kind = 'speak', retryOf = null) {
+    if (item.who !== '旁白' && !hasCard(item)) throw Error(`${item.who}的卡身份未对上，请认卡确认后重新排队`);
+    const messages = store.currentMessages(chatKey), through = messages.at(-1)?.pos ?? -1;
+    const version = sourceVersion(store, chatKey, through);
+    const source = executionSource(messages, through);
+    const action=kind==='knock'?'knock':item.who==='旁白'?'camera':item.back?'back':item.enter?'enter':'speak';
+    const eligibility=executionBasis(store,chatKey,item);
+    const floor=Math.max(0,...eligibility.segments.filter(s=>s.to!=null&&s.to>s.from).map(s=>s.to));
+    const openAt=Number.isInteger(item.enter?.at)&&item.enter.at>=floor?item.enter.at:through+1;
+    const all = read(store, `auto_execution:${chatKey}`, []);
+    const stamp=createHash('sha256').update(JSON.stringify([version,action,openAt,eligibility,...(retryOf?[retryOf,all.length]:[])])).digest('hex');
+    const id = `${kind}:${encodeURIComponent(action === 'camera' ? 'narrator' : item.avatar)}:${through}:${stamp}`;
+    // 发出过的同身份、同来源执行先核实；自身准备或纠正不能绕过未确认回执。
+    let e = !retryOf && (all.find(e => e.avatar === (item.avatar ?? null) && e.through === through
+        // 旧回执没有来源指纹，无法证明是另一件事时继续暂停，留给显式重试核实。
+        && (!e.source || e.source === source)
+        && (['running','unconfirmed','cancelled','error','waiting','delivered'].includes(e.state)||e.retryOf&&e.state==='queued'))
+        ?? all.find(e => e.id === id));
+    if (!e) {
+        e = { id, kind, source, action, eligibility, openAt, who: item.who, avatar: item.avatar ?? null, through, sourceVersion: version, state: 'queued' };
+        if(retryOf)e.retryOf=retryOf;
+        if(['enter','back','knock'].includes(action)){
+            const fact=action==='enter'?activeCame(store,chatKey).find(c=>c.avatar===item.avatar&&c.at===item.enter.at):null;
+            const basis={who:item.who,avatar:item.avatar,at:through,fp:messages.at(-1)?.fp,through,throughFp:messages.at(-1)?.fp,basis:[{pos:through,fp:messages.at(-1)?.fp}]};
+            e.preparation=fact??{...basis,factBasis:factBasis(basis,factInput(store,chatKey))};
+        }
+        all.push(e); write(store, `auto_execution:${chatKey}`, all.slice(-60));
+    }
+    return { ...item, execution: { ...e } };
+}
+export function executionResult(store, chatKey, receipt, { records = null, config = null } = {}) {
+    const all = read(store, `auto_execution:${chatKey}`, []);
+    let e = all.find(e => e.id === receipt.id);
+    // 对账先核实来源序列；前端另传精确身份的本人候选，复用到场的远程／私密排除。
+    if(receipt.result==='reconcile'){
+        const preparation=e?.preparation??receipt.previous?.preparation;
+        if(!preparation)return {ok:false,why:'自动准备的来源记录缺失'};
+        const input=factInput(store,chatKey),messages=Array.isArray(receipt.sequence)?receipt.sequence:input.messages;
+        const facts={...input,messages};
+        return {ok:true,preparationLive:factCurrent(preparation,facts)&&cameBasisLive(preparation,live(messages)),
+            ownReplies:(receipt.ownReplies??[]).filter(m=>messages.some(s=>!s.hidden&&s.pos===m.pos&&s.fp===m.fp)
+                &&inPersonEvidence(m)).map(m=>({pos:m.pos,fp:m.fp})),
+            laterCame:activeCame(store,chatKey,live(messages)).filter(c=>c.avatar===preparation.avatar
+                &&factCurrent(c,facts)&&cameBasisLive(c,live(messages))).map(c=>({pos:c.at,fp:c.fp}))};
+    }
+    const missing=!e;
+    if(!e&&receipt.result==='retry'&&receipt.previous?.id===receipt.id){
+        const p=receipt.previous;
+        if(Number.isInteger(p.through)&&p.through>=0&&['speak','knock'].includes(p.kind)
+            && (p.avatar===null||typeof p.avatar==='string')&&typeof p.who==='string')e={...p,state:'unconfirmed'};
+    }
+    if (!e) return { ok: false, why: '来源版本已失效' };
+    if(receipt.result==='start'&&e.state==='superseded')return {ok:false,why:'旧凭据已被替换，请核对当前执行'};
+    const messages = live(store.currentMessages(chatKey));
+    const landed = messages.find(m => m.pos > e.through && !m.is_user && String(m.text??'').trim() && (e.avatar ? m.speaker === e.avatar : m.name === '旁白'));
+    const sameSource=e.source?e.source===executionSource(messages,e.through):messages.some(m=>m.pos===e.through);
+    if(!sameSource)return {ok:false,why:'来源版本已失效'};
+    if(e.state==='delivered'&&!landed){e.state='unconfirmed';e.reason='原回复已撤回，请核对后重试';write(store,`auto_execution:${chatKey}`,all.slice(-60));}
+    if (landed) { e.state = 'delivered'; e.reply = { pos: landed.pos, fp: landed.fp }; }
+    else if (receipt.result === 'check') return { ok: true, execution: e };
+    else if (receipt.result === 'retry') {
+        if(e.state==='superseded')return {ok:false,why:'旧凭据已被替换，请核对当前执行'};
+        if(missing&&e.kind==='knock'){
+            const pending=pendingKnock(store,chatKey);
+            if(pending?.execution===e.id&&pending.cleanup)e.cleanup=pending.cleanup;
+        }
+        if(e.kind==='knock'&&e.cleanup){
+            const pending=pendingKnock(store,chatKey);
+            if(!currentSource(store,chatKey,e)||pending?.execution!==e.id
+                ||JSON.stringify(executionBasis(store,chatKey,e))!==JSON.stringify(e.cleanup.basis))return {ok:false,why:'在场或成员资格已改变，请重新排队'};
+            const entries=readRaw(store,`arrivals:${chatKey}`,[]);
+            write(store,`arrivals:${chatKey}`,[...entries,...e.cleanup.arrivals]);
+            if(e.cleanup.arrived&&!read(store,`arrived:${chatKey}`,null))write(store,`arrived:${chatKey}`,e.cleanup.arrived);
+            delete e.cleanup;
+        }
+        if(missing&&e.kind!=='knock'||!currentSource(store,chatKey,e)||!executionCurrent(store,chatKey,e)){
+            // 用户明确要求重试，重新排当前队列；绝不把旧快照改成可以 start 的凭据。
+            if(e.kind==='knock')return {ok:false,why:'在场或成员资格已改变，请重新排队'};
+            const item=turnFor(store,records,chatKey,{config}).queue.find(q=>(q.avatar??null)===e.avatar);
+            if(!item||item.avatar&&!executionBasis(store,chatKey,item).member&&!item.enter)return {ok:false,why:'当前没有接话资格，请核对在场和来源'};
+            const q=executionFor(store,chatKey,item,e.kind,e.id);
+            const updated=read(store,`auto_execution:${chatKey}`,[]),old=updated.find(x=>x.id===e.id);
+            if(old)old.state='superseded';
+            write(store,`auto_execution:${chatKey}`,updated);
+            return {ok:true,execution:q.execution,item:q};
+        }
+        e.state = 'queued'; delete e.reason;
+    }
+    else if (receipt.result === 'start') {
+        const current=executionBasis(store,chatKey,e);
+        if(!currentSource(store,chatKey,e)||!executionCurrent(store,chatKey,e)
+            || e.action==='speak'&&(!current.member||!['present','remote'].includes(current.person?.[1])))return {ok:false,why:'在场或成员资格已改变，请重新排队'};
+        if (e.state !== 'queued') return { ok: false, execution: e, why: '这次执行已发出，先核对消息或由用户重试' };
+        e.state = 'running';
+    } else if (['muted','cancelled','error','unconfirmed','waiting'].includes(receipt.result)) {
+        e.state = receipt.result; e.reason = String(receipt.reason ?? '').slice(0,300);
+    } else return { ok: false, why: '没有找到已落下的本人消息' };
+    if(missing)all.push(e);
+    if (e.kind === 'knock' && !['queued','running','delivered'].includes(e.state)) {
+        const pending = pendingKnock(store, chatKey);
+        if (pending && pending.avatar === e.avatar && pending.at === e.through + 1) {
+            write(store,PENDING(chatKey),{...pending,error:e.reason||'生成未确认，请核对消息',execution:e.id});
+            if (e.state !== 'unconfirmed') {
+                const arrivals=readRaw(store,`arrivals:${chatKey}`,[]).filter(a=>a.knock&&a.avatar===e.avatar&&a.at===pending.at&&a.fp===pending.fp);
+                const arrived=read(store,`arrived:${chatKey}`,null);
+                dropKnockArrival(store,chatKey,pending);
+                if(arrivals.length){
+                    e.cleanup={arrivals,arrived:arrived?.avatar===e.avatar&&arrived.at===pending.at?arrived:null,basis:executionBasis(store,chatKey,e)};
+                    write(store,PENDING(chatKey),{...pending,error:e.reason||'生成未确认，请核对消息',execution:e.id,cleanup:e.cleanup});
+                }
+            }
+        }
+    }
+    if (e.kind === 'knock' && receipt.result === 'retry' && e.state === 'queued') {
+        const pending = pendingKnock(store, chatKey);
+        if (pending?.execution === e.id) {const {cleanup,...kept}=pending;write(store,PENDING(chatKey),{...kept,error:null});}
+    }
+    write(store, `auto_execution:${chatKey}`, all.slice(-60));
+    store.logEvent?.(chatKey,'auto_execution_result',{id:e.id,state:e.state,avatar:e.avatar,reason:e.reason});
+    return { ok: true, execution: e };
+}
+
 export const knocksOf = (store, chatKey) => read(store, KNOCKS(chatKey), []).filter(k => k && k.who && num(k.at) != null);
 const blockedKnock = (store, chatKey, k) => playModeOf(store, chatKey) === 'memory' && ['pocket','contact','reach'].includes(k?.source?.type);
-export const pendingKnock = (store, chatKey) => { const k=read(store,PENDING(chatKey),null); return blockedKnock(store,chatKey,k) ? null : k; };
+export const pendingKnock = (store, chatKey) => {
+    const k=read(store,PENDING(chatKey),null);
+    let valid=!k||currentSource(store,chatKey,k,false);
+    // 联系/口袋的来源读口已核过日期和步骤；只改措辞的同一消息沿用项目既有改稿链。
+    if(k&&!valid&&k.sourceBasis&&['contact','pocket'].includes(k.source?.type)&&k.sourceStep&&store.knockLive?.(chatKey,k)===true){
+        const rows=store.currentMessages(chatKey).filter(m=>m.pos<=k.through);
+        valid=k.sourceBasis.version===sourceVersion(store,chatKey,-1)&&rows.length===k.sourceBasis.rows.length&&rows.every((m,i)=>{
+            const b=k.sourceBasis.rows[i];return m.pos===b.pos&&!!m.hidden===b.hidden&&(m.boardMark??null)===b.mark&&(m.fp===b.fp||store.sameMessage?.(m.fp,b.fp));
+        });
+    }
+    if(k&&!valid){store.logEvent?.(chatKey,'auto_stale_result',{avatar:k.avatar,reason:'叩门来源版本已改变'});write(store,PENDING(chatKey),null);dropKnockArrival(store,chatKey,k);return null;}
+    return blockedKnock(store,chatKey,k) ? null : k;
+};
 export const writeKnocks = (store, chatKey, knocks) => {
     const hidden = readRaw(store, KNOCKS(chatKey), []).filter(k => !store.knockLive?.(chatKey, k));
     write(store, KNOCKS(chatKey), [...hidden, ...knocks].slice(-KEEP));
@@ -89,13 +257,24 @@ function context(store, records, chatKey, { present = [], recentUser = '', timel
     const names = roster.map(e => e.name);
     let members = [];
     try { const parsed = JSON.parse(chat.members ?? '[]'); if (Array.isArray(parsed)) members = parsed; } catch {}
-    return { chat, messages, tl, rowAt: rowsOf(tl), roster, relations, names, members, userName: userOf(messages), present, recentUser,
+    return { chat, messages, tl, rowAt: rowsOf(tl), roster, relations, names, members, identityChoices: read(store,`card_choices:${chatKey}`,{}), userName: userOf(messages), present, recentUser,
         board: () => boardFor(store, records, chatKey, { present, recentUser, timeline: tl }) };
 }
 
-function avatarFor(ctx, who, fallback = null) {
-    return ctx.members.find(m => m?.name === who && m.avatar)?.avatar
-        ?? fallback ?? ctx.roster.find(e => sameName(e.name, who, ctx.names))?.avatar ?? null;
+export function avatarFor(ctx, who, fallback = null) {
+    return resolveIdentity(ctx.roster, { name: who, avatar: fallback }, { members: ctx.members, identityChoices: ctx.identityChoices }).person?.avatar ?? null;
+}
+const sameFor = (store, chatKey, a, b) => sameIdentity(a, b, store.getCast(store.requireChat(chatKey).story_id).filter(e => e.role !== '不用'));
+const candidates = list => list.map((d,i) => ({ ...d, candidateId: `候选${i+1}` }));
+function verdictFor(store, chatKey, doubts, d, verdicts) {
+    const scope = store.getCast(store.requireChat(chatKey).story_id).filter(e => e.role !== '不用');
+    const key = [d.candidateId, d.avatar].find(k => k && Object.hasOwn(verdicts ?? {}, k));
+    const legacy = resolveIdentity(scope, d.who).person?.avatar === d.avatar && doubts.filter(x => x.who === d.who).length === 1;
+    const value = key ? verdicts[key] : legacy ? verdicts?.[d.who] : undefined;
+    if (typeof value === 'boolean' || (value && typeof value === 'object' && !Array.isArray(value)
+        && ['走了','还在','被打发未动','看不出','到了','没到'].includes(value['结果']))) return value;
+    store.logEvent?.(chatKey, 'auto_identity_unmatched', { avatar: d.avatar, who: d.who, reason: '回包没有唯一候选身份，保留原状态' });
+    return undefined;
 }
 
 /**
@@ -117,11 +296,13 @@ export function knockCandidate(store, records, chatKey, { present = [], timeline
     const item = (litOk ? fresh.find(i => sameName(i.who, lit.who, names)) : null) ?? fresh[0] ?? null;
     if (!item) return { who: null, why: items.length ? '门上的都叩过了、没人接' : '门上没人到时候' };
     let plan = null;
-    try { plan = ctx.board().people.find(p => sameName(p.name, item.who, names))?.plan ?? null; } catch {}
+    try { plan = ctx.board().people.find(p => sameIdentity(p, item, ctx.roster))?.plan ?? null; } catch {}
     const way = wayFor(item, plan);
     const origin = ['promise', 'reach'].includes(item.source?.type) ? records?.visible?.(chatKey)?.find(r => r.id === item.source.id) : null;
     const sourceAt = origin ? { pos: origin.pos, fp: origin.fp } : item.source?.type === 'errand' && plan?.fp ? { pos: messages.find(m => m.fp === plan.fp)?.pos, fp: plan.fp } : null;
-    return { who: item.who, avatar: avatarFor(ctx, item.who, item.avatar), way, mode: modeOf(way), source: item.source ?? null, sourceAt, label: item.label ?? '' };
+    const avatar = avatarFor(ctx, item.who, item.avatar);
+    if (!avatar) return { who: null, why: `${item.who}的卡身份未能唯一匹配，请确认卡文件` };
+    return { who: item.who, avatar, way, mode: modeOf(way), source: item.source ?? null, sourceAt, label: item.label ?? '' };
 }
 
 export function knockNow(store, records, chatKey, { present = [], timeline = null, config = null } = {}) {
@@ -131,14 +312,14 @@ export function knockNow(store, records, chatKey, { present = [], timeline = nul
     const { messages, tl, rowAt, roster, relations, names, userName } = ctx;
     const last = messages.at(-1);
     if (!last) return { ok: false, why: '还没有消息' };
-    if (pendingKnock(store, chatKey)) return { ok: false, why: '有一条候着的还没写出来' };
+    if (pendingKnock(store, chatKey)) return { ok: false, why: pendingKnock(store,chatKey).error || '有一条候着的还没写出来' };
     const knocks = knocksOf(store, chatKey);
     const c = knockCandidate(store, records, chatKey, { present, timeline: tl });
     const lit = read(store, `door_lit:${chatKey}`, null);
     const litPos = num(lit?.pos);
     const summoned = !!c?.who && (c.source?.type === 'named' || (lit?.by === 'narrator' && litPos != null
         && last.pos - litPos <= 4 && messages.find(m => m.pos === litPos)?.fp === lit.fp && sameName(c.who, lit.who, names)));
-    const cards = present.filter(n => roster.some(e => hasCard(e) && sameName(e.name, n, names)));
+    const cards = ctx.board().people.filter(p=>p.card && ['present','remote'].includes(p.status)).map(p=>p.name);
     const timing = knockTiming({ messages, knocks, pace: paceFor(store, chatKey), present: cards, rowAt, parts: tl.parts, roster, relations, userName, maxTurns: auto.maxTurns, summoned, occasion: !summoned });
     if (!timing.ok) return { ok: false, why: timing.why };
     if (!c?.who) return { ok: false, why: c?.why ?? '门上没人到时候' };
@@ -146,35 +327,44 @@ export function knockNow(store, records, chatKey, { present = [], timeline = nul
 }
 
 // 叩门时已经按叩门那条接了进场（main.autoTurn：进场那份理好了就先记，他那条写出来时记录已经在）
-const knockEntry = (store, chatKey, k) => read(store, `arrivals:${chatKey}`, []).find(e => e?.knock && (e.who === k.who || (!!k.avatar && e.avatar === k.avatar)) && num(e.at) === num(k.at) && e.fp === k.fp) ?? null;
+const knockEntry = (store, chatKey, k) => read(store, `arrivals:${chatKey}`, []).find(e => e?.knock && sameFor(store,chatKey,e, k) && num(e.at) === num(k.at) && e.fp === k.fp) ?? null;
 // 候着的那条没写出来（挂的那条没了、那儿换成了别人在说）：叩门时记的那次进场撤掉
 function dropKnockArrival(store, chatKey, k) {
     const list = readRaw(store, `arrivals:${chatKey}`, []);
-    const kept = list.filter(e => !(e?.knock && (e.who === k.who || (!!k.avatar && e.avatar === k.avatar)) && num(e.at) === num(k.at) && e.fp === k.fp));
+    const kept = list.filter(e => !(e?.knock && sameFor(store,chatKey,e, k) && num(e.at) === num(k.at) && e.fp === k.fp));
     if (kept.length !== list.length) write(store, `arrivals:${chatKey}`, kept);
     const arrived = read(store, `arrived:${chatKey}`, null);
-    if (arrived && (arrived.who === k.who || (k.avatar && arrived.avatar === k.avatar)) && num(arrived.at) === num(k.at)) write(store, `arrived:${chatKey}`, null);
+    if (arrived && sameFor(store,chatKey,arrived, k) && num(arrived.at) === num(k.at)) write(store, `arrived:${chatKey}`, null);
 }
-// 最近作废的（扩展关区间、静音用）：定下作废的那条在最近几条里
-export function recentLapsed(store, chatKey, { within = 4 } = {}) {
+// 作废关闭沿用离场回执，直到落实才停止交付。
+export function recentLapsed(store, chatKey) {
     const messages = live(store.currentMessages(chatKey)), last = messages.at(-1);
     if (!last) return [];
-    return knocksOf(store, chatKey).filter(k => k.lapsed && num(k.lapsed.pos) != null && last.pos - num(k.lapsed.pos) <= within && messages.find(m => m.pos === num(k.lapsed.pos))?.fp === k.lapsed.fp)
-        .map(k => ({ who: k.who, avatar: k.avatar ?? null, way: k.way, at: num(k.lapsed.pos) }));
+    const events = leaveEvents(store, chatKey);
+    for (const k of knocksOf(store, chatKey).filter(k => k.lapsed && num(k.lapsed.pos) != null && messages.find(m => m.pos === num(k.lapsed.pos))?.fp === k.lapsed.fp)) {
+        const item = { who: k.who, avatar: k.avatar ?? null, way: k.way, at: num(k.lapsed.pos), fp: k.lapsed.fp };
+        const id = `lapsed:${eventId(item)}`;
+        if (!events.some(e => e.id === id)) events.push({ ...item, through:item.at, sourceVersion:sourceVersion(store,chatKey,item.at), id, version: 1, action: 'leave', state: '待落实' });
+    }
+    write(store, LEAVE_EVENTS(chatKey), events);
+    return events.filter(e => e.id.startsWith('lapsed:') && e.state === '待落实');
 }
 
 // 记下候着的一条（扩展接着叫他写）；进场那份由叫这个的人去先理（main.arrive prepare）
 export function beginKnock(store, chatKey, k) {
     const basisDay = k.basisDay ?? store.confirmedDayAt?.(chatKey, k.at - 1) ?? timelineFor(store, null, chatKey).firmToday;
-    const pending = { who: k.who, avatar: k.avatar ?? null, way: k.way, mode: k.mode ?? modeOf(k.way), at: k.at, fp: k.fp, basisDay, source: k.source ?? null, sourceStep: sourceStep(store, chatKey, k), label: k.label ?? '', since: Date.now() };
+    const pending = { who: k.who, avatar: k.avatar ?? null, way: k.way, mode: k.mode ?? modeOf(k.way), at: k.at, fp: k.fp, through:k.at-1, sourceVersion:sourceVersion(store,chatKey,k.at-1), basisDay, source: k.source ?? null, sourceStep: sourceStep(store, chatKey, k), label: k.label ?? '', since: Date.now() };
+    if(['contact','pocket'].includes(k.source?.type))pending.sourceBasis={version:sourceVersion(store,chatKey,-1),rows:store.currentMessages(chatKey).filter(m=>m.pos<k.at).map(m=>({pos:m.pos,fp:m.fp,hidden:!!m.hidden,mark:m.boardMark??null}))};
     write(store, PENDING(chatKey), pending);
     return pending;
 }
 
 // 快捷按钮（方案第二节第 3 条）：接／让他进来＝进场，不理＝作废；写在他这次叩门上，状态机先看它
-export function answerKnock(store, chatKey, { who, answer }) {
+export function answerKnock(store, chatKey, { who, avatar = null, answer }) {
     const knocks = knocksOf(store, chatKey);
-    const k = [...knocks].reverse().find(x => x.who === who && !x.entered && !x.lapsed);
+    const scope = store.getCast(store.requireChat(chatKey).story_id).filter(e => e.role !== '不用');
+    const person = resolveIdentity(scope, { name: who, avatar }).person;
+    const k = person && [...knocks].reverse().find(x => sameIdentity(x, person, scope) && !x.entered && !x.lapsed);
     if (!k) return { ok: false, why: '他没有候着的叩门' };
     const messages = live(store.currentMessages(chatKey)), last = messages.at(-1);
     const forced = /不理|作废|否/.test(answer ?? '') ? '作废' : '进场';
@@ -209,7 +399,7 @@ function lapseKnock(store, records, chatKey, k, { chat, messages, names, userNam
         if (records?.addDerived) try { records.addDerived({ storyId: chat.story_id, fp: decided, type: '心里', text: `${k.who}${way}${userName}，没人理。`.slice(0, 200), holder: k.avatar ?? `name:${k.who}`, holderName: k.who, audience: [k.who], about: k.who }); } catch {}
     }
     const arrived = read(store, `arrived:${chatKey}`, null);
-    if (arrived && (arrived.who === k.who || (k.avatar && arrived.avatar === k.avatar)) && num(arrived.at) === k.at) write(store, `arrived:${chatKey}`, null);
+    if (arrived && sameFor(store,chatKey,arrived, k) && num(arrived.at) === k.at) write(store, `arrived:${chatKey}`, null);
 }
 
 /**
@@ -228,9 +418,9 @@ export async function knockAdvance(store, records, chatKey, { arrive = null, jud
     // 1. 候着的那条写出来了没有：写出来了就记成叩门、进场那份接上（他从那条起远程、或在门口候着）；挂的那条没了、或者那儿换成了别人在说，就没发生过
     const pending = pendingKnock(store, chatKey);
     if (pending) {
-        const anchored = messages[pending.at - 1]?.fp === pending.fp;
-        const his = isHis(messages[pending.at], pending);
-        if (!anchored || (messages.length > pending.at && !his)) { write(store, PENDING(chatKey), null); dropKnockArrival(store, chatKey, pending); }
+        const anchored = messages.find(m => m.pos === pending.at - 1)?.fp === pending.fp;
+        const his = isHis(messages.find(m => m.pos === pending.at), pending);
+        if (!anchored || (messages.some(m => m.pos >= pending.at) && !his)) { write(store, PENDING(chatKey), null); dropKnockArrival(store, chatKey, pending); }
         else if (his) {
             const k = { who: pending.who, avatar: pending.avatar ?? null, way: pending.way, at: pending.at, fp: pending.fp, basisDay: pending.basisDay, source: pending.source ?? null, sourceStep: pending.sourceStep ?? null, verdicts: {} };
             knocks = [...knocks, k];
@@ -294,10 +484,10 @@ export function wantsFor(store, records, chatKey, { messages = null, timeline = 
     const rows = messages ?? live(store.currentMessages(chatKey));
     const lastPos = rows.at(-1)?.pos ?? 0;
     const out = [];
-    for (const r of records?.visible?.(chatKey) ?? []) if (isOpenMatter(r) && r.matter?.kind === INTENT && r.holder_name) out.push({ who: r.holder_name, kind: '来意', text: r.matter.title ?? '' });
+    for (const r of records?.visible?.(chatKey) ?? []) if (isOpenMatter(r) && r.matter?.kind === INTENT && r.holder_name) out.push({ who: r.holder_name, avatar: hasCard({avatar:r.holder}) ? r.holder : null, kind: '来意', text: r.matter.title ?? '' });
     for (const m of store.menuOf?.(chatKey) ?? []) if (m.status === 'pocket' && m.who) out.push({ who: m.who, kind: '口袋', text: m.title ?? '' });
     try { for (const p of pendingFor(store, records, chatKey, { present, timeline }).items) if (p.kind === '等回音' && p.status === '有回音' && p.owner) out.push({ who: p.owner, kind: '等回音', text: p.text ?? '' }); } catch {}
-    for (const r of records?.openIdeas?.(chatKey) ?? []) if (r.type === '想法' && r.holder_name && lastPos - (r.pos ?? 0) <= 30) out.push({ who: r.holder_name, kind: '兴头', text: r.text ?? '' });
+    for (const r of records?.openIdeas?.(chatKey) ?? []) if (r.type === '想法' && r.holder_name && lastPos - (r.pos ?? 0) <= 30) out.push({ who: r.holder_name, avatar: hasCard({avatar:r.holder}) ? r.holder : null, kind: '兴头', text: r.text ?? '' });
     return out;
 }
 
@@ -314,33 +504,17 @@ export function turnFor(store, records, chatKey, { present = [], recentUser = ''
     try { board = ctx.board(); } catch {}
     const waiting = waitingKnock(store, records, chatKey);
     // 他刚叩的门就是最后一条：停下等玩家，别让屋里的人替玩家接他的话
-    if (waiting && waiting.at === messages.at(-1)?.pos) return { queue: [], why: `${waiting.who}刚来联系，等玩家回他` };
-    if (board && waiting && waiting.way === '上门') board = { ...board, people: board.people.map(p => (sameName(p.name, waiting.who, names) && p.status === 'present' ? { ...p, status: 'remote', way: '上门' } : p)) };
-    const departed=pendingLeaves(store,chatKey).filter(e=>e.action==='leave');
-    const came=activeCame(store,chatKey,messages);
-    const cameEntered=new Map();
-    if(board && came.length) board={...board,people:board.people.map(p=>{
-        const c=came.filter(c=>(c.avatar&&c.avatar===p.avatar)||c.who===p.name).at(-1);
-        if(!c || p.status==='present' || (['away','absent','never'].includes(p.status) && p.since!=null && p.since!=='' && Number(p.since)>=c.at)) return p;
-        cameEntered.set(p.name,c.at);
-        return {...p,status:'present',since:c.at};
-    })};
-    const lastUser=messages.findLast(m=>m.is_user)?.pos ?? -1;
-    const excluded=new Set();
-    if(board) board={...board,people:board.people.map(p=>{
-        const e=departed.filter(e=>(e.avatar&&e.avatar===p.avatar)||e.who===p.name).at(-1);
-        if(!e || (p.status==='present'&&Number(p.since)>e.at)) return p;
-        excluded.add(p.name);
-        if(p.status==='away' && lastUser>e.at) return p; // 场面表已有的离开时长不重置
-        return {...p,status:lastUser>e.at?'away':'absent',stage:'early'};
-    })};
-    present=present.filter(name=>board ? !excluded.has(name) : !departed.some(e=>e.who===name));
-    const d = turnDetail({ text: recentUser || null, messages, board, roster, relations, wants: wantsFor(store, records, chatKey, { messages, timeline: tl, present }), pace: paceFor(store, chatKey), userName, present,
+    if (waiting && waiting.at === messages.at(-1)?.pos) return { queue: [], complete:true, why: `${waiting.who}刚来联系，等玩家回他` };
+    present = (board?.people ?? []).filter(p => ['present','remote'].includes(p.status)).map(p => p.name);
+    const d = turnDetail({ text: recentUser || null, messages, board, roster, relations, members:ctx.members, identityChoices:ctx.identityChoices, wants: wantsFor(store, records, chatKey, { messages, timeline: tl, present }), pace: paceFor(store, chatKey), userName, present,
         stateNotes: store.stateNotesOf?.(chatKey) ?? [], cap: Number(auto.cap) > 0 ? Number(auto.cap) : null, chain: auto.chain ?? null });   // 没填（null）按节奏档，别算成 0；chain 没填按默认
-    // back：刚走的人被点名，直接叫回来（不走进场那套）——扩展要先取消静音、开区间
-    return { queue: d.queue.map(q => ({ who: q.who, avatar: q.who === '旁白' ? null : avatarFor(ctx, q.who), role: q.role, why: q.why, noRepeat: !!q.noRepeat,
-        ...(cameEntered.has(q.who) ? { enter: { at: cameEntered.get(q.who) } } : {}),
-        ...(/叫回来/.test(q.why ?? '') ? { back: true } : {}) })), why: d.why };
+    // 只有 director 已核实明确召回和可达性，才允许扩展开区间。
+    const queue = d.queue.map(q => ({ who: q.who, avatar: q.who === '旁白' ? null : avatarFor(ctx, q.who, q.avatar), role: q.role, why: q.why, noRepeat: !!q.noRepeat,
+        ...(board?.people.find(p => p.avatar === q.avatar)?.enter ? { enter: board.people.find(p => p.avatar === q.avatar).enter } : {}),
+        ...(q.back === true ? { back: true } : {}) }));
+    const unresolved = queue.find(q => q.who !== '旁白' && !hasCard(q));
+    if (unresolved) return { queue: [], complete:false, why: `${unresolved.who}的卡身份未对上，请认卡确认后重新排队` };
+    return { queue, why: d.why, complete: !d.paused };
 }
 
 /**
@@ -351,10 +525,41 @@ export const CAME_ASK = chatKey => `came_ask:${chatKey}`;
 export const AUTO_CAME = chatKey => `auto_came:${chatKey}`;
 export const LEFT_PENDING = chatKey => `auto_left_pending:${chatKey}`;
 const squashQuote = t => String(t??'').replace(/[\p{P}\s]/gu,'');
-const isOwn = (m,p) => !m.is_user && (m.name===p.name || (!!p.avatar && m.speaker===p.avatar));
+const isOwn = (m,p) => messageIsPerson(m,p);
 const cameBasisLive = (c, messages) => messages.some(m => m.pos === c.at && m.fp === c.fp)
     && (c.through == null || messages.some(m => m.pos === c.through && m.fp === c.throughFp))
     && (!c.basis || c.basis.every(b => messages.some(m => m.pos === b.pos && m.fp === b.fp)));
+const CAME_QUOTES = /“[^“”]*”|「[^「」]*」|『[^『』]*』|"[^"\n]*"/g;
+const CAME_UNCERTAIN = /想起|回忆|记得|曾经|转述|据说|听说|如果|要是|假如|可能|似乎|仿佛|打算|准备|将要|明天|还没|没有|不会|不在|并未/;
+const CAME_ENTER = /^(?:又|已|已经|正|正在|终于|便|就|随后|随即|缓缓|慢慢|径直|突然|亲自|本人|从[^，。；\n]{1,12})*(?:推门(?:走)?进来|推开门(?:走)?进来|走进(?:来|屋|门|房间)|走了进来|进了(?:门|屋)|进来|进屋|进门|回到(?:屋内|面前|这里)|来到(?:面前|身边|这里)|出现在(?:面前|身边|门口))/;
+const CAME_MOTION = /^(?:(?:又|已|已经|正|正在|终于|随后|随即|便|就|缓缓|慢慢|径直|突然|亲自|本人)|(?:推开|拉开|打开)[^，。；\n]{0,8}门|从[^，。；\n]{1,12})*(?:走|跑|迈|跨|踏|钻|挤)?(?:了)?(?:进来|进(?:了)?(?:房间|屋内|屋里|屋|门内|门)|回到(?:屋内|面前|这里))/;
+const CAME_ACT = /^(?:又|已|已经|正|正在|随后|随即|缓缓|慢慢|便|就)*(?:站在(?:我|你|玩家|桌|门|屋)|坐在|坐下|落座|伸手|抬手|拿起|按住|走到|转身|开口(?:说|问)|说道|问道)/;
+// 本人消息兜底与到场引文共用远程／私密排除，前端重新推导也交由这里核验。
+const inPersonEvidence = (message, text = message.text ?? '') => !isPrivate(message)
+    && !CAME_UNCERTAIN.test(text) && !/电话|通话|消息|屏幕|终端那头/.test(text);
+// 引文必须落在这一身份本人的当面证据里。引用、回忆和无法消歧的代词保留未判。
+function cameEvidence(evidence, doubt, quote, person, roster) {
+    if (isPrivate(evidence)) return false;
+    const text = String(evidence.text ?? '');
+    const own = messageIsPerson(evidence, { name: doubt.who, avatar: doubt.avatar }, roster);
+    const recentlyAway = person && ['away', 'absent'].includes(person.status);
+    const narration = text.replace(CAME_QUOTES, q => ' '.repeat(q.length));
+    const sentences = narration.split(/[。！？!?；;\n]/).filter(s => squashQuote(s).includes(squashQuote(quote)));
+    for (const sentence of sentences) {
+        if (!inPersonEvidence(evidence, sentence)) continue;
+        for (const clause of sentence.split(/[，,：:（）()]/)) {
+            const lead = clause.trim().replace(/^[*\s]+/, '');
+            const subject = (doubt.aliases ?? [doubt.who]).find(n => lead.startsWith(n));
+            if (subject && !own && roster.filter(p => p.card && p.name === doubt.who).length !== 1) continue;
+            if(!subject&&own&&roster.some(p=>p.avatar!==doubt.avatar&&p.name&&lead.includes(p.name)))continue;
+            const predicate = subject ? lead.slice(subject.length).trim() : own ? lead.replace(/^我/, '') : null;
+            if (predicate != null && (CAME_ENTER.test(predicate) || CAME_MOTION.test(predicate) || !recentlyAway && CAME_ACT.test(predicate))
+                && squashQuote(clause).includes(squashQuote(quote))) return true;
+        }
+    }
+    // 未有离场反证时，精确 avatar 的本人发言也是证据；远程或离场后单独一句话不足以证明物理返场。
+    return own && !recentlyAway && inPersonEvidence(evidence);
+}
 // 正文已把有卡的人带到场面：先按名册叫法挑候选，模型只复核这些人。
 export function cameDoubts(store, records, chatKey, { present = [], config = null } = {}) {
     if (config?.auto?.enabled === false || config?.auto?.turn === false) return [];
@@ -365,19 +570,21 @@ export function cameDoubts(store, records, chatKey, { present = [], config = nul
     if (userAt < 0) return [];
     const from = Math.max(0, userAt - CAME_LOOKBACK);
     const window = messages.slice(from);
-    const asked = read(store, CAME_ASK(chatKey), []).filter(a => cameBasisLive(a, messages));
+    const facts = factInput(store, chatKey);
+    const asked = read(store, CAME_ASK(chatKey), []).filter(a => cameBasisLive(a, messages) && factCurrent(a, facts));
     const arrived = activeCame(store, chatKey, messages);
     const rel = relations ? normalizeRelations(relations) : null;
     const out = [];
     for (const entry of roster.filter(hasCard)) {
         if (entry.role === '不用') continue;
-        const p = board.people.find(p => sameName(p.name, entry.name, names));
+        const p = board.people.find(p => p.avatar === entry.avatar);
         if (p && ['present', 'remote'].includes(p.status)) continue;
-        if (arrived.some(a => (a.avatar && a.avatar === entry.avatar) || a.who === entry.name)) continue;
+        if (p?.manualAway) continue;
+        if (arrived.some(a => sameIdentity(a, entry, roster))) continue;
         const aliases = callsOf(entry.name, { rel, names });
-        const hit = window.findLast(m => aliases.some(n => n && String(m.text ?? '').includes(n)));
+        const hit = window.findLast(m => messageIsPerson(m, entry, roster) || aliases.some(n => n && String(m.text ?? '').includes(n)));
         if (!hit) continue;
-        const prior = asked.filter(a => a.who === entry.name && a.at === hit.pos && a.fp === hit.fp)
+        const prior = asked.filter(a => sameIdentity(a, entry, roster) && a.at === hit.pos && a.fp === hit.fp)
             .sort((a,b) => (a.through ?? a.at) - (b.through ?? b.at)).at(-1);
         const review = prior ? (prior.review ?? 0) + 1 : 0;
         if (prior && (prior.result === '到了' || review > CAME_RECHECKS
@@ -386,24 +593,28 @@ export function cameDoubts(store, records, chatKey, { present = [], config = nul
             from: window[0].pos, basis: window.map(m => ({ pos: m.pos, fp: m.fp })), review,
             through: messages.at(-1).pos, throughFp: messages.at(-1).fp });
     }
-    return out;
+    return candidates(out).map(d => ({ ...d, sourceVersion: sourceVersion(store, chatKey, d.through) }));
 }
 export function activeCame(store, chatKey, messages = live(store.currentMessages(chatKey))) {
     const departed = leaveEvents(store, chatKey).filter(e => e.action === 'leave');
-    return read(store, AUTO_CAME(chatKey), []).filter(c => cameBasisLive(c, messages)
-        && !departed.some(e => ((c.avatar && e.avatar === c.avatar) || e.who === c.who) && e.at > c.at));
+    const facts = factInput(store, chatKey);
+    return read(store, AUTO_CAME(chatKey), []).filter(c => factCurrent(c, facts) && cameBasisLive(c, messages)
+        && !departed.some(e => sameFor(store,chatKey,c, e) && e.at > c.at));
 }
 export function answerCame(store, chatKey, doubts, verdicts) {
     const messages = live(store.currentMessages(chatKey));
-    const asked = read(store, CAME_ASK(chatKey), []).filter(a => cameBasisLive(a, messages));
-    const came = read(store, AUTO_CAME(chatKey), []).filter(c => cameBasisLive(c, messages));
+    const facts = factInput(store, chatKey);
+    const asked = read(store, CAME_ASK(chatKey), []).filter(a => cameBasisLive(a, messages) && factCurrent(a, facts));
+    const came = read(store, AUTO_CAME(chatKey), []).filter(c => cameBasisLive(c, messages) && factCurrent(c, facts));
     const accepted = [];
+    const board = boardFor(store, null, chatKey);
     for (const d of doubts) {
+        if (!currentSource(store, chatKey, d)) continue;
         const anchor = messages.find(m => m.pos === d.at && m.fp === d.fp);
         const last = messages.find(m => m.pos === d.through && m.fp === d.throughFp);
-        const v = verdicts?.[d.who];
+        const v = verdictFor(store, chatKey, doubts, d, verdicts);
         if (!anchor || !last || !v || !['到了', '没到'].includes(v['结果']) || !cameBasisLive(d, messages)) continue;
-        if (asked.some(a => a.who === d.who && (a.through ?? a.at) >= d.through)) continue;
+        if (asked.some(a => sameFor(store,chatKey,a, d) && (a.through ?? a.at) >= d.through)) continue;
         const basis = messages.filter(m => m.pos >= d.from && m.pos <= d.through).map(m => ({ pos: m.pos, fp: m.fp }));
         if (!d.basis?.length || JSON.stringify(basis) !== JSON.stringify(d.basis)) continue;
         const evidenceIndex = messages.findIndex(m => Number.isInteger(v['条']) && m.pos === v['条']);
@@ -411,33 +622,43 @@ export function answerCame(store, chatKey, doubts, verdicts) {
         if (!evidence || evidence.pos < d.from || evidence.pos > last.pos
             || typeof v['引'] !== 'string' || [...v['引']].length > 20 || !squashQuote(v['引'])
             || !squashQuote(evidence.text).includes(squashQuote(v['引']))) continue;
-        asked.push({ who: d.who, at: d.at, fp: d.fp, through: d.through, throughFp: d.throughFp,
+        const person = board.people.find(p => p.avatar === d.avatar);
+        if (v['结果'] === '到了' && (person?.manualAway || !cameEvidence(evidence, d, v['引'], person, board.people))) {
+            store.logEvent?.(chatKey, 'auto_came_rejected', { avatar: d.avatar, at: evidence.pos, reason: person?.manualAway ? '手动离场尚未通过正常进场或明确召回解除' : '引文不能确认本人当面到场' });
+            continue;
+        }
+        const confirmedBasis = factBasis(d, facts);
+        asked.push({ who: d.who, avatar: d.avatar, at: d.at, fp: d.fp, through: d.through, throughFp: d.throughFp, sourceVersion: d.sourceVersion, factBasis: confirmedBasis,
             result: v['结果'], review: d.review ?? 0, basis: d.basis });
         if (v['结果'] !== '到了') continue;
         const item = { who: d.who, avatar: d.avatar ?? null, at: evidence.pos, fp: evidence.fp, quote: v['引'],
-            basis: d.basis, through: d.through, throughFp: d.throughFp };
-        if (!came.some(c => c.who === item.who && c.at === item.at && c.fp === item.fp)) { came.push(item); accepted.push(item); }
+            basis: d.basis, through: d.through, throughFp: d.throughFp, sourceVersion: d.sourceVersion, factBasis: confirmedBasis };
+        if (!came.some(c => sameFor(store,chatKey,c, item) && c.at === item.at && c.fp === item.fp)) { came.push(item); accepted.push(item); }
     }
     write(store, CAME_ASK(chatKey), asked.slice(-60));
     if (accepted.length) write(store, AUTO_CAME(chatKey), came.slice(-60));
     return accepted;
 }
 function reviewsOf(store, chatKey, messages) {
-    return read(store,LEAVE_ASK(chatKey),[]).filter(r => messages.some(m=>m.pos===r.at && m.fp===r.fp)
+    return read(store,LEAVE_ASK(chatKey),[]).filter(r => currentSource(store, chatKey, r) && messages.some(m=>m.pos===r.at && m.fp===r.fp)
         && (r.evidenceAt==null || messages.some(m=>m.pos===r.evidenceAt&&m.fp===r.evidenceFp))
         && (r.checkedAt==null || messages.some(m=>m.pos===r.checkedAt && m.fp===r.checkedFp))
         && (!r.basis || r.basis.every(b=>messages.some(m=>m.pos===b.pos && m.fp===b.fp))));
 }
 function leaveChecks(store, records, chatKey, options) {
     const ctx=context(store,records,chatKey,options), {messages,roster,names,relations,userName}=ctx;
-    const people=ctx.board().people.filter(p=>['present','remote'].includes(p.status) && roster.some(e=>hasCard(e)&&sameName(e.name,p.name,names)));
+    const people=ctx.board().people.filter(p=>['present','remote'].includes(p.status) && roster.some(e=>hasCard(e)&&e.avatar===p.avatar));
     const asked=reviewsOf(store,chatKey,messages);
     const done=read(store,LEFT(chatKey),[]).filter(d=>messages.some(m=>m.pos===d.at&&m.fp===d.fp));
     return people.map(p=>{
-        const avatar=p.avatar??roster.find(e=>sameName(e.name,p.name,names))?.avatar??null;
+        const avatar=p.avatar;
         const person={...p,avatar};
-        const prior=asked.filter(d=>d.who===p.name && (d.since??null)===(p.since??null)).at(-1);
-        const since=prior ? Math.max(num(p.since)??0,(prior.checkedAt??prior.at)+1) : num(p.since);
+        const prior=asked.filter(d=>sameIdentity(d,p,roster) && (d.since??null)===(p.since??null)).at(-1);
+        const corrected = messages.filter(m => {
+            let mark; try { mark = typeof m.boardMark === 'string' ? JSON.parse(m.boardMark) : m.boardMark; } catch { return false; }
+            return mark?.people && (Object.hasOwn(mark.people, avatar) || resolveIdentity(roster.filter(e=>e.role!=='不用'), p.name).person?.avatar === avatar && Object.hasOwn(mark.people, p.name));
+        }).at(-1)?.pos;
+        const since=Math.max(prior ? Math.max(num(p.since)??0,(prior.checkedAt??prior.at)+1) : num(p.since)??0, corrected == null ? 0 : corrected + 1);
         const r=leftAt(messages,p.name,{avatar,userName,status:p.status,way:p.way??null,since,
             others:people.filter(x=>x.name!==p.name&&x.status==='present').map(x=>x.name),roster,relations,
             remoteNames:people.filter(x=>x.status==='remote').map(x=>x.name),n:options.config?.auto?.remoteQuiet??3});
@@ -456,7 +677,7 @@ export function autoLeave(store, records, chatKey, { present = [], config = null
         const event=expired ? {left:true,sure:true,at:turns[1].pos,how:'被打发',why:'被打发后玩家又说两句，他仍未开口或被核实在场'} : r;
         if(event.left!==true || !event.sure) continue;
         const fp=messages.find(m=>m.pos===event.at)?.fp;
-        if(done.some(d=>d.who===p.name&&d.at===event.at&&d.fp===fp)) continue;
+        if(done.some(d=>sameFor(store,chatKey,d,p)&&d.at===event.at&&d.fp===fp)) continue;
         out.push({who:p.name,avatar:p.avatar,at:event.at,fp,how:event.how,why:event.why,...(expired?{basis:[{pos:prior.evidenceAt,fp:prior.evidenceFp},...(prior.basis??[]),...turns.slice(0,2).map(m=>({pos:m.pos,fp:m.fp}))]}:{})});
     }
     return out;
@@ -470,21 +691,23 @@ export function leaveDoubts(store, records, chatKey, { present = [], config = nu
         if(expired || settled || (!pending && r.left!==null)) continue;
         const at=pending ? prior.at : r.at;
         const fp=messages.find(m=>m.pos===at)?.fp;
-        if(at==null || done.some(d=>d.who===p.name && d.at===at && d.fp===fp)) continue;
+        if(at==null || done.some(d=>sameFor(store,chatKey,d,p) && d.at===at && d.fp===fp)) continue;
         const last=messages.at(-1);
         out.push({who:p.name,avatar:p.avatar,at,fp,why:pending?'被打发未动，继续核对是否已在场或离开':r.why,status:p.status,aliases,
             since:p.since??null,from,through:last.pos,throughFp:last.fp,
             ...(pending?{pendingAt:prior.evidenceAt,pendingQuote:prior.quote}:{}),
             basis:messages.filter(m=>m.pos>=(from??at)).slice(-10).map(m=>({pos:m.pos,fp:m.fp}))});
     }
-    return out;
+    return candidates(out).map(d => ({ ...d, sourceVersion: sourceVersion(store, chatKey, d.through) }));
 }
 export function answerLeaves(store, chatKey, doubts, verdicts) {
     const messages=live(store.currentMessages(chatKey)), asked=reviewsOf(store,chatKey,messages), gone=[];
     for(const d of doubts) {
-        if(!Object.hasOwn(verdicts??{},d.who) || !messages.some(m=>m.pos===d.at&&m.fp===d.fp)
+        if (!currentSource(store, chatKey, d)) continue;
+        const v=verdictFor(store, chatKey, doubts, d, verdicts);
+        if(v === undefined || !messages.some(m=>m.pos===d.at&&m.fp===d.fp)
             || (d.basis && !d.basis.every(b=>messages.some(m=>m.pos===b.pos&&m.fp===b.fp)))) continue;
-        const v=verdicts[d.who], legacy=typeof v==='boolean';
+        const legacy=typeof v==='boolean';
         const state=legacy?(v?'走了':'还在'):v?.['结果'];
         if(!['走了','还在','被打发未动'].includes(state)) continue;
         const evidence=legacy?messages.find(m=>m.pos===d.at):messages.find(m=>Number.isInteger(v?.['条'])&&m.pos===v['条']);
@@ -494,12 +717,13 @@ export function answerLeaves(store, chatKey, doubts, verdicts) {
         if(evidence.pos>through || (!legacy && evidence.pos<(d.from??d.since??d.at) && !(state==='被打发未动'&&evidence.pos===d.pendingAt))) continue;
         const last=messages.find(m=>m.pos===through);
         if(!last || (d.throughFp && last.fp!==d.throughFp)) continue;
-        const old=asked.filter(x=>x.who===d.who&&x.state==='被打发未动'&&(x.since??null)===(d.since??null)).at(-1);
+        const old=asked.filter(x=>sameFor(store,chatKey,x,d)&&x.state==='被打发未动'&&(x.since??null)===(d.since??null)).at(-1);
         // 指纹只覆盖实际给出的十条窗口；原始依据与已判末条另有锚点核验。
         const basis=d.basis;
-        asked.push({who:d.who,at:d.at,fp:d.fp,since:d.since??null,state,checkedAt:through,checkedFp:last.fp,
+        if (asked.some(x=>sameFor(store,chatKey,x,d)&&x.at===d.at&&x.fp===d.fp&&x.checkedAt===through&&x.checkedFp===last.fp)) continue;
+        asked.push({who:d.who,avatar:d.avatar??null,at:d.at,fp:d.fp,since:d.since??null,state,checkedAt:through,checkedFp:last.fp,through,sourceVersion:d.sourceVersion,
             evidenceAt:state==='被打发未动'&&old?old.evidenceAt:evidence.pos,evidenceFp:state==='被打发未动'&&old?old.evidenceFp:evidence.fp,quote:state==='被打发未动'&&old?old.quote:(legacy?null:v['引']),basis});
-        if(state==='走了') gone.push({who:d.who,avatar:d.avatar??null,how:'看一眼',at:evidence.pos,fp:evidence.fp,why:'复核依据已核过',basis});
+        if(state==='走了') gone.push({who:d.who,avatar:d.avatar??null,how:'看一眼',at:evidence.pos,fp:evidence.fp,why:'复核依据已核过',basis,through,sourceVersion:d.sourceVersion});
     }
     write(store,LEAVE_ASK(chatKey),asked.slice(-60));
     if(gone.length) {markLeft(store,chatKey,gone);write(store,LEFT_PENDING(chatKey),[...read(store,LEFT_PENDING(chatKey),[]),...gone].slice(-20));}
@@ -512,16 +736,17 @@ const eventId = item => encodeURIComponent(item.avatar ?? item.who)+':'+item.fp;
 export function leaveEvents(store, chatKey) {
     const messages=live(store.currentMessages(chatKey));
     const events=read(store,LEAVE_EVENTS(chatKey),[]);
+    const facts = factInput(store, chatKey);
     for(const e of events) {
         const matches=messages.filter(m=>m.fp===e.fp);
         const source=matches.find(m=>m.pos===e.at) ?? (matches.length===1?matches[0]:null);
-        const valid=!!source && (!e.basis || e.basis.every(b=>messages.some(m=>m.fp===b.fp&&m.pos===b.pos)));
+        const valid=!!source && factCurrent(e, facts) && (!e.basis || e.basis.every(b=>messages.some(m=>m.fp===b.fp&&m.pos===b.pos)));
         const action=valid?'leave':'undo';
         if(e.action!==action) {e.action=action;e.version++;e.state='待落实';}
         if(action==='leave'&&e.state==='被后来取代') {
             let anchors={};try{anchors=JSON.parse(store.getMeta?.(`anchors_raw:${chatKey}`)??'{}')??{};}catch{}
             const segs=anchors[e.avatar]?.segments??[];
-            const came=read(store,AUTO_CAME(chatKey),[]).some(c=>((c.avatar&&c.avatar===e.avatar)||c.who===e.who)&&c.at>e.at&&messages.some(m=>m.pos===c.at&&m.fp===c.fp));
+            const came=read(store,AUTO_CAME(chatKey),[]).some(c=>sameFor(store,chatKey,c,e)&&c.at>e.at&&messages.some(m=>m.pos===c.at&&m.fp===c.fp));
             if(!segs.some(s=>s?.from>e.at&&s.to!==s.from)&&!came){e.version++;e.state='待落实';}
         }
         if(source) e.at=source.pos;
@@ -529,7 +754,7 @@ export function leaveEvents(store, chatKey) {
             const plans=read(store,`away_plan:${chatKey}`,{});
             // 就地改稿会由 store.sync 把去向的指纹接到新字上；事件仍保留原离场证据。
             // 只撤同一位置、同一条改稿链的补记，别把另一回离场的去向一起撤掉。
-            for(const [key,p] of Object.entries(plans)) if(p?.who===e.who && (p.fp===e.fp
+            for(const [key,p] of Object.entries(plans)) if(sameFor(store,chatKey,p,e) && (p.fp===e.fp
                 || (p.at===e.at+1 && store.sameMessage?.(p.fp,e.fp)))) delete plans[key];
             write(store,`away_plan:${chatKey}`,plans);
         }
@@ -559,8 +784,8 @@ export function markLeft(store, chatKey, items) {
     for(const i of items) {
         if(!messages.some(m=>m.pos===i.at&&m.fp===i.fp)) continue;
         const id=eventId(i);
-        if(!events.some(e=>e.id===id)) events.push({...i,id,action:'leave',version:1,state:'待落实'});
-        if(!done.some(d=>d.who===i.who&&d.fp===i.fp&&d.at===i.at)) done.push({who:i.who,at:i.at,fp:i.fp,how:i.how});
+        if(!events.some(e=>e.id===id)) events.push({...i,through:i.through??i.at,sourceVersion:i.sourceVersion??sourceVersion(store,chatKey,i.through??i.at),factBasis:factBasis(i,factInput(store,chatKey)),id,action:'leave',version:1,state:'待落实'});
+        if(!done.some(d=>sameFor(store,chatKey,d,i)&&d.fp===i.fp&&d.at===i.at)) done.push({who:i.who,avatar:i.avatar??null,at:i.at,fp:i.fp,how:i.how});
     }
     write(store,LEFT(chatKey),done.slice(-60));
     write(store,LEAVE_EVENTS(chatKey),events);

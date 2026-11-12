@@ -7,6 +7,7 @@
 //（作废的叩门开的那段区间不算在场；场面表的读口由主窗接）。记录存哪、何时叩、扩展怎么叫他是主窗 1b、1c 的事。
 // 认不出是不是在回他的那几句（asks）交给便宜模型，判了写回记录的 verdicts（"条号:指纹" → true/false），状态机先看它。题材无关。
 import { arrivalLive } from './landing.mjs';
+import { sameIdentity, messageIsPerson } from './cast.mjs';
 import { partsBetween } from './arrival.mjs';
 import { PARTS } from './timeline.mjs';
 import { callsOf } from './camera-turn.mjs';
@@ -68,8 +69,8 @@ export function respondedTo(text, who, aliases = [], { way = null, lastSpeaker =
     return { responded: false, sure: false, why: him ? '他刚说完，这句只是叙述，认不出是不是在回他' : '认不出是不是在回他' };
 }
 
-const isHis = (m, k) => !!m && !m.is_user && (m.name === k.who || (!!k.avatar && m.speaker === k.avatar));
-const sameKnocker = (a, b) => !!a && !!b && ((!!a.who && a.who === b.who) || (!!a.avatar && a.avatar === b.avatar));
+const isHis = (m, k) => messageIsPerson(m, { ...k, name: k.who });
+const sameKnocker = (a, b, roster = []) => sameIdentity(a, b, roster);
 // 他那条（叩门的那条）：at 之后、他下一次叩门之前，第一条他开口的
 function knockMessage(k, messages, mine) {
     const at = num(k?.at);
@@ -88,7 +89,7 @@ export function knockState(knock, { messages = [], knocks = [], userName = null,
     const at = num(knock?.at);
     const base = { at, message: null, decided: null, unanswered: 0, asks: [] };
     if (!knock?.who || at == null) return { ...base, state: '没发生', why: '记录不全' };
-    const mine = knocks.filter(k => sameKnocker(k, knock));
+    const mine = knocks.filter(k => sameKnocker(k, knock, roster));
     if (!arrivalLive(knock, messages, mine.length ? mine : [knock])) return { ...base, state: '没发生', why: '挂的那条没了，或者他那条换成了别人在说' };
     const msg = knockMessage(knock, messages, mine.length ? mine : [knock]);
     if (!msg) return { ...base, state: '候着', why: '他那条还在写' };
@@ -172,7 +173,7 @@ export function knockSegmentState(segment, { who = null, avatar = null, knocks =
     const from = num(segment?.from);
     if (from == null) return null;
     const me = { who, avatar };
-    const mine = knocks.filter(k => k && sameKnocker(k, me) && num(k.at) === from);
+    const mine = knocks.filter(k => k && sameKnocker(k, me, rest.roster) && num(k.at) === from);
     if (!mine.length) return null;
     const states = mine.map(k => knockState(k, { knocks, ...rest }).state);
     return states.find(s => s === '进场') ?? states.find(s => s === '候着') ?? states.find(s => s === '作废') ?? '没发生';

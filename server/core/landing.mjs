@@ -3,17 +3,21 @@
 // 那条还在就算数，删了、换掉了就撤。这里是进场那份、"要联系"用掉的那一下、他后来自己进了场（enteredSince）；口袋那几步在 store.menuOf（pending），隔离区间在 liveAnchors。
 // 题材无关。
 
+import { sameIdentity, messageIsPerson, resolveIdentity } from './cast.mjs';
 const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
-const isHis = (m, e) => !!m && !m.is_user && (m.name === e.who || (!!e.avatar && m.speaker === e.avatar));
+const scopeOf = (messages, entries) => [...entries.map(e => ({ name: e.who ?? e.name, avatar: e.avatar })),
+    ...messages.filter(m => !m.is_user && /\.(png|webp|jpe?g|gif)$/i.test(m.speaker ?? '')).map(m => ({ name: m.name, avatar: m.speaker }))].filter(p => p.avatar && p.name);
+const isHis = (m, e, roster = []) => messageIsPerson(m, resolveIdentity(roster, e).person ?? { ...e, name: e.who ?? e.name }, roster);
 
 // 这次进场之后他那条回复：他进场以后、他下一次进场之前，第一条他开口的消息；没有就 null
 function replyOf(e, messages, entries = []) {
     const at = num(e?.at);
     if (at == null) return null;
-    const next = Math.min(Infinity, ...entries.filter(x => x !== e && isSame(x, e) && num(x.at) > at).map(x => num(x.at)));
-    return messages.find(m => m.pos >= at && m.pos < next && isHis(m, e)) ?? null;
+    const roster = scopeOf(messages, entries);
+    const next = Math.min(Infinity, ...entries.filter(x => x !== e && isSame(x, e, roster) && num(x.at) > at).map(x => num(x.at)));
+    return messages.find(m => m.pos >= at && m.pos < next && isHis(m, e, roster)) ?? null;
 }
-const isSame = (a, b) => (a.who && a.who === b.who) || (!!a.avatar && a.avatar === b.avatar);
+const isSame = (a, b, roster = []) => sameIdentity(a, b, roster);
 
 // 隔离区间封上了、中间一条都没有（拉进来又移出去，他一句没说）：等于没进过场，也不算"刚走"
 export const emptySegment = s => s?.to != null && num(s.to) != null && num(s?.from) != null && num(s.to) <= num(s.from);
@@ -46,7 +50,7 @@ export function relinkArrivals(store, records, chatKey) {
         if (!(e?.recs?.length || e?.menus?.length) || !e.fp) return;
         const at = num(e.at);
         // 同一条上又进了一次场（他那条删了重来）：前一次替他记的不再算，只留最后一次的
-        const again = entries.slice(i + 1).some(x => x && isSame(x, e) && num(x.at) === at && x.fp === e.fp);
+        const again = entries.slice(i + 1).some(x => x && isSame(x, e, scopeOf(messages, entries)) && num(x.at) === at && x.fp === e.fp);
         const anchored = !again && store.knockLive?.(chatKey, e) !== false && at != null && messages[at - 1]?.fp === e.fp;
         const reply = anchored ? replyOf(e, messages, entries) : null;
         const target = reply?.fp ?? (anchored && messages.length <= at && !leftSilent(e, anchors) ? e.fp : `${GONE}${e.fp}`);
@@ -104,7 +108,7 @@ export function enteredSince(pos, { who = null, avatar = null, messages = [], an
     if (p == null || (!who && !avatar)) return false;
     const entries = Array.isArray(arrivals) ? arrivals.filter(Boolean) : [];
     const me = { who, avatar };
-    const mine = entries.filter(e => isSame(e, me));
+    const mine = entries.filter(e => isSame(e, me, scopeOf(messages, entries)));
     const live = e => knockLive?.(e) !== false && arrivalLive(e, messages, entries, anchors);
     const segs = avatar ? anchors?.[avatar]?.segments : null;
     const segLive = s => { const atStart = mine.filter(e => num(e.at) === s.from); return !atStart.length || atStart.some(live); };
@@ -135,5 +139,5 @@ export function contactUsed(c, messages, entries = [], opts = {}) {
     const u = c.usedAt;
     if (messages[u.pos]?.fp !== u.fp) return false;
     if (!u.who) return true;
-    return messages.length <= u.pos + 1 || messages.slice(u.pos + 1).some(m => isHis(m, { who: u.who, avatar: u.avatar ?? null }));
+    return messages.length <= u.pos + 1 || messages.slice(u.pos + 1).some(m => isHis(m, { who: u.who, avatar: u.avatar ?? null }, scopeOf(messages, entries)));
 }

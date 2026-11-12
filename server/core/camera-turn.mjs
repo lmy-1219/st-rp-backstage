@@ -41,11 +41,17 @@ function eventsIn(text, calls, { known = [] } = {}) {
     let anon = false;
     for (const q of s.matchAll(QUOTE)) {
         const start = q.index, end = start + q[0].length;
-        const before = s.slice(Math.max(0, start - NEAR), start).split(BREAK).at(-1);
+        const before = s.slice(Math.max(0, start - NEAR), start).replace(/[。！？!?；;\s）)]+$/, '').split(BREAK).at(-1);
         const after = s.slice(end, end + NEAR).split(BREAK)[0];
         const near = `${before}|${after}`;
         if (calls.length && mentions(near, calls)) out.push({ at: start, kind: 'speak' });
-        else if (!known.some(c => near.includes(c)) && !TO_PLAYER.test(near)) anon = true;
+        else if (!known.some(c => near.includes(c)) && !TO_PLAYER.test(near)) {
+            // 引号可能是标语、引用或内心独白；须写出匿名说话者及其发声/承接动作。
+            const human = '(?:有人|一个人|那个人|[^，。！？；“”]{1,10}的人|店员|服务员|工作人员|路人|陌生人|声音)';
+            const beforeSpeaker = new RegExp(human + '[^，。！？；“”]{0,16}(?:说|问|喊|答|开口|出声|传来|头也没抬)[^，。！？；“”]{0,4}$');
+            const afterSpeaker = new RegExp('^[，,\\s）)]*' + human + '[^，。！？；“”]{0,8}(?:说|问|喊|答|开口|出声)');
+            if (beforeSpeaker.test(before) || afterSpeaker.test(after)) anon = true;
+        }
     }
     if (calls.length) {
         let at = 0;
@@ -118,10 +124,10 @@ export function cameraShouldSpeak({ messages = [], recentUser = null, present = 
     const rel = relations ? normalizeRelations(relations) : null;
     const names = roster.map(e => e?.name).filter(Boolean);
     const same = (a, b) => sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names));
-    // 在场的有卡的人：群里开着口的（扩展带来的名单）里名册上有卡的；没带名单就看场面表
-    const cardsHere = present.length
-        ? present.filter(n => n && n !== userName && n !== CAMERA_NAME && roster.some(e => hasCard(e) && same(e.name, n)))
-        : (board?.people ?? []).filter(p => p.card && ['present', 'remote'].includes(p.status) && p.name !== CAMERA_NAME).map(p => p.name);
+    // 接了场面表就只认统一结果；没有表的独立调用保留名单兼容。
+    const cardsHere = board
+        ? (board.people ?? []).filter(p => p.card && ['present', 'remote'].includes(p.status) && p.name !== CAMERA_NAME).map(p => p.name)
+        : present.filter(n => n && n !== userName && n !== CAMERA_NAME && roster.some(e => hasCard(e) && same(e.name, n)));
     if (!cardsHere.length) return { speak: false, why: '身边没有有卡的人（一个人时照旧由旁白接）' };
     if (messages.slice(userAt + 1).some(isNarrator)) return { speak: false, why: '这一句旁白已经接过了' };
     const upto = messages.slice(0, userAt + 1);

@@ -1,4 +1,5 @@
 import { driveLines } from './drive.mjs';
+import { resolveIdentity } from './cast.mjs';
 // 兴头（D-109 第 2 步，N-225、N-226；D-112、D-113 加"就地"一类）：生活感按场面来。角色回完一条，后台让便宜、读得多的模型（默认 Gemini）看一眼眼下的场面：
 // 出门的——活干完了的空当、接了活还在等、气氛正好、有人高兴兴奋——有人冒个念头（去喝一杯、找个场子），排着的轻松事正好对上，熟人来邀，街上冒件事；
 // 就地的——不换场景、不推剧情时人也在动：没头没尾想起一件往事、一句听来的闲话，问玩家一件好奇的事，两个角色拌嘴，手上干着自己的活，
@@ -125,7 +126,7 @@ export function parseScene(text) {
 // 不替角色讲道理：吵着、难过时能不能亲近、到哪一步，由模型照关系和性子定。过了返回要存的那一条，不过返回 null。
 export function admitImpulse(v, { present = [], offstage = [], userName = '玩家', recent = [], told = [], pos = 0, at = null, gaps = {}, loose = [] }) {
     const { personGap = 30, inPlaceGap = 8, closeGap = 40 } = gaps;
-    const known = (list, who) => (who ? list.find(p => p.name === who || p.name.includes(who) || who.includes(p.name)) : null);
+    const known = (list, who) => resolveIdentity(list, who).person;
     const inPlace = IN_PLACE.has(v.kind);
     // 玩家累着、难受：出门的不出（程序兜底，模型照规矩本就不该出）
     if (STAY_STATES.has(v.userState) && OUTING.has(v.kind)) return null;
@@ -153,7 +154,7 @@ export function admitImpulse(v, { present = [], offstage = [], userName = '玩�
     }
     // 顺手收拾手边的事：编号得是这次给过的
     const end = v.kind === '顺手' && v.loose ? loose.find(l => l.id === v.loose) ?? null : null;
-    return { ...v, who: me?.name ?? v.who, ...(v.kind === '邀约' ? { route } : {}), to, tale, loose: end ? { id: end.id, text: end.text } : null, at, used: false };
+    return { ...v, who: me?.name ?? v.who, ...(me?.avatar ? { avatar: me.avatar } : {}), ...(v.kind === '邀约' ? { route } : {}), to, tale, loose: end ? { id: end.id, text: end.text } : null, at, used: false };
 }
 
 // 交给开口的人的那几行（可以用，也可以不用）。

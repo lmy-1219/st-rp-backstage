@@ -1,5 +1,6 @@
 // 门只列人选，不替旁白或玩家决定谁此刻进场。
 import { createHash } from 'node:crypto';
+import { sameIdentity, resolveIdentity } from './cast.mjs';
 import { hasCard, callsFor, wayOf, partsBetween } from './arrival.mjs';
 import { boardFor } from './board.mjs';
 import { pendingFor } from './pending.mjs';
@@ -80,26 +81,28 @@ export function doorAt(input = {}) {
     const items = [];
     for (const card of roster.filter(e => hasCard(e) && e.name !== '旁白')) {
         const who = card.name;
-        const person = list(board.people).find(p => same(p.name, who)) ?? { status: 'never' };
-        if (['present', 'remote'].includes(person.status) || (input.present ?? []).some(n => same(n, who))) continue;
+        const uniqueName = name => resolveIdentity(roster.filter(hasCard), name).person?.avatar === card.avatar;
+        const ownIdentity = ref => sameIdentity(ref,card,roster.filter(hasCard));
+        const person = list(board.people).find(p => sameIdentity(p, card, roster)) ?? { status: 'never' };
+        if (['present', 'remote'].includes(person.status)) continue;
         if ((input.holds ?? []).some(h => same(h.who, who) && h.at <= last && partsBetween(rowAt(h.at), rowAt(last), timeline.parts ?? PARTS) <= 0)) continue;
-        const own = list(pending.items).filter(p => same(p.owner, who) || (p.who ?? []).some(n => same(n, who)));
+        const own = list(pending.items).filter(p => p.avatar ? ownIdentity(p) : uniqueName(p.owner) || (p.who ?? []).some(uniqueName));
         const contacts = (memory ? [] : own).filter(p => p.kind === '联系' && !['办了', '用上了', '失效'].includes(p.status));
         // 他牵头、已经拿出来了、后半截还等他自己说的（status shown）也在门上：别人不替他交后半截（slot.menuFor）
         // 拿出来那条以后他自己进了场（landing.enteredSince）：这件门上不再挂——他来过了，后半截他在场时自己说（slot.menuFor 照旧给他）
         const pocketAt = m => (m.status === 'shown' ? m.settled_pos ?? m.pocket_pos : m.pocket_pos);
-        const pockets = (memory ? [] : menu).filter(m => same(m.who, who) && (m.status === 'pocket' || m.status === 'shown') && (m.status === 'shown' || !afterBlocked(m, menu, x => x.status, { visible: input.visible, messages })) && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
+        const pockets = (memory ? [] : menu).filter(m => ownIdentity(m) && (m.status === 'pocket' || m.status === 'shown') && (m.status === 'shown' || !afterBlocked(m, menu, x => x.status, { visible: input.visible, messages })) && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
             && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivalHistory ?? input.arrivals ?? [], knockLive: input.knockLive }));
-        const reached = !memory && reach && same(reach.person ?? reach.who, who);
-        const called = callsFor(narrationOf(recentUser), [who, ...(rel ? personOf(rel, who, names)?.又名 ?? [] : [])]);
-        const requested = request && same(request.who, who) && last >= request.at && last - request.at <= 8;
+        const reached = !memory && reach && ownIdentity({...reach,who:reach.person ?? reach.who});
+        const called = uniqueName(who) && callsFor(narrationOf(recentUser), [who, ...(rel ? personOf(rel, who, names)?.又名 ?? [] : [])]);
+        const requested = request && ownIdentity(request) && last >= request.at && last - request.at <= 8;
         const promises = list(pending.items).filter(p => p.kind === '约定' && ['到了', '排着'].includes(p.status)
             && (person.since == null || p.since >= person.since - 3)
-            && [...(p.who ?? []), ...(p.with ?? [])].some(n => same(n, who))
+            && [...(p.who ?? []), ...(p.with ?? [])].some(uniqueName)
             && [...(p.who ?? []), ...(p.with ?? [])].some(n => same(n, userName)));
         // 这局从没出场的：后台排了他（口袋、来联系、结算的联系）或者玩家叫他，才进名单
         if (person.status === 'never' && !contacts.length && !pockets.length && !reached && !called && !requested && !(memory && promises.length)) continue;
-        const errands = own.filter(p => p.kind === '去办' && same(p.owner, who) && (person.since == null || p.since >= person.since - 3));
+        const errands = own.filter(p => p.kind === '去办' && uniqueName(p.owner) && (person.since == null || p.since >= person.since - 3));
         const place = person.place || errands.find(e => concrete(e.place))?.place || promises.find(p => concrete(p.place))?.place;
         // 时机由玩家定（D-175）：刚走的、还在外头办事的也给"他过来"；"去找他"只要他在这局出现过（进场那份照他的去向写他在哪），或者知道他在哪
         const defaults = [...(person.status !== 'never' || concrete(place) ? ['去找他'] : []), '他过来', '消息', '电话'];
@@ -146,15 +149,15 @@ export function doorAt(input = {}) {
     // 一人一条（试玩 10/10：名册里同一个人有旧卡、现卡两张，门上挂了两条）：按关系表认成同一个人的几张卡只留一条——
     // 能接上的优先；再是在群里的那张、最近进过场的那张；再按由头的先后
     const members = list(input.members);
-    const inGroup = i => members.some(m => m && !m.disabled && ((i.avatar && m.avatar === i.avatar) || m.name === i.who)) ? 1 : 0;
+    const inGroup = i => members.some(m => m && !m.disabled && sameIdentity(i, m, roster)) ? 1 : 0;
     const anchors = input.anchors ?? {};
     // 最近进过场的那张：零长度的封段（拉进来判不在场当场封上，T070）不算进过场（用户 10/15）
-    const lastIn = i => Math.max(-1, ...list(input.arrivals).filter(e => e && ((i.avatar && e.avatar === i.avatar) || e.who === i.who)).map(e => Number(e.at)).filter(Number.isFinite),
+    const lastIn = i => Math.max(-1, ...list(input.arrivals).filter(e => e && sameIdentity(i, e, roster)).map(e => Number(e.at)).filter(Number.isFinite),
         ...(i.avatar ? anchors[i.avatar]?.segments ?? [] : []).filter(s => !emptySegment(s)).map(s => Number(s?.from)).filter(Number.isFinite));
     const better = (a, b) => Number(b.ready) - Number(a.ready) || inGroup(b) - inGroup(a) || lastIn(b) - lastIn(a) || rank(a) - rank(b);
     const one = [];
     for (const i of items) {
-        const k = one.findIndex(x => same(x.who, i.who));
+        const k = one.findIndex(x => sameIdentity(x, i, roster));
         if (k < 0) one.push(i);
         else if (better(i, one[k]) < 0) one[k] = i;
     }

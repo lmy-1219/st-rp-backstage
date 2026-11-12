@@ -5,6 +5,7 @@
 import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStaleOn, guideClosed, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, classify, openSegment, closeSegment, residentFromStart, ensureCameraPresence, repairResidentSegment, restoreSegment, runLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 import { cutByPresence, storyTimeAt } from './presence.mjs';
+import { boardSegmentEdit, undoBoardSegmentEdit } from './sync.mjs';
 
 const MODULE = 'rp_emergence';
 const KEYS = { rule: 'rp_emergence_rule', slot: 'rp_emergence_slot', mid: 'rp_emergence_mid', recall: 'rp_emergence_recall', world: 'rp_emergence_world' };
@@ -973,8 +974,12 @@ async function applyOpeningAbsent(reply, chatKey) {
     const c = ctx(), group = currentGroup(c);
     if (state.chatKey !== chatKey || !group || c.chat?.some(m => m.is_user) || !Array.isArray(reply?.openingAbsent)) return;
     const camera = cameraOf(c)?.avatar, disabled = new Set(group.disabled_members ?? []), added = [];
-    const handled = new Set(c.chatMetadata?.rp_emergence?.openingMuted ?? []), before = handled.size;
+    const metadata = (c.chatMetadata.rp_emergence ??= {});
+    metadata.openingMuted ??= [];
+    const handled = new Set(metadata.openingMuted), before = handled.size;
+    const openingAvatars = new Set((c.chat ?? []).filter(m => !m.is_user && !m.is_system && !m.extra?.rp_vis).map(m => m.original_avatar).filter(Boolean));
     for (const avatar of new Set(reply.openingAbsent)) {
+        if (openingAvatars.has(avatar)) continue;
         const card = c.characters.find(x => x.avatar === avatar);
         if (!card || avatar === camera || card.name === c.name1 || !group.members.includes(avatar) || handled.has(avatar)) continue;
         handled.add(avatar);
@@ -1655,7 +1660,9 @@ function fallbackAvatar(c) {
 }
 // 旁白卡（N-276）：只是载体，不算群里的人——不进名册、不算在场
 function cameraOf(c) {
-    const cam = (c.characters ?? []).find(isCamera) ?? null;
+    const group = typeof currentGroup === 'function' ? currentGroup(c) : null;
+    const candidates = (c.characters ?? []).filter(isCamera).filter(ch => !group || group.members.includes(ch.avatar));
+    const cam = candidates.length === 1 ? candidates[0] : null;
     setCamera(cam?.avatar);
     return cam;
 }
@@ -1725,6 +1732,7 @@ async function syncOnce(force = false, light = false) {
             const c = ctx();
             await sendPersona();
             if (epoch !== state.epoch) return false;
+            if (typeof reconcileBoardState === 'function') await reconcileBoardState();
             cameraOf(c);   // 旁白卡写的记 narrator：先认出它再算指纹
             const tb = performance.now();
             const generating = activeGeneration();
@@ -1900,7 +1908,7 @@ async function onChatChanged() {
     state.relationsDraft = null;
     clearPrompts();
     Object.assign(state, { chatKey: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
-    Object.assign(auto, { on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null });
+    Object.assign(auto, { blocked:null,executionStatus:null,on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null });
     state.memberBase = memberSnapshot();
     state.firstMemberSnapshot = state.memberBase && !(ctx().chat??[]).some(m=>m.is_user) ? {...state.memberBase,at:0} : null;   // 开局第一次群快照
     // 换了窗口：群成员名单的基线重记（不触发），不拿上一个窗口的名单比
@@ -1908,7 +1916,11 @@ async function onChatChanged() {
     dayLabels = []; boardLabels = []; state.boardCast = [];
     drawDays();
     render();
-    if (!settings().enabled) return;
+    if (!settings().enabled) {
+        try { await autoStrategy(false); }
+        catch (error) { state.note = `群回复方式尚未恢复：${error.message}`; render(); }
+        return;
+    }
     const c = ctx();
     cameraOf(c);
     const { stChatId, groupId } = chatIds(c);
@@ -2027,7 +2039,8 @@ globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
     if (!character) return;
     cameraOf(c);
     // 发消息、打电话来的那几条（extra.rp_vis）同屋别的有卡的人看不见：发出去的这份按开口的人筛（方案 自动进离场与调度，N-377）
-    filterVisible(_chat, camera ? '旁白' : character.name, c.name1);
+    filterVisible(_chat, camera ? '旁白' : { name: character.name, avatar: character.avatar }, c.name1, c.characters,
+        () => globalThis.toastr?.warning('有旧私信的身份未能唯一确认，已暂时隔离。请按卡文件核对发送者或收件人。'));
     if (camera) {
         setCamera(character.avatar);
         isolateCameraPrompts(character);
@@ -2240,7 +2253,7 @@ export function sceneCardHtml(board, roster = [], date = null) {
     if (!board) return '<p>场面还没算好</p>';
     const time = [date?.full || date?.label || (board.time?.day != null ? `第 ${board.time.day + 1} 天` : ''), board.time?.part].filter(Boolean).join(' · ');
     const people = (board.people ?? []).filter(p => ['present', 'remote'].includes(p.status)).map(p => {
-        const entry = roster.find(e => e.name === p.name && e.role !== '不用');
+        const entry = p.avatar ? roster.find(e => e.avatar === p.avatar && e.role !== '不用') : roster.filter(e=>e.name===p.name && e.role!=='不用').length===1 ? roster.find(e=>e.name===p.name && e.role!=='不用') : null;
         const tag = entry?.群体 ? '（一群人）' : String(entry?.avatar ?? '').startsWith('face:') ? '（没卡）' : '';
         return `<span class="rpe-person rpe-${p.status}">${escapeHtml(p.name)}${tag}${p.status === 'remote' ? ' · 远程' : ''}</span>`;
     }).join('');
@@ -2255,7 +2268,7 @@ export function boardPeopleAfterEdit(previous = {}, selected = {}, clear = false
     const people = clear ? {} : { ...previous };
     for (const [name, value] of Object.entries(selected)) {
         if (['在场', '远程', '不在'].includes(value)) people[name] = value;
-        else if (value === '' && (clear || previous[name] !== '外头')) delete people[name];
+        else if (value === '' && (clear || (typeof previous[name] === 'object' ? previous[name]?.status : previous[name]) !== '外头')) delete people[name];
     }
     return people;
 }
@@ -2281,7 +2294,7 @@ export function onboardingHtml({ hasChat = false, joined = false } = {}) {
 export function panelPageHtml(page) {
     const button = (action, text) => `<button class="menu_button" data-action="${action}" type="button" title="${panelHelp(action)}">${text}</button>`;
     const card = (title, html) => `<section class="rpe-card"><h4>${title}</h4>${html}</section>`;
-    if (page === 'now') return `<div data-role="start-guide"></div><div data-joined>${card('此刻的场面', '<div data-role="board-row"></div><div class="rpe-grid">' + button('board-edit', '纠正场面') + button('camera-now', '旁白来一段') + '</div>')}
+    if (page === 'now') return `<div data-role="start-guide"></div><div data-joined>${card('此刻的场面', '<div data-role="board-row"></div><div data-role="schedule-status"></div><div class="rpe-grid">' + button('board-edit', '纠正场面') + button('camera-now', '旁白来一段') + '</div>')}
         <details class="rpe-card" data-role="glance"><summary>眼下</summary><div data-role="glance-body"></div></details>
         <section class="rpe-card" data-role="tasks-card" hidden><h4>待处理</h4><div data-role="tasks"></div></section>
         ${card('幕后', '<p data-role="plan"></p><small data-role="secret-hint"></small><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + '<button class="menu_button" type="button" data-action="plan-repair" hidden title="只修已保存规划的格式，建议先看失败原因。">修格式</button><button class="menu_button" type="button" data-action="plan-abandon" hidden title="放弃挂着的规划，继续用已生效那份。">放弃这次重抽</button>' + button('plan-reveal', '看幕后（剧透）') + '</div>')}
@@ -2517,6 +2530,7 @@ function mountPanel() {
             if (list.some(m => m.avatar === keep) || (camIn && keep === CAMERA_PICK)) who.value = keep;
         }
         $('[data-role="board-row"]').innerHTML = sceneCardHtml(boardLabels.at(-1), state.boardCast ?? [], dayLabels.at(-1));
+        $('[data-role="schedule-status"]').innerHTML = scheduledStatusHtml();
         showPage(currentTab);
     };
     panel.addEventListener('input', event => {
@@ -2525,6 +2539,7 @@ function mountPanel() {
     });
     panel.addEventListener('click', async event => {
         const target = event.target.closest('button,a');
+        if(target?.dataset.action==='schedule-retry'){try{await retryScheduled();}catch(error){state.note=error.message;render();}return;}
         if (target?.dataset.tab) {
             showPage(target.dataset.tab, true);
             if (target.dataset.tab === 'settings') try { const t = await api('tuning', {}); state.dailyBudget = t.knobs.find(k => k.path === 'extractor.dailyBudgetUsd')?.value; state.globalPlay = t.knobs.find(k => k.path === 'play.mode')?.value ?? 'full'; render(); } catch {}
@@ -3223,22 +3238,26 @@ const auto = { on: null, unavailable: false, turnEnabled: null, buttons: true, j
 function presentNames(c) { return [c.name1, ...members(c).filter(m => !m.disabled).map(m => m.name)].filter(Boolean); }
 // 群的回复方式：开了改成手动（记下原来的），关了改回去。改的是 ST 的群设置，记在搬迁清单
 async function autoStrategy(enable) {
-    const c = ctx(), g = currentGroup(c);
-    if (!g) return;
-    if (!stGroups?.editGroup) throw new Error('群设置尚未准备好');
-    const saved = settings().autoStrategy ??= {};
-    const now = Number(g.activation_strategy ?? 0);
-    if (enable && now !== MANUAL_STRATEGY) {
-        saved[g.id] = now;
-        g.activation_strategy = MANUAL_STRATEGY;
-        await stGroups.editGroup(g.id, true, false);
-        saveExtensionSettings();
-        globalThis.toastr?.info('这个群的回复方式改成了"手动"：你发一句 ST 不叫人，谁接话由后台排。关掉"谁接话"或"自动进离场"会改回原来的。', 'RP：幕后', { timeOut: 10000 });
-    } else if (!enable && Object.hasOwn(saved, g.id)) {
-        if (Number(g.activation_strategy) === MANUAL_STRATEGY) { g.activation_strategy = Number(saved[g.id]); await stGroups.editGroup(g.id, true, false); }
-        delete saved[g.id];
-        saveExtensionSettings();
-        globalThis.toastr?.info('这个群的回复方式改回原来的了。', 'RP：幕后', { timeOut: 6000 });
+    const c=ctx(),current=currentGroup(c),saved=settings().autoStrategy??={};
+    const groups=!enable&&!settings().enabled?(c.groups??(current?[current]:[])):(current?[current]:[]);
+    for(const g of groups){
+        const now=Number(g.activation_strategy??0);
+        if(enable&&now!==MANUAL_STRATEGY){
+            if(!stGroups?.editGroup)throw Error('群设置尚未准备好');
+            saved[g.id]=now;saveExtensionSettings();g.activation_strategy=MANUAL_STRATEGY;
+            try{await stGroups.editGroup(g.id,true,false);if(Number(g.activation_strategy)!==MANUAL_STRATEGY)throw Error('群回复方式保存后核实失败');}
+            catch(error){g.activation_strategy=now;throw error;}
+            globalThis.toastr?.info('这个群的回复方式改成了"手动"：你发一句 ST 不叫人，谁接话由后台排。关掉"谁接话"或"自动进离场"会改回原来的。','RP：幕后',{timeOut:10000});
+        }else if(!enable&&Object.hasOwn(saved,g.id)){
+            if(now===MANUAL_STRATEGY){
+                if(!stGroups?.editGroup)throw Error('群设置尚未准备好');
+                g.activation_strategy=Number(saved[g.id]);
+                try{await stGroups.editGroup(g.id,true,false);if(Number(g.activation_strategy)!==Number(saved[g.id]))throw Error('群回复方式恢复后核实失败');}
+                catch(error){g.activation_strategy=now;throw error;}
+            }
+            delete saved[g.id];saveExtensionSettings();
+            globalThis.toastr?.info('群回复方式已核对，系统接管已关闭。','RP：幕后',{timeOut:6000});
+        }
     }
 }
 // ST 群面板的“自动模式”开着：ST 每隔几秒自己随便叫一个人，和后台排的谁接话抢。只提醒，不替玩家关（T071）；每个群每次打开窗口至多一次
@@ -3278,13 +3297,17 @@ async function autoApply(r) {
     auto.turnEnabled=enableTurn;
     automodeHint();
     auto.buttons=r?.buttons!==false;
+    if (typeof recoverOpeningMuted === 'function') await recoverOpeningMuted();
     auto.waiting = r?.waiting ?? null;
     if (Array.isArray(r?.remote)) auto.remote = new Map(r.remote.map(x => [x.avatar ?? x.who, { who: x.who, way: x.way }]));
     if (auto.on===false && was!==false) refreshDoor().catch(() => {});
     let applied = true;
+    const handled=new Set();
     for (const l of [...(r?.left??[]),...(r?.lapsed??[])]) {
+        const key=l.id?`${l.id}:${l.version}:${l.action}`:null;
+        if(key&&handled.has(key))continue;if(key)handled.add(key);
         // 连败三次的事件已在面板暂停并可手动再试；不挡其他事件和接话。
-        try { await autoClose(l,l.id?'走了':'作废'); }
+        try { await autoClose(l,l.id&&!l.id.startsWith('lapsed:')?'走了':'作废'); }
         catch(error) { applied = false; console.warn('[RP：幕后] 离场未落实，将重试',l.who,error); }
     }
     render();
@@ -3303,6 +3326,9 @@ async function autoDrive(type) {
     if (afterReply && typingNow()) { console.log('[RP：幕后] 玩家在打字，先停'); return false; }
     // 同一条之后只问一次：叫的人没生成成（断网、被拒）群聊收尾又会走到这里，别一直重叫
     const key = `${c.chat.length}:${fingerprintMessage(last, speakerOf(last, fallbackAvatar(c)))}`;
+    const version = () => JSON.stringify([ctx().chat?.map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null]),state.boardCast?.map(p=>[p.avatar,p.role]),currentGroup(ctx())?.members,currentGroup(ctx())?.disabled_members,ctx().chatMetadata?.contextIsolation?.anchors]);
+    const localVersion = version();
+    if (auto.blocked?.key === key && auto.blocked.version === localVersion) return false;
     const chatKey = state.chatKey, epoch = state.epoch, length = c.chat.length;
     const driving = auto.driving ??= new Set(), claim = `${chatKey}:${epoch}:${key}`;
     if (driving.has(claim) || auto.lastTurn === key) return false;
@@ -3318,82 +3344,233 @@ async function autoDrive(type) {
         let r = null;
         try { r = await api('turn', { chatKey, present: presentNames(ctx()), recentUser: [...ctx().chat].reverse().find(m => m.is_user)?.mes ?? '' }, 240000); }
         catch { if (state.epoch === epoch && state.chatKey === chatKey) { auto.unavailable=true;render(); } return false; }
-        if (!current()) return false;
+        if (!current() || version() !== localVersion) return false;
         console.log('[RP：幕后] 谁接', JSON.stringify({ queue: r.queue, knock: r.knock, waiting: r.waiting, left: r.left, lapsed: r.lapsed, why: r.why }));
         if (await autoApply(r)===false) return false;
         if (!current()) return false;
         if (!auto.on) return 'off';
-        auto.lastTurn = key;
-        if (r.knock) return await autoKnock(r.knock);
+        const complete = async work => {
+            let ok = false;
+            try { ok = await work(); }
+            catch (error) { auto.executionStatus = { result:'error', reason:error.message }; }
+            if (ok) { auto.lastTurn = key; auto.blocked = null; }
+            else { auto.blocked = { key, version:version(), reason:auto.executionStatus?.reason??'未落消息，请核对后重试' }; }
+            render(); return ok;
+        };
+        if (r.knock) return await complete(()=>autoKnock(r.knock));
         if (!auto.turnEnabled) return 'off';
         const next = (r.queue ?? [])[0];
         // 问回来这会儿玩家开始打字了：不叫下一个（叩门在上面已经照旧让他写那一条）
-        if (next && afterReply && typingNow()) { console.log('[RP：幕后] 玩家在打字，先停'); return false; }
-        return next ? await autoSpeak(next) : false;
+        if (next && afterReply && typingNow()) { auto.executionStatus={result:'waiting',reason:'你在输入，接话停在这里'}; render(); return false; }
+        if (!next) {
+            if(r.complete===true){auto.lastTurn=key;auto.blocked=null;}
+            else auto.blocked={key,version:version(),reason:r.why||'在场或身份需要核对，请纠正后重试'};
+            auto.executionStatus={result:r.complete===true?'idle':'paused',reason:r.why||'等你下一句'};render();return false;
+        }
+        return await complete(()=>autoSpeak(next));
     } finally { driving.delete(claim); }
+}
+async function runScheduled(q, prepare) {
+    const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,chat=c.chat;
+    const journal=c.chatMetadata.rpeExecution??={};
+    const prior=Object.entries(journal).find(([,e])=>e.q?.execution&&q.execution
+        && e.avatar===(q.avatar??null)&&e.q.execution.through===q.execution.through
+        && (e.q.execution.source&&q.execution.source ? e.q.execution.source===q.execution.source : true)
+        && ['running','unconfirmed','cancelled','error','waiting','delivered'].includes(e.result));
+    if(prior)q={...q,execution:{...prior[1].q.execution}};
+    const id=q.execution?.id??`${q.avatar??'narrator'}:${chat.length}:${fingerprintMessage(chat.at(-1),speakerOf(chat.at(-1),fallbackAvatar(c)))}`;
+    const length=journal[id]?.at??chat.length;
+    const snapshot=()=>JSON.stringify(chat.slice(0,length).map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(c))),!!m.is_system,m.extra?.rp_board??null]));
+    const prefix=snapshot();
+    // 展示数据会随消息刷新；执行只固定卡身份、档位和本局实际选中的卡，空认卡条目等同未选择。
+    const roleSnapshot=()=>JSON.stringify([(state.boardCast??[]).map(p=>[p.avatar,p.name,p.role]),
+        Object.entries(c.chatMetadata.rpeCardChoices?.[chatKey]??{}).filter(([,choice])=>choice?.avatar).map(([name,choice])=>[name,choice.avatar]).sort(([a],[b])=>a.localeCompare(b))]);
+    let roles;
+    const guard=()=>{
+        if(!settings().enabled||state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==chat||snapshot()!==prefix)throw Error('来源或聊天已改变，请重新核对');
+        if(roles!==undefined&&roleSnapshot()!==roles)throw Error('卡身份或档位已改变，请重新核对');
+    };
+    const landed=()=>chat.slice(length).find(m=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()&&(q.avatar?speakerOf(m,fallbackAvatar(c))===q.avatar:m.name===q.who));
+    const report=async(result,reason)=>{
+        guard();auto.executionStatus={who:q.who,result,reason,id};
+        journal[id]={...journal[id],result,reason,avatar:q.avatar,at:length,q};
+        await c.saveMetadata();guard();
+        if(q.execution){
+            if(await syncNow(true)===false)throw Error('执行结果尚未同步，请先核对消息');guard();
+            const r=await api('turn-result',{chatKey,id:q.execution.id,result,reason});guard();
+            if(!r.ok)throw Error(r.why||'执行回执未确认');
+        }
+        render();
+    };
+    let prepared,issued=false,previousAttempt=['running','unconfirmed','cancelled','error','waiting','delivered'].includes(journal[id]?.result);
+    try{
+        guard();
+        // 冷缓存先读名册并完成当前目标的认卡，再取执行基线；等待真实请求而非定时延迟。
+        if(!state.boardCast?.length){const r=await api('cast',{chatKey});guard();state.boardCast=r.cast??[];}
+        if(q.role!=='旁白'&&q.who!=='旁白'){await resolveCard(q.who,q.avatar);guard();}
+        roles=roleSnapshot();
+        if(landed()){await report('delivered',`${q.who}的消息已落下`);return true;}
+        if(['running','unconfirmed','cancelled','error','waiting','delivered'].includes(journal[id]?.result))throw Object.assign(Error('这次生成已发出或已停止，请核对消息后点重试'),{result:journal[id].result==='cancelled'?'cancelled':'unconfirmed'});
+        if(q.execution){
+            let r=await api('turn-result',{chatKey,id:q.execution.id,result:'check'});guard();if(!r.ok)throw Error(r.why);
+            if(r.execution?.state==='delivered')return true;
+            if(r.execution?.state==='muted'&&!currentGroup(ctx())?.disabled_members?.includes(q.avatar)){r=await api('turn-result',{chatKey,id:q.execution.id,result:'retry'});guard();}
+            if(!r.ok||r.execution?.state!=='queued'){
+                previousAttempt ||= !!r.execution && r.execution.state!=='queued';
+                throw Object.assign(Error(r.execution?.reason||'上次生成仍需核对，请点重试'),{result:'unconfirmed'});
+            }
+        }
+        const avatar=q.avatar,ownsPreparation=avatar&&q.execution?.preparation;
+        const segmentKey=s=>fingerprintMessage({mes:JSON.stringify(s)},avatar);
+        const existing=new Set((c.chatMetadata.contextIsolation?.anchors?.[avatar]?.segments??[]).map(segmentKey));
+        const wasDisabled=!!currentGroup(c)?.disabled_members?.includes(avatar);
+        const openingMuted=!!c.chatMetadata.rp_emergence?.openingMuted?.includes(avatar);
+        // 后来的合法自动准备即使无需再次解静音，也共同持有这次系统解除，段所有权仍各自独立。
+        const muteOwners=ownsPreparation&&!wasDisabled&&!c.chatMetadata.rpeManualMuted?.[avatar]
+            ?Object.values(journal).filter(e=>e.avatar===avatar&&e.preparation?.muteOwned&&!e.preparation.muteRelinquished&&e.preparation.live!==false):[];
+        let owner;
+        if(ownsPreparation){
+            // 身份随消息保存，删楼、改稿后仍能区分来源之前和之后的消息。
+            for(const m of chat)(m.extra??={}).rpeSourceId??=crypto.randomUUID();
+            const start=q.execution.openAt,source=chat[Math.min(start,chat.length-1)];
+            owner={source:source.extra.rpeSourceId,edge:start===chat.length?'after':'before',
+                earlier:chat.slice(0,Math.min(start+1,chat.length)).map(m=>m.extra.rpeSourceId)};
+            await c.saveChat?.();guard();
+        }
+        try{prepared=await prepare();guard();}
+        finally{
+            if(ownsPreparation&&state.chatKey===chatKey&&state.epoch===epoch&&ctx().chat===chat){
+                const added=(c.chatMetadata.contextIsolation?.anchors?.[avatar]?.segments??[]).map(segmentKey).filter(key=>!existing.has(key));
+                const disabledAfter=!!currentGroup(c)?.disabled_members?.includes(avatar);
+                const muteOwned=!disabledAfter&&(wasDisabled||muteOwners.length>0);
+                if(added.length||wasDisabled!==disabledAfter||muteOwned){
+                    journal[id]={...journal[id],q,avatar,at:length,preparation:{owner,segments:added,segmentOwned:added.length>0,muteOwned,
+                        openingMuted:openingMuted||muteOwners.some(e=>e.preparation.openingMuted)}};
+                    await c.saveMetadata();guard();
+                }
+            }
+        }
+        const target=prepared.avatar??q.avatar??currentGroup(ctx())?.members?.[prepared.at];
+        const presence=()=>JSON.stringify([ctx().chatMetadata.contextIsolation?.anchors?.[target]??null,ctx().chatMetadata.rpeManualMuted?.[target]??null]);
+        const preparedPresence=presence();
+        if(chat.length!==length)throw Error('已有新消息，停下重新核对');
+        if(q.execution){const r=await api('turn-result',{chatKey,id:q.execution.id,result:'start'});guard();if(!r.ok)throw Object.assign(Error(r.why),{result:'unconfirmed'});if(r.execution?.state==='delivered')return true;}
+        journal[id]={...journal[id],result:'running',avatar:q.avatar,at:length,q,reason:`正在叫${q.who}`};await c.saveMetadata();guard();
+        auto.executionStatus={who:q.who,result:'running',reason:`正在叫${q.who}`,id};render();
+        // 最后一次 await 之后按当前群重新找文件与下标，检查期间不再让出执行权。
+        guard();
+        const now=ctx(),group=currentGroup(now),camera=q.role==='旁白'||q.who==='旁白';
+        const at=group?.members?.indexOf(target)??-1;
+        if(at<0||!(now.characters??[]).some(ch=>ch.avatar===target)||q.avatar&&target!==q.avatar)throw Error('发令前目标成员已改变，请重新核对');
+        if(!camera&&(group.disabled_members?.includes(target)||now.chatMetadata.rpeManualMuted?.[target]))throw Error('发令前角色已静音，接话停下');
+        if(presence()!==preparedPresence)throw Error('发令前在场区间已改变，请重新核对');
+        const segments=now.chatMetadata.contextIsolation?.anchors?.[target]?.segments;
+        if(!camera&&segments?.length&&!segments.some(s=>s.from<=length&&(s.to==null||s.to>length)))throw Error('发令前角色已离场，接话停下');
+        if(chat.length!==length||now.is_group_generating)throw Error('发令前已有新消息或生成，请重新核对');
+        if(!chat.at(-1)?.is_user&&q.execution?.kind!=='knock'&&typeof typingNow==='function'&&typingNow())throw Object.assign(Error('你在输入，接话停在这里'),{result:'waiting'});
+        issued=true;
+        await c.executeSlashCommandsWithOptions(`/trigger await=true ${at}`);guard();
+        if(landed()){await report('delivered',`${q.who}的消息已落下`);return true;}
+        await report('unconfirmed',`${q.who}的生成已返回，但没找到本人新消息，请核对后重试`);return false;
+    }catch(error){
+        if(state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==chat)return false;
+        const delivered=!!landed(),result=delivered?'delivered':error.result??(/abort|cancel|取消/i.test(error.message)?'cancelled':issued?'error':'muted');
+        if(!delivered&&result!=='unconfirmed')try{await prepared?.rollback?.();}catch(rollback){error.message+=`；恢复待处理：${rollback.message}`;}
+        const failureReason=(...messages)=>[...new Set([...(issued||previousAttempt?[]:['尚未发出生成命令']),...messages.flatMap(message=>message.split('；'))])].join('；');
+        try{await report(result,failureReason(error.message));}catch(reportError){
+            auto.executionStatus={result:'unconfirmed',who:q.who,reason:failureReason(error.message,reportError.message),id};
+            journal[id]={...journal[id],result:'unconfirmed',reason:auto.executionStatus.reason,avatar:q.avatar,at:length,q};
+            try{await c.saveMetadata();}catch{state.note=auto.executionStatus.reason;}
+        }
+        globalThis.toastr?.warning(auto.executionStatus.reason,'接话已停下');render();return delivered;
+    }
+}
+function scheduledStatusHtml() {
+    const c=ctx(),saved=Object.entries(c.chatMetadata?.rpeExecution??{}).filter(([,e])=>e.q).at(-1);
+    const status=auto.executionStatus??(saved?{...saved[1],id:saved[0]}:null);
+    const lines=[state.boardReconcile,status?.reason];
+    const board=boardLabels.at(-1);
+    for(const p of board?.people??[])if(['present','remote'].includes(p.status)&&currentGroup(c)?.disabled_members?.includes(p.avatar))lines.push(`${p.name}在场，${c.chatMetadata?.rp_emergence?.openingMuted?.includes(p.avatar)?'系统静音待核对':'手动静音，暂停发言'}`);
+    return lines.filter(Boolean).map(line=>`<div>${escapeHtml(line)}</div>`).join('')+(status&&['muted','error','cancelled','unconfirmed','running','waiting','paused'].includes(status.result)?'<button class="menu_button" data-action="schedule-retry" title="先核对是否已有本人消息，再重试">核对后重试接话</button>':'');
+}
+async function retryScheduled() {
+    const c=ctx(),chatKey=state.chatKey,epoch=state.epoch;
+    if(auto.executionStatus?.result==='paused'){auto.blocked=null;return autoDrive('normal');}
+    const entry=Object.entries(c.chatMetadata.rpeExecution??{}).filter(([,e])=>e.q).at(-1);
+    if(!entry){auto.blocked=null;auto.lastTurn=null;return autoDrive('normal');}
+    const [id,e]=entry;
+    if(activeGeneration())throw Error('生成还在进行，请先停止或等它完成');
+    if(await syncNow(true)===false)throw Error('消息还没核对完成');
+    if(chatKey!==state.chatKey||epoch!==state.epoch||ctx().chat!==c.chat)return false;
+    if(e.q.execution){
+        const r=await api('turn-result',{chatKey,id,result:'retry',previous:e.q.execution});
+        if(chatKey!==state.chatKey||epoch!==state.epoch)return false;
+        if(!r.ok)throw Error(r.why);
+        if(r.execution.state==='delivered'){e.result='delivered';e.reason='已核实本人消息，无需重发';await c.saveMetadata();render();return true;}
+        if(r.item){
+            e.result='superseded';
+            c.chatMetadata.rpeExecution[r.execution.id]={result:'queued',avatar:r.item.avatar,at:c.chat.length,q:r.item};
+        }else {e.result='queued';e.q.execution=r.execution;}
+    }else if(c.chat.slice(e.at).some(m=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()&&speakerOf(m,fallbackAvatar(c))===e.avatar)){e.result='delivered';await c.saveMetadata();render();return true;}
+    if(!e.q.execution)delete c.chatMetadata.rpeExecution[id];
+    await c.saveMetadata();auto.blocked=null;auto.lastTurn=null;return autoDrive('normal');
 }
 // 叫一个人说：旁白走旁白卡；静音着的（这会儿不在场）不叫
 async function autoSpeak(q) {
-    const c = ctx(), group = currentGroup(c);
-    if (!group) return false;
-    if (q.role === '旁白' || q.who === '旁白') {
-        const cam = cameraOf(c), at = cam ? group.members.indexOf(cam.avatar) : -1;
-        if (at < 0) return false;
-        await c.executeSlashCommandsWithOptions(`/trigger await=true ${at}`);
-        return true;
-    }
-    const ch = cardNamed(c, q.who, q.avatar);
-    if (!ch) return false;
-    if (q.enter) {
-        state.entering.add(ch.avatar);
-        try {
-            if (!group.members.includes(ch.avatar)) await run(`/member-add ${ch.avatar}`);
-            const g = currentGroup(ctx()), i = g?.members.indexOf(ch.avatar) ?? -1;
-            if (i < 0) return false;
-            if (g.disabled_members?.includes(ch.avatar)) await run(`/member-enable ${i}`);
-            await openPresence(ch,q.enter.at);
-            auto.noRepeat = q.noRepeat ? ch.avatar : null;
-            await c.executeSlashCommandsWithOptions(`/trigger await=true ${i}`);
-            return true;
-        } finally { state.entering.delete(ch.avatar); followBase(); }
-    }
-    const at = ch ? group.members.indexOf(ch.avatar) : -1;
-    if (at < 0) return false;
-    if (group.disabled_members?.includes(ch.avatar)) {
-        // 静音着＝这会儿不在场；刚走的人被点名叫回来（back）才取消静音、从这条起又在场；别的不叫
-        if (!q.back) return false;
-        // 扩展自己取消的静音：别被 watchMembers 当成玩家手动取消静音（T070 三）、区间开两次
-        state.entering.add(ch.avatar);
-        try {
-            await run(`/member-enable ${at}`);
-            await openPresence(ch);
-        } finally { state.entering.delete(ch.avatar); followBase(); }
-    }
-    auto.noRepeat = q.noRepeat ? ch.avatar : null;
-    await c.executeSlashCommandsWithOptions(`/trigger await=true ${at}`);
-    return true;
+    return runScheduled(q,async()=>{
+        const c=ctx(),group=currentGroup(c);
+        if(!group)throw Error('当前群不存在');
+        const camera=q.role==='旁白'||q.who==='旁白';
+        const ch=camera?cameraOf(c):await resolveCard(q.who,q.avatar);
+        if(!ch || q.avatar&&ch.avatar!==q.avatar)throw Error(`${q.who}的卡未能唯一匹配，请确认卡文件`);
+        if(q.enter&&!group.members.includes(ch.avatar)){state.entering.add(ch.avatar);try{await run(`/member-add ${ch.avatar}`);}finally{state.entering.delete(ch.avatar);followBase();}}
+        const at=group.members.indexOf(ch.avatar);
+        if(at<0)throw Error(`${q.who}不在当前群里，请先核对成员`);
+        if(!camera&&group.disabled_members?.includes(ch.avatar)){
+            const manual=c.chatMetadata.rpeManualMuted?.[ch.avatar];
+            const owned=!manual&&c.chatMetadata.rp_emergence?.openingMuted?.includes(ch.avatar);
+            if(manual||!owned&&!q.back&&!q.enter)throw Error(`${q.who}现在手动静音中，要发言请解除静音后重试`);
+            state.entering.add(ch.avatar);
+            try{
+                await run(`/member-enable ${at}`);
+                if(currentGroup(ctx()).disabled_members?.includes(ch.avatar))throw Error(`${q.who}解除静音后核实失败`);
+                if(owned){c.chatMetadata.rp_emergence.openingMuted=c.chatMetadata.rp_emergence.openingMuted.filter(a=>a!==ch.avatar);await c.saveMetadata();}
+            }finally{state.entering.delete(ch.avatar);followBase();}
+        }
+        if(q.back||q.enter)await openPresence(ch,q.enter?.at);
+        auto.noRepeat=q.noRepeat?ch.avatar:null;
+        return {at,avatar:ch.avatar};
+    });
 }
 // 后台说该叩门了：拉进群、取消静音、从这条起在场（区间）、让他自己写那一条；他那条落下时 MESSAGE_RECEIVED 给它记号
 async function autoKnock(k) {
-    const c = ctx(), group = currentGroup(c), ch = cardNamed(c, k.who, k.avatar);
-    if (!group || !ch) return false;
-    state.entering.add(ch.avatar);
-    try {
-        let t0 = performance.now();
-        if (!group.members.includes(ch.avatar)) { await run(`/member-add ${ch.avatar}`); tick('叩门:拉进群', performance.now() - t0, ch.name); t0 = performance.now(); }
-        const g = currentGroup(ctx()), at = g?.members.indexOf(ch.avatar) ?? -1;
-        if (at < 0) return false;
-        if (g.disabled_members?.includes(ch.avatar)) { await run(`/member-enable ${at}`); tick('叩门:取消静音', performance.now() - t0, ch.name); t0 = performance.now(); }
-        await openPresence(ch); tick('叩门:开区间', performance.now() - t0, ch.name);
-        auto.pending.set(ch.avatar, { who: ch.name, way: k.way });
-        auto.closed.delete(`${ch.name}:${k.at}`);
-        await ctx().executeSlashCommandsWithOptions(`/trigger await=true ${at}`);
-        return true;
-    } finally {
-        state.entering.delete(ch.avatar);
-        const snap = memberSnapshot();
-        if (snap && state.memberBase?.key === snap.key) state.memberBase = snap;
-    }
+    return runScheduled(k,async()=>{
+        const c=ctx(),group=currentGroup(c),ch=await resolveCard(k.who,k.avatar);
+        if(!group||!ch||k.avatar&&ch.avatar!==k.avatar)throw Error(`${k.who}的卡身份未对上`);
+        const existing=new Set(c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]?.segments??[]),wasDisabled=group.disabled_members?.includes(ch.avatar);
+        let opened=null,openedKey=null;
+        const rollback=async()=>{
+            const anchor=c.chatMetadata.contextIsolation?.anchors?.[ch.avatar];
+            if(opened&&anchor?.segments?.includes(opened)&&JSON.stringify(opened)===openedKey){anchor.segments=anchor.segments.filter(s=>s!==opened);await c.saveMetadata();}
+            const owned=c.chatMetadata.rpeExecution?.[k.execution?.id]?.preparation;
+            if(owned){owned.segments=[];owned.segmentOwned=false;owned.muteOwned=false;}
+            if(wasDisabled&&!group.disabled_members?.includes(ch.avatar)){await run(`/member-disable ${group.members.indexOf(ch.avatar)}`);if(!group.disabled_members?.includes(ch.avatar))throw Error('叩门静音恢复核实失败');}
+            auto.pending.delete(ch.avatar);
+        };
+        state.entering.add(ch.avatar);
+        try{
+            if(!group.members.includes(ch.avatar))await run(`/member-add ${ch.avatar}`);
+            const at=group.members.indexOf(ch.avatar);if(at<0)throw Error('叩门角色没有加入群');
+            if(wasDisabled)await run(`/member-enable ${at}`);
+            if(group.disabled_members?.includes(ch.avatar))throw Error('叩门解除静音未落实');
+            await openPresence(ch);
+            opened=(c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]?.segments??[]).find(s=>!existing.has(s));
+            openedKey=JSON.stringify(opened);
+            auto.pending.set(ch.avatar,{who:ch.name,way:k.way});
+            return {at,avatar:ch.avatar,rollback};
+        }catch(error){await rollback();throw error;}
+        finally{state.entering.delete(ch.avatar);followBase();}
+    });
 }
 // 他走了（后台已经记了去向）、这次叩门作废了（他没进过场）：关区间、静音，不移出群
 const ackLeave=(chatKey,receipt)=>api('leave-ack',{chatKey,receipts:[receipt]});
@@ -3416,6 +3593,7 @@ async function autoClose(l, why) {
 async function applyAutoClose(l,why,chatKey) {
     const c=ctx(),group=currentGroup(c),ch=cardNamed(c,l.who,l.avatar);
     if(!group || !ch) throw new Error('找不到离场角色');
+    if(l.avatar && ch.avatar!==l.avatar) throw new Error('离场角色的卡身份未对上，请确认卡文件');
     const at=l.id?l.at:(l.lapsed?.pos??l.at);
     const key=l.id??`lapsed:${ch.avatar}:${at}`;
     const journal=c.chatMetadata.rpeLeaveEvents??={};
@@ -3492,9 +3670,9 @@ async function applyAutoClose(l,why,chatKey) {
     if(l.action!=='undo') {if(state.remote?.avatar===ch.avatar)state.remote=null;auto.remote.delete(ch.avatar);}
 }
 // 快捷按钮：接／让他进来＝进场，不理＝作废（后台定，这里只传信号）
-async function autoAnswer(who, answer) {
+async function autoAnswer(who, answer, avatar = null) {
     const chatKey = state.chatKey;
-    const r = await api('knock-answer', { chatKey, who, answer });
+    const r = await api('knock-answer', { chatKey, who, avatar, answer });
     if (!r?.ok) { globalThis.toastr?.warning(`${who}没有候着的叩门。`, 'RP：幕后'); return; }
     await autoPeek();
     globalThis.toastr?.info(r.forced === '作废' ? `${who}这次没进场。` : `${who}进场了：你写一句${who}就接。`, 'RP：幕后', { timeOut: 6000 });
@@ -3588,7 +3766,7 @@ document.addEventListener('click', event => {
     const way = event.target?.closest?.('.rpe-door-way');
     const cancel = event.target?.closest?.('.rpe-door-cancel');
     const knockAnswer = event.target?.closest?.('.rpe-knock-answer');
-    if (knockAnswer && state.chatKey) { autoAnswer(knockAnswer.dataset.who, knockAnswer.dataset.answer).catch(() => {}); return; }
+    if (knockAnswer && state.chatKey) { autoAnswer(knockAnswer.dataset.who, knockAnswer.dataset.answer, knockAnswer.dataset.avatar || null).catch(() => {}); return; }
     if (way) {
         const w = way.dataset.way;
         const mode = w === '去找他' ? 'go' : w === '消息' || w === '电话' ? 'remote' : 'come';
@@ -3617,13 +3795,13 @@ on('MESSAGE_RECEIVED', () => {
     const knock = auto.pending.get(who) ?? auto.remote?.get(who) ?? null;   // 叩门那条、远程的人之后写的每一条
     if (knock) {
         auto.pending.delete(who);
-        if (knock.way !== '上门' && !last.extra?.rp_vis) { last.extra = { ...(last.extra ?? {}), rp_vis: { from: knock.who, way: knock.way } }; c.saveChat().catch(() => {}); }
+        if (knock.way !== '上门' && !last.extra?.rp_vis) { last.extra = { ...(last.extra ?? {}), rp_vis: { from: knock.who, fromAvatar: who, way: knock.way } }; c.saveChat().catch(() => {}); }
     }
     const r = state.remote;
     if (r && r.chatKey === state.chatKey && who === r.avatar) {
         // 先问后台他是不是还在外头：两人当面碰上了（试玩 10/7：她走到他等着的那条街），就不再提醒、不再当远程
         syncNow(true).catch(() => {}).then(() => api('board', { chatKey: r.chatKey })).then(b => {
-            const p = (b?.people ?? []).find(x => x.avatar === r.avatar || x.name === r.who);
+            const p = (b?.people ?? []).find(x => r.avatar ? x.avatar === r.avatar : x.name === r.who && b.people.filter(p=>p.name===r.who).length===1);
             if (p && p.status !== 'remote') { if (state.remote === r) state.remote = null; return; }
             globalThis.toastr?.info(`${r.who}人还在外头，这是${r.how}。聊完了点这里让${r.who}回去忙（离场）。`, 'RP：幕后', { timeOut: 12000, onclick: () => { leaveChar(r.who).catch(() => {}); } });
         }).catch(() => {});
@@ -3680,7 +3858,30 @@ async function cameraTurn(type, { force = false } = {}) {
     if (!group || !cam || !group.members.includes(cam.avatar)) return false;
     // 手动叫过（/旁白、/进场）：这一句记成接过了，有卡的人答完不再自动接
     if (force) state.cameraJoinFor = cameraJoinPoint(c.chat, { speaker: m => speakerOf(m, fallbackAvatar(c)) })?.key ?? state.cameraJoinFor;
-    if (!force && members(c).some(m => !m.disabled)) return cameraJoin(c, cam);
+    if (!force) {
+        const chatKey = state.chatKey, epoch = state.epoch, chat = c.chat;
+        const stamp = () => JSON.stringify(chat.map(m => [fingerprintMessage(m, speakerOf(m, fallbackAvatar(c))), !!m.is_system, m.extra?.rp_board ?? null]));
+        const before = stamp();
+        let board;
+        try {
+            if (await syncNow(true) === false) throw Error('场面尚未同步，请核对后重试');
+            board = await api('board', { chatKey });
+            if (!Array.isArray(board?.people)) throw Error('在场状态尚未确认，请核对后重试');
+        } catch (error) {
+            auto.executionStatus = { result: 'error', reason: error.message };
+            globalThis.toastr?.warning(error.message, 'RP：幕后'); render(); return false;
+        }
+        if (state.chatKey !== chatKey || state.epoch !== epoch || ctx().chat !== chat || stamp() !== before) return false;
+        const cards = board.people.filter(p => p.card && p.name !== '旁白');
+        const active = cards.filter(p => ['present', 'remote'].includes(p.status));
+        const open = members(c).filter(m => !m.disabled);
+        if (cards.some(p => p.status === 'unknown') || active.some(p => !open.some(m => m.avatar === p.avatar))) {
+            const reason = '有卡的人的在场状态或静音需要核对，请解除静音或纠正在场后重试接话';
+            auto.executionStatus = { result: 'muted', reason };
+            globalThis.toastr?.warning(reason, 'RP：幕后'); render(); return false;
+        }
+        if (active.length) return cameraJoin(c, cam);
+    }
     if (!force && !c.chat?.at(-1)?.is_user) return false;
     // 同一句只叫一次：旁白没生成成（断网、被拒）时群聊收尾又会走到这里，别一直重叫
     const last = c.chat.at(-1), key = `${c.chat.length}:${fingerprintMessage(last, speakerOf(last, fallbackAvatar(c)))}`;
@@ -3716,7 +3917,38 @@ async function cameraJoin(c, cam) {
 const hasCommand = name => !!ctx().SlashCommandParser?.commands?.[name];
 const run = cmd => ctx().executeSlashCommandsWithOptions(cmd).catch(() => null);
 function cardNamed(c, who, avatar = null) {
-    return cardNamedInGroup(c.characters, currentGroup(c)?.members, who, avatar);
+    const group=currentGroup(c),members=group?.members??[c.characters?.[c.characterId]?.avatar].filter(Boolean);
+    return cardNamedInGroup(c.characters??[], members, who, avatar, c.chatMetadata?.rpeCardChoices?.[state.chatKey]);
+}
+async function resolveCard(who, avatar = null) {
+    const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,group=currentGroup(c),cards=c.characters??[];
+    if (String(avatar??'').startsWith('face:')) return null;
+    if (!group) return cardNamed(c,who,avatar??cards[c.characterId]?.avatar);
+    const choices=c.chatMetadata.rpeCardChoices?.[chatKey]??{};
+    const remember=async ch=>{
+        if(ch&&!choices[who].synced){const r=await api('card-choice',{chatKey,name:who,avatar:ch.avatar});if(chatKey!==state.chatKey||epoch!==state.epoch)return null;if(!r.ok)throw Error(r.why||'认卡选择尚未保存');choices[who].synced=true;await c.saveMetadata();}
+        return ch??null;
+    };
+    const resolved=cardNamed(c,who,avatar??choices[who]?.avatar);
+    if(resolved)return choices[who]?.avatar===resolved.avatar?remember(resolved):resolved;
+    if(avatar||choices[who]?.asked)return null;
+    (c.chatMetadata.rpeCardChoices??={})[chatKey]=choices;
+    choices[who]={asked:true,avatar:null};await c.saveMetadata();
+    if(chatKey!==state.chatKey||epoch!==state.epoch)return null;
+    const inside=cards.filter(ch=>group.members.includes(ch.avatar)&&ch.name===who);
+    const candidates=inside.length?inside:cards.filter(ch=>!isCamera(ch));
+    let picked='';
+    const html=`<p>${escapeHtml(who)}${inside.length?'在群里对应多张卡':'在群里没有唯一对应卡'}，请选择本局使用的卡文件。</p><select class="text_pole rpe-card-choice"><option value="">暂不选择</option>${candidates.map(ch=>`<option value="${escapeHtml(ch.avatar)}">${escapeHtml(ch.name)} · ${escapeHtml(ch.avatar)}</option>`).join('')}</select>`;
+    const answer=await c.callGenericPopup(html,c.POPUP_TYPE.CONFIRM,'',{onClosing:popup=>{picked=popup.dlg.querySelector('.rpe-card-choice')?.value??'';return true;}});
+    if(chatKey!==state.chatKey||epoch!==state.epoch||ctx().chat!==c.chat)return null;
+    if(typeof answer==='string')picked=answer;
+    const ch=answer?candidates.find(ch=>ch.avatar===picked):null;
+    choices[who]={asked:true,avatar:ch?.avatar??null};await c.saveMetadata();
+    return remember(ch);
+}
+async function resolveCastChoices() {
+    const roster=state.boardCast??[];
+    for(const who of new Set(roster.filter(p=>p.role!=='不用'&&!isCamera(p)&&!String(p.avatar??'').startsWith('face:')).map(p=>p.name)))await resolveCard(who);
 }
 async function enterChar(who, avatar = null, opts = {}) {
     const c = ctx(), group = currentGroup(c);
@@ -3763,6 +3995,18 @@ function watchMembers() {
     state.memberBase = snap;
     if (!settings().enabled || !base || !snap || base.key !== snap.key) return;
     const now = snap.members;
+    for(const avatar of new Set([...base.disabled,...snap.disabled])){
+        if(state.entering.has(avatar)||base.disabled.includes(avatar)===snap.disabled.includes(avatar))continue;
+        for(const e of Object.values(c.chatMetadata.rpeExecution??{}))if(e.avatar===avatar&&e.preparation)e.preparation.muteRelinquished=true;
+    }
+    const manual=c.chatMetadata.rpeManualMuted??={};
+    for(const avatar of snap.disabled.filter(a=>!base.disabled.includes(a)&&now.includes(a)&&!state.entering.has(a))){
+        manual[avatar]=true;
+        const owned=c.chatMetadata.rp_emergence?.openingMuted;
+        if(owned)c.chatMetadata.rp_emergence.openingMuted=owned.filter(a=>a!==avatar);
+    }
+    for(const avatar of base.disabled.filter(a=>!snap.disabled.includes(a)&&!state.entering.has(a)))delete manual[avatar];
+    c.saveMetadata().catch(error=>{state.note=`静音归属尚未保存：${error.message}`;render();});
     for (const avatar of removedMembers(base.members, now, { camera: cameraOf(c)?.avatar ?? null })) {
         const ch = (c.characters ?? []).find(x => x.avatar === avatar);
         if (!ch || isCamera(ch)) continue;
@@ -4217,6 +4461,7 @@ async function refreshDays() {
     try { const r = await api('timeline', { chatKey }); if (chatKey === state.chatKey) { dayLabels = r.labels ?? []; daySince = r.since ?? ''; dayScale = r.scale ?? null; } } catch { return; }
     try { const r = await api('boards', { chatKey }); if (chatKey === state.chatKey) boardLabels = r.boards ?? []; } catch { boardLabels = []; }
     try { const r = await api('cast', { chatKey }); if (chatKey === state.chatKey) state.boardCast = r.cast ?? []; } catch { state.boardCast = []; }
+    if(chatKey===state.chatKey)try{await resolveCastChoices();}catch(error){state.note=`认卡待处理：${error.message}`;}
     drawDays();
     drawBoards();
 }
@@ -4271,14 +4516,19 @@ async function pickBoard(id) {
     const chatKey = state.chatKey;
     const { cast } = await api('cast', { chatKey });
     if (state.chatKey !== chatKey || ctx().chat?.[id] !== m) return;
-    const cards = boardRosterNames(cast, c.characters ?? []);
-    const now = name => l?.people?.find(p => p.name === name)?.status ?? null;
+    const names = boardRosterNames(cast, c.characters ?? []);
+    const cards = cast.filter(e => names.includes(e.name) && e.role !== '不用');
+    const ambiguous = Object.keys(current.people ?? {}).filter(name => cards.filter(p=>p.name===name).length>1);
+    if (ambiguous.length) globalThis.toastr?.warning(`旧场面纠正有同名身份待确认：${ambiguous.join('、')}。请按卡文件选择。`);
+    const now = avatar => l?.people?.find(p => p.avatar === avatar)?.status ?? null;
+    const currentValue = card => current.people?.[card.avatar] ?? (cards.filter(p => p.name === card.name).length === 1 ? current.people?.[card.name] : null);
+    const statusValue = card => { const v=currentValue(card); return typeof v === 'object' ? v?.status : v; };
     const nowWord = s => ({ present: '在场', remote: '远程', away: '不在眼前', absent: '不在', never: '没来过' })[s] ?? '？';
-    const row = name => `<div style="padding:.35em 0;border-bottom:1px solid currentColor">` +
-        `<div>${escapeHtml(name)} <small>（系统认的：${nowWord(now(name))}）</small></div>` +
+    const row = card => { const name=card.name, avatar=card.avatar, value=statusValue(card); return `<div style="padding:.35em 0;border-bottom:1px solid currentColor">` +
+        `<div>${escapeHtml(name)} <small>${escapeHtml(avatar)}（系统认的：${nowWord(now(avatar))}）</small></div>` +
         `<div style="display:flex;flex-wrap:wrap;column-gap:.7em;row-gap:.2em;margin-top:.2em">` +
-        `<label style="white-space:nowrap"><input type="radio" name="rpe-bp-${escapeHtml(name)}" value=""${current.people?.[name] == null || current.people?.[name] === '外头' ? ' checked' : ''}> 不改</label>` +
-        BOARD_STATES.map(([v, t]) => `<label style="white-space:nowrap"${v === '远程' ? ' title="发消息、打电话来"' : ''}><input type="radio" name="rpe-bp-${escapeHtml(name)}" value="${v}"${current.people?.[name] === v ? ' checked' : ''}> ${t}</label>`).join('') + '</div></div>';
+        `<label style="white-space:nowrap"><input type="radio" name="rpe-bp-${escapeHtml(avatar)}" value=""${value == null || value === '外头' ? ' checked' : ''}> 不改</label>` +
+        BOARD_STATES.map(([v, t]) => `<label style="white-space:nowrap"${v === '远程' ? ' title="发消息、打电话来"' : ''}><input type="radio" name="rpe-bp-${escapeHtml(avatar)}" value="${v}"${value === v ? ' checked' : ''}> ${t}</label>`).join('') + '</div></div>'; };
     const html = `<h3>场面纠正</h3><p>系统现在认的：镜头在 ${escapeHtml(l?.place ?? '？')}${l?.home ? `（${escapeHtml(l.home)}的家）` : ''}</p>
         <div style="text-align:left">
           <b>镜头在哪</b>（留空＝不纠正）<br><input class="text_pole" data-role="rpe-board-place" value="${escapeHtml(current.place ?? '')}" placeholder="比如：楼下便利店、他的公寓">
@@ -4298,8 +4548,13 @@ async function pickBoard(id) {
         onClosing: popup => {
             const dlg = popup.dlg;
             const selected = {};
-            for (const name of cards) { const v = dlg.querySelector(`input[name="rpe-bp-${CSS.escape(name)}"]:checked`)?.value; if (v !== undefined) selected[name] = v; }
-            const people = boardPeopleAfterEdit(current.people, selected, clear);
+            for (const card of cards) { const v = dlg.querySelector(`input[name="rpe-bp-${CSS.escape(card.avatar)}"]:checked`)?.value; if (v !== undefined) selected[card.avatar] = v; }
+            const previous = { ...(current.people ?? {}) };
+            for (const card of cards) if (cards.filter(p => p.name === card.name).length === 1 && Object.hasOwn(previous,card.name)) {
+                previous[card.avatar] ??= { name: card.name, status: previous[card.name] }; delete previous[card.name];
+            }
+            const people = boardPeopleAfterEdit(previous, selected, clear);
+            for (const card of cards) if (typeof people[card.avatar] === 'string') people[card.avatar] = { name: card.name, status: people[card.avatar] };
             picked = { place: dlg.querySelector('[data-role="rpe-board-place"]')?.value?.trim() ?? '', people };
             return true;
         },
@@ -4311,16 +4566,195 @@ async function pickBoard(id) {
     m.extra = extra;
     ctx().updateMessageBlock(id, m);
     await ctx().saveChat();
-    await syncNow();
-    refreshDays();
+    await reconcileBoardState();
+    if (await syncNow() === false) throw Error('纠正已保存，静音或隔离对账尚未完成，请查看面板');
+    const resume=!!auto.blocked||['paused','muted','waiting'].includes(auto.executionStatus?.result);
+    auto.blocked = null;
+    await refreshDays();
     globalThis.toastr?.success(Object.keys(mark).length ? '改好了，从这条往后照它算。' : '这条跟着系统认的了。', 'RP：幕后');
+    if(resume)await autoDrive('normal');
+}
+async function reconcileBoardState() {
+    const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,group=currentGroup(c);
+    if(!group||!chatKey)return;
+    const guard=()=>{if(ctx().chat!==c.chat||state.chatKey!==chatKey||state.epoch!==epoch)throw Error('聊天已切换');};
+    const journal=c.chatMetadata.rpeBoardApplied??={}, wanted=new Map();
+    const scope=(state.boardCast?.length?state.boardCast:c.characters??[]).filter(p=>p.role!=='不用'&&!isCamera(p));
+    for(const [pos,m] of c.chat.entries()){
+        if(m.is_system)continue;
+        for(const [key,value] of Object.entries(m.extra?.rp_board?.people??{})){
+            const choices=scope.filter(p=>p.avatar===key||p.name===key);
+            const inGroup=choices.filter(p=>group.members.includes(p.avatar));
+            const saved=c.chatMetadata.rpeCardChoices?.[chatKey]?.[key]?.avatar;
+            const ch=scope.find(p=>p.avatar===key)??(inGroup.length===1?inGroup[0]:scope.find(p=>p.avatar===saved)??(choices.length===1?choices[0]:null));
+            if(!ch)continue;
+            const status=typeof value==='object'?value.status:value;
+            if(!['在场','远程','不在','外头'].includes(status))continue;
+            const fp=fingerprintMessage(m,speakerOf(m,fallbackAvatar(c)));
+            wanted.set(`${ch.avatar}:${pos}:${fp}`,{avatar:ch.avatar,name:ch.name,pos,fp,status});
+        }
+    }
+    const anchor=avatar=>c.chatMetadata.contextIsolation?.anchors?.[avatar];
+    const save=async()=>{guard();await c.saveMetadata();guard();};
+    // 自动准备只保留来源所有权和段指纹；段指纹只用于识别人工接管，不能用来恢复区间。
+    const automatic=[];
+    let identitiesChanged=false;
+    const messageId=m=>{if(!m.extra?.rpeSourceId){(m.extra??={}).rpeSourceId=crypto.randomUUID();identitiesChanged=true;}return m.extra.rpeSourceId;};
+    const segmentKey=(avatar,s)=>fingerprintMessage({mes:JSON.stringify(s)},avatar);
+    const sequence=c.chat.map((m,pos)=>({pos,fp:fingerprintMessage(m,speakerOf(m,fallbackAvatar(c))),hidden:!!m.is_system,boardMark:m.extra?.rp_board??null}));
+    for(const [id,e] of Object.entries(c.chatMetadata.rpeExecution??{})){
+        let r=e.preparation;if(!r)continue;
+        c.chat.forEach(messageId);
+        if(!r.owner){
+            // 旧记录只迁移所有权，丢弃 before/after；已经标 undone 的记录也不能豁免对账。
+            const fp=e.q.execution?.preparation?.fp,found=sequence.filter(m=>m.fp===fp);
+            const pos=found.length===1?found[0].pos:-1;
+            const added=(r.after??[]).filter(s=>!(r.before??[]).some(b=>JSON.stringify(b)===JSON.stringify(s)));
+            e.preparation=r={owner:{source:pos>=0?messageId(c.chat[pos]):null,
+                edge:e.q.execution?.action==='enter'?'before':'after',unverified:pos<0,
+                earlier:pos>=0?c.chat.slice(0,pos+1).map(messageId):[]},
+                segments:added.map(s=>segmentKey(e.avatar,s)),segmentOwned:added.length>0,muteOwned:r.wasDisabled&&!r.disabledAfter,
+                openingMuted:r.openingMuted,muteRelinquished:r.muteRelinquished};
+        }
+        const ownReplies=c.chat.flatMap((m,pos)=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()
+            &&speakerOf(m,fallbackAvatar(c))===e.avatar?[{pos,fp:sequence[pos].fp,text:m.mes,extra:{rp_vis:m.extra?.rp_vis}}]:[]);
+        const check=await api('turn-result',{chatKey,id,result:'reconcile',previous:e.q.execution,sequence,ownReplies});guard();
+        if(!check.ok)throw Error(check.why||'自动准备的来源尚未核实');
+        automatic.push({e,r,live:check.preparationLive,laterCame:check.laterCame??[],ownReplies:check.ownReplies??[]});
+    }
+    if(identitiesChanged){await c.saveChat?.();guard();}
+    // 同一身份的纠正是一串应用；任一环变化，先倒序还原，再按有效来源重放。
+    // 后续记录因此不会沿用已经失去前提的 before / wasDisabled。
+    const rebase=new Set();
+    for(const [id,r] of Object.entries(journal))if(wanted.get(id)?.status!==r.status||r.undone||!r.applied)rebase.add(r.avatar);
+    for(const [id,w] of wanted)if(!journal[id])rebase.add(w.avatar);
+    try{
+        // 来源失效只更新自动基础及其在人工 journal 中的依赖，不撤销未变化的人工纠正。
+        for(const {e,r,live,laterCame,ownReplies} of automatic){
+            if(live&&r.live!==false&&!rebase.has(e.avatar)){r.live=live;continue;}
+            const chain=Object.values(journal).filter(x=>x.avatar===e.avatar&&x.edit&&x.applied&&!x.undone).sort((a,b)=>a.pos-b.pos);
+            const actual=anchor(e.avatar)?.segments??[];
+            const segments=chain.length?chain[0].edit.before:actual;
+            const owned=segments.filter(s=>r.segments.includes(segmentKey(e.avatar,s)));
+            const retained=r.segments.length>0&&owned.length!==r.segments.length;
+            const sourcePositions=c.chat.flatMap((m,pos)=>messageId(m)===r.owner.source?[pos]:[]);
+            const sourceAt=sourcePositions.length===1?sourcePositions[0]:-1;
+            const earlier=new Set(r.owner.earlier);
+            const floor=Math.max(-1,...c.chat.flatMap((m,pos)=>earlier.has(messageId(m))?[pos]:[]));
+            const afterSource=(m,pos)=>!r.owner.unverified&&messageId(m)!==r.owner.source
+                &&(sourceAt>=0?pos>sourceAt:pos>floor&&!earlier.has(messageId(m)));
+            const replyAt=c.chat.findIndex((m,pos)=>afterSource(m,pos)&&!m.is_user&&!m.is_system
+                &&speakerOf(m,fallbackAvatar(c))===e.avatar&&ownReplies.some(s=>s.pos===pos&&s.fp===sequence[pos].fp));
+            const cameAt=c.chat.findIndex((m,pos)=>afterSource(m,pos)&&!m.is_system
+                &&laterCame.some(source=>source.pos===pos&&source.fp===fingerprintMessage(m,speakerOf(m,fallbackAvatar(c)))));
+            const evidence=[replyAt,cameAt].filter(pos=>pos>=0);
+            const at=live&&sourceAt>=0?sourceAt+(r.owner.edge==='after'?1:0):evidence.length?Math.min(...evidence):null;
+            const muteSupported=automatic.some(x=>x.e.avatar===e.avatar&&x.live&&x.r.muteOwned&&!x.r.muteRelinquished);
+            if(!retained){
+                const kept=segments.filter(s=>!owned.includes(s));
+                if(at!=null&&r.segmentOwned&&!kept.some(s=>s.from<=at&&(s.to==null||s.to>at)))
+                    kept.push({from:at,fromDate:String(c.chat[at-1]?.send_date??''),to:null,toDate:''});
+                kept.sort((a,b)=>a.from-b.from);
+                if(chain.length){
+                    const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b),old=chain.at(-1).edit.after;
+                    let projected=kept;
+                    let disabled=chain[0].wasDisabled;
+                    if(r.muteOwned&&!r.muteRelinquished&&!c.chatMetadata.rpeManualMuted?.[e.avatar])
+                        disabled=at==null&&!kept.some(s=>s.to==null)&&!muteSupported;
+                    for(const record of chain){
+                        record.edit=boardSegmentEdit(projected,{at:record.pos,until:record.edit.end,present:['在场','远程'].includes(record.status)});
+                        projected=record.edit.after;record.wasDisabled=disabled;
+                        record.muteChanged=record.edit.end==null&&disabled!==record.disabledAfter;
+                        if(record.edit.end==null)disabled=record.disabledAfter;
+                    }
+                    // 只替换仍完全匹配的自动派生段；起点、日期等人工接管原样保留。
+                    const removed=old.filter(s=>!projected.some(n=>same(s,n)));
+                    const next=actual.filter(s=>!removed.some(o=>same(s,o)));
+                    for(const s of projected.filter(s=>!old.some(o=>same(s,o))))
+                        if(!next.some(n=>n.from<(s.to??Infinity)&&s.from<(n.to??Infinity)))next.push(s);
+                    if(anchor(e.avatar))anchor(e.avatar).segments=next.sort((a,b)=>a.from-b.from);
+                }else if(anchor(e.avatar))anchor(e.avatar).segments=kept;
+                r.segments=at!=null?kept.filter(s=>!segments.includes(s)).map(s=>segmentKey(e.avatar,s)):[];
+            }
+            const later=(anchor(e.avatar)?.segments??[]).some(s=>s.to==null);
+            const i=group.members.indexOf(e.avatar);
+            if(!chain.length&&r.muteOwned&&!r.muteRelinquished&&!c.chatMetadata.rpeManualMuted?.[e.avatar]&&!retained&&!later&&at==null&&!muteSupported&&i>=0){
+                state.entering.add(e.avatar);
+                try{if(!group.disabled_members?.includes(e.avatar))await run(`/member-disable ${i}`);guard();if(!group.disabled_members?.includes(e.avatar))throw Error('自动准备的静音撤回核实失败');}
+                finally{state.entering.delete(e.avatar);}
+                if(r.openingMuted){const own=(c.chatMetadata.rp_emergence??={}).openingMuted??=[];if(!own.includes(e.avatar))own.push(e.avatar);}
+            }
+            if(!chain.length&&r.muteOwned&&!r.muteRelinquished&&!c.chatMetadata.rpeManualMuted?.[e.avatar]&&at!=null&&i>=0&&group.disabled_members?.includes(e.avatar)){
+                state.entering.add(e.avatar);
+                try{await run(`/member-enable ${i}`);guard();if(group.disabled_members?.includes(e.avatar))throw Error('自动准备的静音推导核实失败');}
+                finally{state.entering.delete(e.avatar);}
+                if(r.openingMuted)c.chatMetadata.rp_emergence.openingMuted=(c.chatMetadata.rp_emergence.openingMuted??[]).filter(a=>a!==e.avatar);
+            }
+            r.live=live;
+            await save();
+        }
+        for(const [id,r] of Object.entries(journal).sort((a,b)=>b[1].pos-a[1].pos)){
+            if(!rebase.has(r.avatar))continue;
+            if(r.edit&&!r.undone){const undo=undoBoardSegmentEdit(anchor(r.avatar)?.segments??[],r.edit);if(!undo.ok)throw Error(undo.reason);if(anchor(r.avatar))anchor(r.avatar).segments=undo.segments;r.undone=true;await save();}
+            const later=Object.values(journal).some(x=>x!==r&&x.avatar===r.avatar&&x.pos>r.pos)
+                ||(anchor(r.avatar)?.segments??[]).some(s=>s.from>r.pos||s.to!=null&&s.to>r.pos);
+            if(r.muteChanged&&!later){
+                const i=group.members.indexOf(r.avatar),disabled=!!group.disabled_members?.includes(r.avatar);
+                if(i>=0&&disabled===r.disabledAfter){state.entering.add(r.avatar);try{await run(`/member-${r.wasDisabled?'disable':'enable'} ${i}`);if(!!group.disabled_members?.includes(r.avatar)!==r.wasDisabled)throw Error('撤销纠正的静音核实失败');}finally{state.entering.delete(r.avatar);}}
+            }
+            delete journal[id];await save();
+        }
+        for(const [id,w] of [...wanted].sort((a,b)=>a[1].pos-b[1].pos)){
+            if(journal[id]?.applied)continue;
+            const before=anchor(w.avatar);
+            const initial=before?.segments??(residentFromStart(c,{avatar:w.avatar,name:w.name,firstSnapshot:state.firstMemberSnapshot})?[{from:0,fromDate:'',to:null,toDate:''}]:[]);
+            const until=[...wanted.values()].filter(x=>x.avatar===w.avatar&&x.pos>w.pos).sort((a,b)=>a.pos-b.pos)[0]?.pos??null;
+            const edit=journal[id]?.edit??boardSegmentEdit(initial,{at:w.pos,until,present:['在场','远程'].includes(w.status)});
+            const record=journal[id]??{...w,edit,wasDisabled:!!group.disabled_members?.includes(w.avatar),disabledAfter:['不在','外头'].includes(w.status),muteChanged:false};
+            journal[id]=record;await save();
+            const anchors=(c.chatMetadata.contextIsolation??={anchors:{}}).anchors??={};
+            anchors[w.avatar]={...(before??{name:w.name}),segments:structuredClone(edit.after)};await save();
+            if(JSON.stringify(anchor(w.avatar)?.segments)!==JSON.stringify(edit.after))throw Error('纠正隔离区间保存后核实失败');
+            const laterBoundary=edit.end!=null;
+            const i=group.members.indexOf(w.avatar);
+            if(!laterBoundary&&i>=0&&record.wasDisabled!==record.disabledAfter){
+                state.entering.add(w.avatar);
+                try{await run(`/member-${record.disabledAfter?'disable':'enable'} ${i}`);guard();if(!!group.disabled_members?.includes(w.avatar)!==record.disabledAfter)throw Error('纠正静音状态核实失败');record.muteChanged=true;}
+                finally{state.entering.delete(w.avatar);}
+            }
+            record.applied=true;await save();
+        }
+        state.boardReconcile=null;followBase();
+    }catch(error){state.boardReconcile=`场面纠正待落实：${error.message}`;await save();throw error;}
+}
+async function recoverOpeningMuted() {
+    const c=ctx(),group=currentGroup(c),chatKey=state.chatKey,epoch=state.epoch;
+    const owned=c.chatMetadata.rp_emergence?.openingMuted??[];
+    if(!group||!owned.length)return;
+    const board=await api('board',{chatKey});
+    if(state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==c.chat)return;
+    const recovered=c.chatMetadata.rpeMuteRecovery??={};
+    for(const avatar of [...owned]){
+        const p=board.people?.find(p=>p.avatar===avatar);
+        if(!p||!['present','remote'].includes(p.status)||c.chatMetadata.rpeManualMuted?.[avatar])continue;
+        const at=group.members.indexOf(avatar);if(at<0)continue;
+        state.entering.add(avatar);
+        try{
+            if(group.disabled_members?.includes(avatar))await run(`/member-enable ${at}`);
+            if(group.disabled_members?.includes(avatar))throw Error(`${p.name}的系统静音恢复核实失败`);
+            recovered[avatar]={sourceVersion:board.sourceVersion,disabled:false,at:Date.now()};
+            c.chatMetadata.rp_emergence.openingMuted=owned.filter(a=>!recovered[a]);await c.saveMetadata();
+            auto.blocked=null;globalThis.toastr?.info(`${p.name}已恢复发言，已核实群里解除静音；原因为系统开局静音与当前在场证据冲突。`);
+        }catch(error){state.boardReconcile=`系统静音待恢复：${error.message}`;render();throw error;}
+        finally{state.entering.delete(avatar);followBase();}
+    }
 }
 document.addEventListener('click', event => {
     const el = event.target?.closest?.('.rpe_boardlabel');
     const id = Number(el?.closest('.mes')?.getAttribute('mesid'));
     if (!el || !Number.isInteger(id)) return;
     event.stopPropagation();
-    pickBoard(id).catch(() => {});
+    pickBoard(id).catch(error=>{state.note=`场面纠正待落实：${error.message}`;render();globalThis.toastr?.warning(state.note);});
 }, true);
 const DAY_PARTS = ['早上', '上午', '中午', '下午', '傍晚', '晚上', '深夜', '凌晨'];
 // 改这一条的剧情日期（10/3 用户：每条都显示、能手动改、改了同步到后台）：天（从这条起算新的一天／这里没有跨天／这条是第几天）和时段分开选，

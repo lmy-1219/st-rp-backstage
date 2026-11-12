@@ -52,13 +52,31 @@ export const validDayMark = k => typeof k === 'string' && k !== '' && /^(?:day|s
 // 镜头（N-276）：系统建的"旁白"卡只是让酒馆能生成的载体，它写的消息和 /sys 旁白一样记 narrator——后台不把它当人。
 export const CAMERA_FLAG = 'rp_emergence_camera';
 export const isCamera = ch => !!ch?.data?.extensions?.[CAMERA_FLAG];
-export function cardNamedInGroup(characters, groupAvatars, who, avatar = null) {
-    const inGroup = (groupAvatars ?? []).map(id => characters.find(ch => ch.avatar === id)).filter(Boolean);
-    return inGroup.find(ch => avatar && ch.avatar === avatar)
-        ?? inGroup.find(ch => ch.name === who)
-        ?? characters.find(ch => avatar && ch.avatar === avatar)
-        ?? characters.find(ch => ch.name === who)
-        ?? null;
+// 前后台共用的身份裁决。未给成员范围时只做严格唯一匹配（历史事实等读口）。
+// 给了范围则依次认精确文件、本局选择、群内唯一；明确文件失配不能换同名卡。
+export function resolveIdentity(roster = [], ref, { missingAvatarFallback = false, members = null, identityChoices = {} } = {}) {
+    const value = typeof ref === 'string' ? { name: ref } : ref ?? {};
+    const name = value.name ?? value.who;
+    const unique = rows => [...new Map(rows.map(e => [e.avatar ?? e.name, e])).values()];
+    const failed = rows => ({ status: rows.length ? 'ambiguous' : 'unmatched', person: null, candidates: rows.map(e => e.avatar) });
+    if (value.avatar) {
+        const exact = unique(roster.filter(e => e.avatar === value.avatar));
+        if (exact.length === 1) return { status: 'exact', person: exact[0] };
+        if (!missingAvatarFallback) return failed([]);
+    }
+    const choice = identityChoices?.[name];
+    const saved = typeof choice === 'object' ? choice?.avatar : choice;
+    if (saved) {
+        const chosen = unique(roster.filter(e => e.avatar === saved));
+        return chosen.length === 1 ? { status: 'chosen', person: chosen[0] } : failed([]);
+    }
+    const inside = members == null ? null : new Set(members.map(m => typeof m === 'string' ? m : m?.avatar));
+    const matches = unique(roster.filter(e => name && e.name === name
+        && (!inside || inside.has(e.avatar) && e.role !== '不用')));
+    return matches.length === 1 ? { status: 'unique', person: matches[0] } : failed(matches);
+}
+export function cardNamedInGroup(characters, groupAvatars, who, avatar = null, identityChoices = {}) {
+    return resolveIdentity(characters, { name: who, avatar }, { members: groupAvatars, identityChoices }).person;
 }
 // 只关原本开着的条目；保留不等于替用户打开原本关着的条目。
 export function cameraPromptPlan(order, { keep = [], covered = [], hasPhi = false } = {}) {
@@ -262,21 +280,37 @@ export function doorMark(text) {
 
 // 谁看得见（和后台 core/visibility.mjs 一个判法）：发消息、打电话来的那条（extra.rp_vis.way 消息／电话）只有本人、玩家、旁白、发给的那人看得见；
 // 上门的、没带记号的谁都看得见。viewer：要看的人的名字（旁白传 '旁白'）；userName：玩家的名字
-export function visibleTo(message, viewer, userName = null) {
-    const v = message?.extra?.rp_vis;
-    if (!v || typeof v !== 'object' || !/消息|电话|短讯|短信|信息|来电|通话|语音/.test(String(v.way ?? ''))) return true;
+export function visibleTo(message, viewer, userName = null, roster = []) {
+    const tag = message?.extra?.rp_vis;
+    let v = tag;
+    if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return true; } }
+    if (!v || !/消息|电话|短讯|短信|信息|来电|通话|语音/.test(String(v.way ?? ''))) return true;
     if (!viewer) return true;
-    const norm = s => String(s ?? '').replace(/\s+/g, '').toLowerCase();
-    const eq = (a, b) => !!a && !!b && norm(a) === norm(b);
-    if (viewer === 'user' || viewer === '旁白' || viewer === 'narrator' || (userName && eq(viewer, userName))) return true;
-    if (eq(viewer, v.from) || eq(viewer, v.to)) return true;
-    return !message.is_user && eq(viewer, message.name);
+    const name = typeof viewer === 'object' ? viewer.name : viewer;
+    const explicit = typeof viewer === 'object' ? viewer.avatar : null;
+    if (!explicit && (['user','玩家','旁白','narrator'].includes(name) || name === userName)) return true;
+    const unique = n => { const found = roster.filter(p => p.name === n); return found.length === 1 ? found[0].avatar : null; };
+    const viewerAvatar = explicit ?? (roster.some(p => p.avatar === viewer) ? viewer : unique(name));
+    if (!viewerAvatar) return false;
+    const sender = !message.is_user ? (message.original_avatar ?? message.speaker) : null;
+    const from = (sender && !sender.startsWith('name:') ? sender : null) ?? v.fromAvatar ?? (typeof v.from === 'object' ? v.from.avatar : unique(v.from));
+    const to = v.toAvatar ?? (typeof v.to === 'object' ? v.to.avatar : unique(v.to));
+    return viewerAvatar === from || viewerAvatar === to || (!!sender && !sender.startsWith('name:') && viewerAvatar === sender);
 }
 // 发出去的那份聊天按开口的人筛（就地改数组：ST 拿的就是这个数组）；返回拿掉了几条
-export function filterVisible(chat, viewer, userName = null) {
+export function filterVisible(chat, viewer, userName = null, roster = [], onUnmatched = null) {
     if (!Array.isArray(chat) || !viewer) return 0;
-    let n = 0;
-    for (let i = chat.length - 1; i >= 0; i--) if (!visibleTo(chat[i], viewer, userName)) { chat.splice(i, 1); n++; }
+    let n = 0, warned = false;
+    for (let i = chat.length - 1; i >= 0; i--) if (!visibleTo(chat[i], viewer, userName, roster)) {
+        const message = chat[i], v = message?.extra?.rp_vis;
+        const ambiguous = name => name && roster.filter(p => p.name === name).length > 1;
+        if (!warned && onUnmatched && (ambiguous(typeof viewer === 'string' ? viewer : null)
+            || (!v?.toAvatar && ambiguous(v?.to))
+            || (!v?.fromAvatar && !message.original_avatar && !message.speaker && ambiguous(v?.from)))) {
+            onUnmatched(); warned = true;
+        }
+        chat.splice(i, 1); n++;
+    }
     return n;
 }
 // 叩门候着的那一个（方案 自动进离场与调度 第二节第 3 条）：接／让他进来／不理，不替玩家写字
@@ -284,7 +318,7 @@ export function knockHtml(waiting, escape = s => String(s ?? '')) {
     if (!waiting?.who) return '';
     const way = waiting.way === '电话' ? '打来电话' : waiting.way === '上门' ? '在门口' : '发来消息';
     const yes = waiting.way === '上门' ? `让${escape(waiting.who)}进来` : `接${escape(waiting.who)}的${waiting.way === '电话' ? '电话' : '消息'}`;
-    const b = (answer, text) => `<button type="button" class="menu_button rpe-knock-answer" data-who="${escape(waiting.who)}" data-answer="${answer}">${text}</button>`;
+    const b = (answer, text) => `<button type="button" class="menu_button rpe-knock-answer" data-who="${escape(waiting.who)}" data-avatar="${escape(waiting.avatar ?? '')}" data-answer="${answer}">${text}</button>`;
     return `<div class="rpe-door-title">${escape(waiting.who)}${way}，候着</div><div class="rpe-door-list"><div class="rpe-door-item rpe-door-lit"><span class="rpe-door-who">你回不回都行；打字回${escape(waiting.who)}也算</span>${b('接', yes)}${b('不理', '不理')}</div></div>`;
 }
 
@@ -613,6 +647,43 @@ export async function repairResidentSegment(c,{avatar,name,firstSnapshot=null}){
     return true;
 }
 export const closeIsolationAt=closeSegment;
+
+// 只改纠正所在的区间，遇到下一个既有边界就停。
+export function boardSegmentEdit(segments, { at, until = null, present }) {
+    const before=structuredClone(segments??[]), bounds=before.flatMap(s=>[s.from,s.to]).filter(n=>Number.isInteger(n)&&n>at);
+    if(Number.isInteger(until)&&until>at)bounds.push(until);
+    const end=bounds.length?Math.min(...bounds):null;
+    const after=[];
+    for(const s of before){
+        if((s.to!=null&&s.to<=at)||(end!=null&&s.from>=end)){after.push(s);continue;}
+        if(s.from<at)after.push({...s,to:at,toDate:''});
+        if(end!=null&&(s.to==null||s.to>end))after.push({...s,from:end,fromDate:''});
+    }
+    if(present)after.push({from:at,fromDate:'',to:end,toDate:''});
+    after.sort((a,b)=>a.from-b.from);
+    return {before,after,at,end};
+}
+export function undoBoardSegmentEdit(segments, edit) {
+    const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+    const removed=edit.before.filter(s=>!edit.after.some(a=>same(a,s)));
+    const added=edit.after.filter(s=>!edit.before.some(a=>same(a,s)));
+    const kept=structuredClone(segments??[]);
+    let later=null;
+    for(const s of added){
+        let i=kept.findIndex(a=>same(a,s));
+        if(i<0&&s.to==null){i=kept.findIndex(a=>a.from===s.from&&a.to!=null&&a.to>s.from);if(i>=0)later=kept[i];}
+        if(i<0)return {ok:false,reason:'纠正所属区间已被后续操作修改，请核对'};
+        kept.splice(i,1);
+    }
+    for(const s of removed){
+        const next=kept.filter(a=>a.from>=edit.at&&a.from>s.from).sort((a,b)=>a.from-b.from)[0]?.from;
+        const end=s.to==null?(later?.to??next??null):s.to;
+        const restored={...s,...(end!=null&&s.to==null?{to:end,toDate:later?.toDate??''}:{})};
+        if(!kept.some(a=>same(a,restored)))kept.push(restored);
+    }
+    kept.sort((a,b)=>a.from-b.from);
+    return {ok:true,segments:kept};
+}
 export async function runLeaveAttempt({failures,key,event,attempt,save}) {
     const version=`${event.version??0}:${event.action??'leave'}`;
     if(failures[key]?.version===version && failures[key].count>=3) return false;

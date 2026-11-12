@@ -4,6 +4,7 @@
 // 不带记账、规划、口袋、关系的最新变化；剧情里冒出来的新面孔默认不带，保存时可选择带上。
 import fs from 'node:fs';
 import path from 'node:path';
+import { resolveIdentity } from './cast.mjs';
 
 export const PRESET_VERSION = 1;
 const isFace = e => String(e?.avatar ?? '').startsWith('face:');
@@ -49,13 +50,26 @@ export function applyPreset(store, storyId, p) {
     // 先认卡文件对得上的；按名字对的排在后面，用着的、标了重点的先认，这张卡已经有人认了的就不再落上去（照原来的卡名留着，以后那张卡进来再认）
     const claimed = new Set(incoming.filter(e => byAvatar.has(e.avatar)).map(e => e.avatar));
     const rank = e => (byAvatar.has(e.avatar) ? 0 : e.role === '不用' ? 3 : e.priority ? 1 : 2);
+    const mapping = [];
     const entries = [...incoming].sort((a, b) => rank(a) - rank(b)).map(e => {
-        if (byAvatar.has(e.avatar)) return { ...e };
-        const to = have.find(h => h.name === e.name && isFace(h) === isFace(e))?.avatar;
-        if (!to || claimed.has(to)) return { ...e };
+        const result = resolveIdentity(have.filter(h => isFace(h) === isFace(e)), e, { missingAvatarFallback: true });
+        if (!result.person && e.avatar && result.status === 'unmatched') {
+            mapping.push({ from: e.avatar, name: e.name, status: isFace(e) ? 'new-face' : 'unmatched', to: e.avatar });
+            if (!isFace(e)) warnings.push(`${e.name}的卡尚未匹配（${e.avatar}），保留预设身份，未改其他卡。`);
+            return { ...e };
+        }
+        const to = result.person?.avatar;
+        const conflict = result.status !== 'exact' && claimed.has(to);
+        mapping.push({ from: e.avatar ?? null, name: e.name, status: conflict ? 'claimed' : result.status,
+            to: conflict ? null : to ?? null, ...(result.candidates ? { candidates: result.candidates } : {}) });
+        if (conflict && e.avatar) return { ...e };
+        if (!to) {
+            warnings.push(`${e.name}的卡未能唯一映射（${result.candidates?.join('、') || e.avatar || '没有卡文件'}），已保留原设置，请确认。`);
+            return null;
+        }
         claimed.add(to);
         return { ...e, avatar: to };
-    });
+    }).filter(Boolean);
     if (entries.length) {
         store.putCast(storyId, entries.map(e => ({ avatar: e.avatar, name: e.name, ...(e.call !== undefined ? { call: e.call } : {}), ...(e.stranger !== undefined ? { stranger: strangerOf(e.stranger) } : {}), ...(e.gender !== undefined ? { gender: e.gender } : {}), ...(typeof e.群体 === 'boolean' ? { 群体: e.群体 } : {}), role: e.role, hook: e.hook, priority: e.priority, bond: e.bond })), { byUser: true });
         for (const e of entries) store.setInterests(storyId, e.avatar, e.interests ?? null);
@@ -64,7 +78,7 @@ export function applyPreset(store, storyId, p) {
     if (p.relations) store.putRelations(storyId, p.relations, { by: 'preset' });
     store.setMeta(`pack:${storyId}`, p.pack || null);
     store.setMeta(`absence_mode:${storyId}`, p.absenceMode || null);
-    return { ...(warnings.length ? { warnings } : {}), people: entries.length, setup: !!p.setup, relations: !!p.relations, pack: p.pack ?? null };
+    return { mapping, ...(warnings.length ? { warnings } : {}), people: entries.length, setup: !!p.setup, relations: !!p.relations, pack: p.pack ?? null };
 }
 
 // 存在 <home>/presets/ 里，一份一个文件

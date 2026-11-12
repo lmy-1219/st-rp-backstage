@@ -53,15 +53,33 @@ export function camePrompt({ doubts = [], messages = [], userName = '玩家' } =
         ...window.map(m => '〔' + m.pos + '〕' + (m.is_user ? userName : (m.name ?? m.speaker)) + '：' + String(m.text ?? ''))].join('\n');
 }
 
+// 只选输入材料，提示词正文与 leftPrompt 的静态文字保持原样。
+function leftExcerpt(t, doubts, gap) {
+        const calls = doubts.flatMap(d => d.aliases ?? [d.who]).filter(Boolean);
+        const sentences = t.match(/[^。！？!?；;\n]+[。！？!?；;\n]?/g) ?? [t];
+        const important = sentences.filter(s => calls.some(n => s.includes(n)) || /离开|挂断|隐入|走向|屏退|散去/.test(s));
+        const selected = [];
+        let size = 0;
+        for (const s of [...important, ...sentences.slice(0, 2), ...sentences.slice(-2)]) {
+            if (selected.some(x => x.s === s) || size + s.length > 1500) continue;
+            selected.push({ s, at: t.indexOf(s) }); size += s.length;
+        }
+        const body = selected.sort((a, b) => a.at - b.at).map(x => x.s).join(gap) || t.slice(0, 1500);
+        return body + (body.length < t.length ? gap : '');
+}
+
 // 第三眼的材料：拿不准的几位（who、why）＋最近几条正文
 export function leftPrompt({ doubts = [], messages = [], userName = '玩家', recent = 10 } = {}) {
     const starts = doubts.map(d => d.from ?? d.since ?? d.at).filter(Number.isFinite);
     const from = starts.length ? Math.min(...starts) : -Infinity;
-    const clip = text => { const t=String(text ?? ''); return t.length<=1500 ? t : t.slice(0,300)+'……'+t.slice(-900); };
+    const clip = text => { const t=String(text ?? ''); return t.length<=1500 ? t : leftExcerpt(t, doubts, '……'); };
+    const sources = new Set(doubts.flatMap(d => [d.at, d.pendingAt, d.from ?? d.since]).filter(Number.isFinite));
+    const tail = messages.filter(m => !m.hidden && m.pos >= from).slice(-Math.min(10, recent));
+    const material = messages.filter(m => !m.hidden && (sources.has(m.pos) || tail.includes(m)));
     return [
         '【要复核的几位】', ...doubts.map(d => '· '+d.who+'（'+(d.status==='remote'?'远程':'当面')+'；叫法：'+(d.aliases??[d.who]).join('、')+'；起疑条：'+d.at+'）：'+d.why+(d.pendingAt!=null?'；已核被打发未动〔'+d.pendingAt+'〕：'+(d.pendingQuote??''): '')),
         '', '【从上次判过以后】（'+userName+'是玩家的角色）',
-        ...messages.filter(m=>m.pos>=from).slice(-Math.min(10,recent)).map(m=>'〔'+m.pos+'〕'+(m.is_user?userName:(m.name??m.speaker))+'：'+clip(m.text)),
+        ...material.map(m=>'〔'+m.pos+'〕'+(m.is_user?userName:(m.name??m.speaker))+'：'+clip(m.text)),
     ].join('\n');
 }
 
@@ -71,9 +89,10 @@ export async function completeGlance({ config, spentToday = 0, state = null, sce
     if (!state && !scene && !doubts.length && !came.length) return null;
     const stage=config.stages?.scene;
     if (!stage?.baseUrl || !stage.apiKey || !stage.model || spentToday >= (config.extractor?.dailyBudgetUsd ?? Infinity)) return null;
+    const modelCandidates = rows => rows.map(d => ({ ...d, who: d.candidateId ?? d.who, aliases: [...new Set([d.who, ...(d.aliases ?? [])])] }));
     return complete({ system:glanceSystem({state:!!state,scene:!!scene,left:!!doubts.length,came:!!came.length}),
-        user:glancePrompt({state,scene,left:doubts.length?leftPrompt({doubts,messages,userName}):null,
-            came:came.length?camePrompt({doubts:came,messages,userName}):null}) });
+        user:glancePrompt({state,scene,left:doubts.length?leftPrompt({doubts:modelCandidates(doubts),messages,userName}):null,
+            came:came.length?camePrompt({doubts:modelCandidates(came),messages,userName}):null}) });
 }
 
 // → { state: parseState 的结果（[] 也算答了）| null（没答、答坏了）, scene: parseScene 的结果 | null（没答）, left: { 名字: 走了没 } | null }

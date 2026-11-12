@@ -30,6 +30,7 @@ import { CAST_PROMOTION_DEFAULTS, MODEL_GROUPS, VOICE_GUIDANCE } from './config.
 import { voiceLibrary, voiceName } from './fresh.mjs';
 import { planRoster, normalizeRelations, toText as relationsText, fromText as relationsFromText, currentLines, personOf } from './relations.mjs';
 import { boardFor } from './board.mjs';
+import { executionResult } from './auto.mjs';
 import { pendingFor, playerView } from './pending.mjs';
 import { doorFor, capFresh } from './door.mjs';
 import { occasionOf, WHY as OCCASION_WHY } from './occasion.mjs';
@@ -173,7 +174,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         if (!chat.group_id || config.auto?.enabled !== true || store.currentMessages(chat.key).some(m => m.is_user)) return [];
         const members = JSON.parse(chat.members ?? '[]'), players = store.playerNames(chat.story_id);
         return boardFor(store, records, chat.key).people
-            .filter(p => !['present', 'remote'].includes(p.status) && p.card && p.name !== '旁白' && !players.includes(p.name) && members.some(m => m.avatar === p.avatar))
+            .filter(p => (p.status === 'absent' || (p.status === 'away' && !p.plan?.seed)) && p.card && p.name !== '旁白' && !players.includes(p.name) && members.some(m => m.avatar === p.avatar))
             .map(p => p.avatar);
     };
     const keysFor = (storyId, chatKey) => {
@@ -462,7 +463,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/leave': async b => {
             const leave = settings().leave;
             if (!leave) bad('leave_unavailable');
-            return leave({ chatKey: str(b.chatKey, 'chatKey'), who: str(b.who, 'who', { max: 80 }), avatar: typeof b.avatar === 'string' ? b.avatar.slice(0, 200) : null });
+            return leave({ chatKey: str(b.chatKey, 'chatKey'), who: str(b.who, 'who', { max: 80 }), avatar: typeof b.avatar === 'string' ? b.avatar.slice(0, 200) : null, manual: true });
         },
         // 谁接话（方案 自动进离场与调度 第二节第 5 条）：玩家发了一句、某人答完一条，扩展问一次——按顺序的几个人（答／接／插／旁白）；
         // 顺带：这会儿该叩门就把候着的一条给扩展叫他写（knock）、候着的那一个（waiting，画快捷按钮）、谁走了（left，扩展关区间、静音）
@@ -470,6 +471,19 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const auto = settings().auto;
             if (!auto?.turn) bad('auto_unavailable');
             return auto.turn({ chatKey: str(b.chatKey, 'chatKey'), present: strings(b.present, 60, 200), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', peek: b.peek === true });
+        },
+        'POST /v1/turn-result': b => {
+            const chatKey = str(b.chatKey, 'chatKey'); store.requireChat(chatKey);
+            return executionResult(store, chatKey, { id: str(b.id, 'id', { max: 1000 }), result: str(b.result, 'result', { max: 30 }), reason: String(b.reason ?? '').slice(0,300),
+                previous: b.previous && typeof b.previous==='object' ? b.previous : null,
+                ownReplies: Array.isArray(b.ownReplies) ? b.ownReplies.map(m=>({pos:m.pos,fp:m.fp,text:String(m.text??''),extra:{rp_vis:m.extra?.rp_vis}})) : [],
+                sequence: Array.isArray(b.sequence) ? b.sequence.map(m=>({pos:m.pos,fp:m.fp,hidden:!!m.hidden,boardMark:m.boardMark??null})) : null }, {records,config:settings()});
+        },
+        'POST /v1/card-choice': b => {
+            const chatKey=str(b.chatKey,'chatKey'),chat=store.requireChat(chatKey),name=str(b.name,'name'),avatar=str(b.avatar,'avatar');
+            if(!store.getCast(chat.story_id).some(p=>p.avatar===avatar&&p.role!=='不用'))return {ok:false,why:'所选卡不在本局名册，请先核对名册'};
+            let choices={};try{choices=JSON.parse(store.getMeta(`card_choices:${chatKey}`)??'{}');}catch{}
+            choices[name]=avatar;store.setMeta(`card_choices:${chatKey}`,JSON.stringify(choices));return {ok:true};
         },
         // 快捷按钮：接／让他进来＝进场，不理＝作废
         'POST /v1/leave-ack': b => {
@@ -481,7 +495,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/knock-answer': async b => {
             const auto = settings().auto;
             if (!auto?.answer) bad('auto_unavailable');
-            return auto.answer({ chatKey: str(b.chatKey, 'chatKey'), who: str(b.who, 'who', { max: 80 }), answer: str(b.answer ?? '接', 'answer', { max: 10 }) });
+            return auto.answer({ chatKey: str(b.chatKey, 'chatKey'), who: str(b.who, 'who', { max: 80 }), avatar: b.avatar ? str(b.avatar, 'avatar', { max: 300 }) : null, answer: str(b.answer ?? '接', 'answer', { max: 10 }) });
         },
         // 打字时预跑（D-100）：草稿先配词、替在场的人组装，发出去和草稿一样就直接用上。立刻返回，不等。
         'POST /v1/prefetch': b => {
@@ -635,7 +649,9 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             return { boards: all.slice(from, to).map(message => {
                 const board = boardFor(store, records, chatKey, { anchor: `${message.pos + 1}:${message.fp}`, timeline: tl });
                 return { pos: message.pos, fp: message.fp, place: board.camera.place, from: board.camera.from, home: board.camera.home,
-                    people: board.people.map(person => ({ name: person.name, status: person.status, way: person.way })),
+                    people: board.people.map(person => ({ name: person.name, avatar: person.avatar, status: person.status, way: person.way })),
+                    identityWarnings: board.identityWarnings,
+                    sourceVersion: board.sourceVersion,
                     time: { day: board.time.day, part: board.time.part } };
             }) };
         },

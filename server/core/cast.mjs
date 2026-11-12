@@ -5,8 +5,25 @@
 //   新面孔   ——没有卡、这一局里新长出来的人（规划者列出来要用的，或者记账里反复出现的）：能牵头、会来联系、有亲疏；前台把他写出来（D-107）
 //   可能登场 ——还没在这个故事里出场的卡；给了"钩子"（什么情况下会找上门）才会被递出去
 //   不用     ——不属于这个故事、或是迭代留下的旧版本
+import { resolveIdentity } from '../extension/sync.mjs';
+export { resolveIdentity };
 export const ROLES = ['主要', '常联系', '新面孔', '路过', '可能登场', '不用'];
 export const ROLE_WEIGHT = { 主要: 4, 常联系: 3, 新面孔: 2, 可能登场: 1, 路过: 0, 不用: 0 };
+
+export function sameIdentity(a, b, roster = []) {
+    if (!a || !b) return false;
+    if (a.avatar && b.avatar) return a.avatar === b.avatar;
+    const scope = roster.length ? roster : [a, b].filter(x => x.avatar);
+    if (!scope.length) return !!(a.name ?? a.who) && (a.name ?? a.who) === (b.name ?? b.who);
+    const left = resolveIdentity(scope, a).person, right = resolveIdentity(scope, b).person;
+    return !!left && !!right && (left.avatar || right.avatar ? left.avatar === right.avatar : left.name === right.name);
+}
+export function messageIsPerson(message, person, roster = []) {
+    if (!message || message.is_user) return false;
+    const speaker = message.speaker ?? message.original_avatar;
+    if (speaker && !speaker.startsWith('name:')) return !!person.avatar && speaker === person.avatar;
+    return sameIdentity({ name: message.name }, person, roster.length ? roster : [person]);
+}
 
 // 新发现的卡给个默认档：群成员＝主要；在这个窗口说过话＝常联系；其余＝可能登场。用户改过的不动（store.putCast 管）。
 // 和群成员同名、却不是那张卡的，多半是同一个人的旧版本 ⇒ 不用。
@@ -61,12 +78,10 @@ export function mentionedIn(text) {
     };
 }
 
-// 按名字找档：记录里的名字和卡名一样，或一个包含另一个。
+// 按唯一的精确身份找档，不按包含关系或档位猜人。
 export function roleOf(roster, name) {
     if (!name || !roster?.length) return null;
-    // 同名的几张（同一个人的几个版本）取档位最高的那张
-    const best = list => list.sort((a, b) => ROLE_WEIGHT[b.role] - ROLE_WEIGHT[a.role])[0] ?? null;
-    return best(roster.filter(e => e.name === name)) ?? best(roster.filter(e => e.role !== '不用' && (e.name.includes(name) || name.includes(e.name))));
+    return resolveIdentity(roster.filter(e => e.role !== '不用'), name).person;
 }
 
 // ---------- 亲疏 ----------

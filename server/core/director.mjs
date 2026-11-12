@@ -6,8 +6,9 @@
 // 上一条角色回复问了玩家就返回空（停下等玩家）；他点了、问了在场的别人，那人接。
 // "这句对谁说"程序先认（addresseeOf：点名、称呼、上一条是谁、问句），认不出返回 null——当场问一次便宜模型是主窗 1b 的事，这里只给钩子。
 // 接线（扩展按单子 /trigger、ST 群改手动策略）在 1b、1c。同一个模块以后就是 APK 的轮话逻辑。题材无关。
-import { cameraShouldSpeak, callsOf } from './camera-turn.mjs';
+import { cameraShouldSpeak, callsOf, LEAVE } from './camera-turn.mjs';
 import { hasCard } from './arrival.mjs';
+import { resolveIdentity } from './cast.mjs';
 import { sameName } from './setup.mjs';
 import { normalizeRelations, personOf } from './relations.mjs';
 import { paceName, MID } from './tempo.mjs';
@@ -115,7 +116,7 @@ function replyTargets(text, { names = [], self = null, rel = null, all = [] } = 
  *      wants（每人此刻要说的 [{ who, kind: 兴头|口袋|来意|等回音, text? }]）、pace（慢／中／快）、userName、present（群里开着口的，给旁白判定）、stateNotes、cap
  * 输出：{ queue: [{ who, role, why, noRepeat? }], why }，queue 空时 why 说为什么停
  */
-export function turnDetail(input = {}) {
+function decideTurn(input = {}) {
     const { text = null, messages = [], roster = [], relations = null, wants = [], pace = null, present = [], stateNotes = [], cap = null, chain = null } = input;
     const userAt = messages.findLastIndex(m => m?.is_user);
     if (userAt < 0) return { queue: [], why: '还没有玩家的话' };
@@ -130,8 +131,19 @@ export function turnDetail(input = {}) {
     const here = folks.filter(p => p.status === 'present').map(p => p.name);
     const phone = folks.filter(p => p.status === 'remote' && /电话/.test(p.way ?? '')).map(p => p.name);
     const texting = folks.filter(p => p.status === 'remote' && !/电话/.test(p.way ?? '')).map(p => p.name);
-    // 刚走的（同一时段里，还没走远）：被点名就直接叫回来，不走进场那套
-    const justLeft = folks.filter(p => p.status === 'away' && (p.stage == null || p.stage === 'early')).map(p => p.name);
+    // 快捷召回只给明确还在门边的人；电话、消息及外出去向交给正常联系/门。
+    const reachable = p => {
+        if (p.manualAway) return false;
+        if (!['away', 'absent'].includes(p.status) || p.stage !== 'early' || p.way && /电话|消息/.test(p.way)) return false;
+        if (p.plan && (p.plan.errands?.length || p.plan.span && p.plan.span !== '一会儿' || /电话|消息|不回来/.test(p.plan.back ?? '') || p.plan.where)) return false;
+        const source = messages.find(m => m.pos === (p.manualAway?.pos ?? p.since));
+        const body = String(source?.text ?? '').replace(QUOTE, '');
+        const nearby = body.split(/[。！？!?；;\n]/).some(s => /门口|门边|还没走远|尚未走远/.test(s)
+            && callsOf(p.name, { rel, names }).some(call => s.includes(call) || source.speaker === p.avatar && /我/.test(s)));
+        return !!source && nearby
+            && !/挂断|走远了|已经走远|去.+办事/.test(source.text ?? '');
+    };
+    const justLeft = folks.filter(reachable).map(p => p.name);
     const paceN = paceOf(pace);
     const limit = cap ?? CAP[paceN];
     const since = messages.slice(userAt + 1);
@@ -155,10 +167,26 @@ export function turnDetail(input = {}) {
     if (r?.player) return { queue: [], why: `${reply.name}那条问了${userName ?? '玩家'}，停下等玩家` };
     // 这句对谁说
     const lastSpeaker = messages.slice(0, userAt).findLast(m => !m.is_user && !isNarrator(m))?.name ?? null;
-    const to = addressee(line, [...here, ...phone, ...texting, ...justLeft], lastSpeaker, { rel, names, userName });
-    if (to.who && !said(to.who)) {
-        if (justLeft.some(n => same(n, to.who))) add(to.who, '答', '刚走的人被点名，直接叫回来');
-        else if (to.how === '点名') add(to.who, '答', '玩家点了他的名');
+    // 先在有效名册识别明确点名，再核资格，避免过滤掉目标后误当成对上一位的承接。
+    const explicit = addressee(line, folks.map(p => p.name), null, { rel, names, userName });
+    const eligible = [...here, ...phone, ...texting];
+    const to = explicit.who ? explicit : addressee(line, eligible, lastSpeaker, { rel, names, userName });
+    const recall = addressee(line, justLeft, null, { rel, names, userName });
+    const recallIntent = recall.who && callsOf(recall.who, { rel, names }).some(call =>
+        new RegExp(`${esc(call)}[，,、：:\\s]*(?:你|您)?[，,\\s]*(?:先|快|请|给我)?(?:回来|回头|过来|等一下|等等|留步|别走|先别走)`).test(spokenOf(line)));
+    const canRecall = recall.who && !said(recall.who) && recall.how === '点名' && recallIntent && !IGNORE.test(line) && !/想起|提到|谈起|如果|要是|让他|叫他/.test(line);
+    if (explicit.who && !eligible.includes(explicit.who) && !(canRecall && recall.who === explicit.who)) {
+        const target = folks.find(p => p.name === explicit.who);
+        const reason = target.manualAway ? '已被人工标为离场' : target.status === 'never' ? '尚未确认在场' : ['absent','away'].includes(target.status) ? '当前不在场' : '在场状态尚未确认';
+        return { queue: [], paused:true, why: `${target.name}${reason}，且没有可用的远程联系，暂不能接话；可在面板确认并改为在场，或先建立远程联系` };
+    }
+    if (canRecall) {
+        add(recall.who, '答', '玩家明确叫住仍在门边的人');
+        const item = queue.find(q => same(q.who, recall.who));
+        if (item) item.back = true;
+    }
+    if (to.who && eligible.includes(to.who) && !said(to.who)) {
+        if (to.how === '点名') add(to.who, '答', '玩家点了他的名');
         else add(to.who, '接', '玩家这句接着他上一条说的');
     }
     // 旁白：玩家点名了没卡的人、接着跟上一条旁白里开口的人说话 → 旁白写那人的回应；排在被点名的有卡的人之后（没有就最先）
@@ -177,10 +205,48 @@ export function turnDetail(input = {}) {
     // 没人该说、这句还没人答过：身边有人就让刚才说话的那位（没有就头一个在场的）接一手；一个人时旁白接
     if (!queue.length && !since.length) {
         if (here.length) add(here.find(n => same(n, lastSpeaker)) ?? here[0], '接', '没人被点名，身边的人顺着接一手');
-        else if (!phone.length) add(CAMERA_NAME, '旁白', '身边没有有卡的人，旁白接');
+        else if (!phone.length) {
+            const conflict = folks.find(p => p.status === 'unknown' || !p.manualAway && ['away','absent'].includes(p.status)
+                && messages.some(m => !m.is_user && m.speaker === p.avatar && m.pos >= (p.since ?? Infinity) && !LEAVE.test(m.text ?? '')));
+            if (conflict) return { queue: [], paused:true, why: `${conflict.name}的在场状态需要核对，停下；请纠正在场或使用重试接话` };
+            add(CAMERA_NAME, '旁白', '身边没有有卡的人，旁白接');
+        }
     }
     const out = queue.slice(0, room).map((q, i) => (since.length + i >= 1 ? { ...q, noRepeat: true } : q));
     return { queue: out, why: out.length ? '' : '没人该说，停下' };
+}
+
+// 同名候选在内部保留各自 avatar；文字点名仍无法消歧时停下，不换人。
+export function turnDetail(input = {}) {
+    const allPeople = (input.board?.people ?? input.people ?? []).filter(p => p.name);
+    const folks = allPeople.filter(p => p.card !== false);
+    const duplicates = new Set(folks.filter(p => folks.filter(q => q.name === p.name).length > 1).map(p => p.name));
+    const user = (input.messages ?? []).findLast(m => m.is_user);
+    const last = input.messages?.at(-1);
+    const text = String(input.text ?? user?.text ?? '');
+    const identify = ref => resolveIdentity(folks, ref, { members: input.members, identityChoices: input.identityChoices }).person;
+    const chosen=name=>identify({ name });
+    const ambiguous = [...duplicates].find(name => !chosen(name)&&(text.includes(name) || (last && !last.is_user && String(last.text ?? '').includes(name))));
+    if (ambiguous) return { queue: [], paused:true, why: `${ambiguous}对应多张卡，请按卡文件确认：${folks.filter(p=>p.name===ambiguous).map(p=>p.avatar).join('、')}` };
+    const label = p => duplicates.has(p.name) ? `${p.name}〔${p.avatar}〕` : p.name;
+    const namedText=value=>[...duplicates].reduce((line,name)=>chosen(name)?line.split(name).join(label(chosen(name))):line,String(value??''));
+    const mapMessage = m => {
+        const p = identify({ avatar: m.speaker && !m.speaker.startsWith('name:') ? m.speaker : null, name: m.name });
+        return {...m,...(p?{name:label(p)}:{}),text:namedText(m.text)};
+    };
+    const people = allPeople.map(p => ({ ...p, name: p.card === false ? p.name : label(p) }));
+    const result = decideTurn({ ...input, text:input.text==null?null:namedText(input.text), board: input.board ? { ...input.board, people } : undefined, people,
+        messages: (input.messages ?? []).map(mapMessage),
+        roster: (input.roster ?? []).map(p => ({ ...p, name: label(p) })),
+        wants: (input.wants ?? []).flatMap(w => { const p=identify(w); return p ? [{...w,who:label(p)}] : []; }) });
+    const queue = [];
+    for (const q of result.queue) {
+        if (q.who === CAMERA_NAME) { queue.push(q); continue; }
+        const p = folks.find(p => label(p) === q.who);
+        if (!p) return { queue: [], paused:true, why: `${q.who}的卡身份未对上，请确认` };
+        queue.push({ ...q, who: p.name, ...(p.avatar ? { avatar: p.avatar } : {}) });
+    }
+    return { ...result, queue };
 }
 
 export function turn(input = {}) { return turnDetail(input).queue; }

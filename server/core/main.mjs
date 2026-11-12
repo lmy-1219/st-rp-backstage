@@ -40,7 +40,8 @@ import { secretCandidates, recordSecretLeaks, activeLeaks, secretLeakLines } fro
 import { bodyGate, holdBodyContact, heldContactText } from './body.mjs';
 import { ASK_SYSTEM, askPrompt, parseAsk, knownFor, exchangeRecords, INFORM_SYSTEM, informPrompt, parseInform } from './offstage.mjs';
 import { lifeSheet, homeChanged } from './life.mjs';
-import { boardFor } from './board.mjs';
+import { boardFor, sourceVersion } from './board.mjs';
+import { executionFor } from './auto.mjs';
 import { awayPlansOf } from './opening.mjs';
 import { unansweredLine, promisesFor, pullOf, placeNow } from './waiting.mjs';
 import { doorFor } from './door.mjs';
@@ -821,43 +822,59 @@ export const episodeRetryDue = ({ last, from, fp, end, to, force = false }) => f
 // 他离场了（D-169，用户 10/6）：照他走前那几句理出去向——要去办的事、大概多久、怎么回来；回来的时机、回来时这段时间干了什么都照它。
 // 一次便宜模型（看场面那一档），在后台跑。没配模型也记下他走了（只按时段算什么时候能回来）。
 // 他人到场了，去向用完：不删，记下是哪一次进场用掉的（arrival.validAwayPlan）——那次进场后他那条回复删了、换了别人在说，去向就回来（方案 删消息等于没发生过）
-function dropAway(chatKey, who, by = null) {
+function dropAway(chatKey, person, by = null) {
     try {
+        const { who, avatar } = person;
+        const roster = store.getCast(store.requireChat(chatKey).story_id) ?? [];
+        const unique = roster.filter(p=>p.name===who).length===1 && roster.some(p=>p.name===who&&p.avatar===avatar);
         const plans = JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {};
-        for (const k of Object.keys(plans)) if (plans[k]?.who === who) { if (by) plans[k] = { ...plans[k], dropped: by }; else delete plans[k]; }
+        for (const k of Object.keys(plans)) if (plans[k]?.avatar ? plans[k].avatar === avatar : unique && plans[k]?.who === who) { if (by) plans[k] = { ...plans[k], dropped: by }; else delete plans[k]; }
         store.setMeta(`away_plan:${chatKey}`, JSON.stringify(plans));
     } catch {}
 }
 const leaving = new Map();
-async function leave({ chatKey, who, avatar = null, anchor = null, how = null }) {
+async function leave({ chatKey, who, avatar = null, anchor = null, how = null, manual = false }) {
     const chat = store.requireChat(chatKey);
+    const roster = store.getCast(chat.story_id) ?? [], named = roster.filter(p=>p.name===who);
+    avatar ??= named.length===1 ? named[0].avatar : null;
+    if (!avatar || !roster.some(p=>p.avatar===avatar)) return {ok:false,why:'离场身份未能唯一匹配，请确认卡文件'};
+    const matches = p => p?.avatar ? p.avatar===avatar : named.length===1 && named[0].avatar===avatar && p?.who===who;
     const msgs = store.currentMessages(chatKey).filter(m => !m.hidden);
     const last = anchor ? msgs.find(m=>m.pos===anchor.at&&m.fp===anchor.fp) : msgs.at(-1);
     if (!last) return { ok: true };
+    if (manual) {
+        const plans = JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {};
+        const key = avatar ?? `name:${who}`;
+        plans[key] = { ...(plans[key] ?? { who, avatar, at: last.pos + 1, fp: last.fp, how }), manual: true, manualAt: { pos: last.pos, fp: last.fp } };
+        store.setMeta(`away_plan:${chatKey}`, JSON.stringify(plans));
+    }
     // 扩展点的"离场"和同步后看区间关上了（slot.advanceWorld ⑦）会前后脚都来：同一条消息上已经记过他的去向、或正在记，就不再问模型
-    const key = `${chatKey}\u0001${who}\u0001${last.fp}`;
+    const key = `${chatKey}\u0001${avatar}\u0001${last.fp}`;
     if (leaving.has(key)) return leaving.get(key);
     try {
-        const had = Object.values(JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {}).find(p => p?.who === who && p.fp === last.fp && p.at === last.pos + 1);
-        if (had) return { ok: true, idempotent: true, ...had };
+        const had = Object.values(JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {}).find(p => matches(p) && p.fp === last.fp && p.at === last.pos + 1);
+        if (had && (!manual || had.errands)) return { ok: true, idempotent: true, ...had };
     } catch {}
     const work = leaveNow({ chat, chatKey, who, avatar, msgs: msgs.filter(m=>m.pos<=last.pos), last, how });
     leaving.set(key, work);
     try { return await work; } finally { leaving.delete(key); }
 }
 async function leaveNow({ chat, chatKey, who, avatar, msgs, last, how = null }) {
+    const scope = store.getCast(chat.story_id) ?? [], named = scope.filter(p=>p.name===who);
+    const matches = p => p?.avatar ? p.avatar===avatar : named.length===1 && named[0].avatar===avatar && p?.who===who;
     const userName = [...msgs].reverse().find(m => m.is_user)?.name ?? '玩家';
     // 发消息、打电话来的人挂了：进场那一份用完了；他人一直在外头，离开从上一回出门算、去向接着用（这回说了新的就换成新的）
     let wasRemote = false;
-    try { const arr = JSON.parse(store.getMeta(`arrived:${chatKey}`) ?? 'null'); if (arr?.who === who) { wasRemote = /电话|消息/.test(arr.how ?? '') && !metInPerson(msgs.filter(m => m.pos >= (arr.at ?? Infinity)), { who, userName: [...msgs].reverse().find(m => m.is_user)?.name ?? null, since: arr.at ?? Infinity, notes: store.stateNotesOf?.(chatKey) ?? [], others: (store.getCast(chat.story_id) ?? []).map(e => e.name) }); store.setMeta(`arrived:${chatKey}`, null); } } catch {}
+    try { const arr = JSON.parse(store.getMeta(`arrived:${chatKey}`) ?? 'null'); if (arr && matches(arr)) { wasRemote = /电话|消息/.test(arr.how ?? '') && !metInPerson(msgs.filter(m => m.pos >= (arr.at ?? Infinity)), { who, userName: [...msgs].reverse().find(m => m.is_user)?.name ?? null, since: arr.at ?? Infinity, notes: store.stateNotesOf?.(chatKey) ?? [], others: scope.map(e => e.name) }); store.setMeta(`arrived:${chatKey}`, null); } } catch {}
     // 他这回的来意跟着离场过去（场记章程 B2）：挂在眼下这条上，删回去就回来
     try { const roster = (store.getCast(chat.story_id) ?? []).map(e => e.name); closeIntents({ records, chatKey, storyId: chat.story_id, who, fp: last.fp, same: (a, b) => sameName(a, b, roster) }); } catch {}
     let plans = {};
     try { plans = JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {}; } catch {}
-    const before = wasRemote ? Object.values(plans).find(p => p?.who === who) ?? null : null;
-    for (const k of Object.keys(plans)) if (plans[k]?.who === who) delete plans[k];
+    const before = wasRemote ? Object.values(plans).find(matches) ?? null : null;
+    const manualAt = Object.values(plans).find(matches)?.manualAt;
+    for (const k of Object.keys(plans)) if (matches(plans[k])) delete plans[k];
     const planKey=avatar ?? `name:${who}`;
-    const minimal=before ?? {who,avatar,at:last.pos+1,fp:last.fp,how};
+    const minimal={...(before ?? {who,avatar,at:last.pos+1,fp:last.fp,how}),avatar, ...(manualAt ? { manual: true, manualAt } : {})};
     plans[planKey]=minimal;
     store.setMeta(`away_plan:${chatKey}`,JSON.stringify(plans));
     const clean = stripper(getConfig().strip);
@@ -1127,6 +1144,10 @@ function rejoined(chat, { avatar, who, len }) {
 // anchor（叩门，auto.mjs）：他那条已经落在 anchor.at 上了，进场挂在它前一条（fp）上、他从那条起在场；knock＝候着（上门的去向先不清，玩家回应了再清）
 async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'come', way = '', anchor = null, knock = false }) {
     const chat = store.requireChat(chatKey);
+    const identities = store.getCast(chat.story_id).filter(e => e.role !== '不用');
+    const matches = identities.filter(e => avatar ? e.avatar === avatar : e.name === who);
+    if (matches.length !== 1) return { ok: false, why: `${who}的卡身份未能唯一匹配，请确认：${matches.map(e=>e.avatar).join('、') || avatar || who}` };
+    avatar = matches[0].avatar; who = matches[0].name;
     const all = store.currentMessages(chatKey);
     const msgs = anchor ? all.filter(m => m.pos < Number(anchor.at)) : all;
     const tip = msgs.at(-1);
@@ -1134,21 +1155,23 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     // 刚移出就原地拉回来（用户 10/14："不小心把人移出群聊，再原地拉回来就接不上戏了"）：他没走开——不理进场那份、不编"这段时间"、不当他从外头来；
     // 跟着别人出现的人（关系表"跟着"），带他的人眼下就在群里，也一样（他只能跟着那人，不会自己上门）
     if (mode === 'come' && rejoined(chat, { avatar, who, len: (tip?.pos ?? -1) + 1 })) return { ok: true, skipped: 'rejoin' };
-    const key = `${chatKey}\u0001${who}\u0001${tip?.fp ?? ''}\u0001${mode}\u0001${way}`;
+    const version=sourceVersion(store,chatKey,tip?.pos??-1);
+    const origin=JSON.stringify([anchor,knock]);
+    const key = `${chatKey}\u0001${avatar}\u0001${tip?.fp ?? ''}\u0001${mode}\u0001${way}\u0001${origin}\u0001${version}`;
     let brief = null;
     try { brief = JSON.parse(store.getMeta(`arrival_brief:${chatKey}`) ?? 'null'); } catch {}
     // 先理好的那份认人、认那一条、也认方式（"你去找他"和"他过来"理出来的不一样）
     // 叩门提前理的那份（knock）：隔了几条也认——怎么来的、为什么来、看得见什么几条之内不会变，省得时机到了再等几十秒
     const briefNear = brief?.knock && Number.isFinite(Number(brief.pos)) && (tip?.pos ?? 0) >= Number(brief.pos) && (tip?.pos ?? 0) - Number(brief.pos) <= 6;
-    if (brief && !(brief.who === who && (brief.mode ?? 'come') === mode && (brief.fp === (tip?.fp ?? '') || briefNear))) brief = null;
+    if (brief && !((brief.avatar ? brief.avatar === avatar : identities.filter(e=>e.name===brief.who).length===1 && brief.who===who) && (brief.mode ?? 'come') === mode && (brief.way??'')===way && (!brief.origin||brief.origin===origin) && (!brief.sourceVersion||brief.sourceVersion===version) && (brief.fp === (tip?.fp ?? '') || briefNear))) brief = null;
     if (prepare && (brief || arriving.has(key))) return { ok: true, prepared: true };
-    if (!prepare && !brief && arriving.has(key)) { await arriving.get(key).catch(() => {}); return arrive({ chatKey, who, avatar, mode, way }); }
+    if (!prepare && !brief && arriving.has(key)) { await arriving.get(key).catch(() => {}); return arrive({ chatKey, who, avatar, mode, way, anchor, knock }); }
     let offer = null;
     try { offer = JSON.parse(store.getMeta(`arrival_offer:${chatKey}`) ?? 'null'); } catch {}
     // 门上点进来的（D-175）：由头取门的名单里他那一项；结算写的联系照旧算 settle（进场后标用掉）
     if (!offer) {
         try {
-            const item = doorFor(store, records, chatKey, { present: [], recentUser: '', timeline: timelineFor(store, records, chatKey, msgs) }).items.find(i => sameName(i.who, who, (store.getCast(chat.story_id) ?? []).map(e => e.name)));
+            const item = doorFor(store, records, chatKey, { present: [], recentUser: '', timeline: timelineFor(store, records, chatKey, msgs) }).items.find(i => i.avatar === avatar);
             // sent：旁白替他递过的那条消息、来电（场记章程 B1），进场那份接着这条说
             if (item) offer = { who: item.who, avatar: item.avatar, why: item.reason ?? '', way: '', from: item.source?.type === 'contact' ? 'settle' : item.source?.type ?? 'user', source: item.source ?? null, lines: item.lines ?? [], sent: item.sent ?? null, earlier: item.earlier ?? null };
         } catch {}
@@ -1159,7 +1182,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     if (offer && mode === 'go') offer = { ...offer, why: [`玩家去找${who}`, offer.lines?.[0], offer.from === 'settle' ? '' : offer.why].filter(Boolean).join('；'), way: '' };
     if (offer && mode === 'remote') offer = { ...offer, way: /电话/.test(way) ? '打来电话' : /消息/.test(way) ? '发来消息' : /电话|消息/.test(offer.way ?? '') ? offer.way : '发来消息' };
     const roster = (store.getCast(chat.story_id) ?? []).map(e => e.name);
-    if (offer && !sameName(offer.who, who, roster)) offer = null;
+    if (offer && (offer.avatar ? offer.avatar !== avatar : identities.filter(e=>e.name===offer.who).length!==1 || offer.who!==who)) offer = null;
     const userName = [...msgs].reverse().find(m => m.is_user)?.name ?? '玩家';
     const raw = store.relationsOf(chat.story_id);
     const rel = raw ? normalizeRelations(raw) : null;
@@ -1172,7 +1195,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     const clean = stripper(getConfig().strip);
     let away = null;
     try {
-        const boardPerson = board?.people?.find(p => sameName(p.name, who, roster));
+        const boardPerson = board?.people?.find(p => p.avatar === avatar);
         const left = boardPerson?.since ?? lastLeave(JSON.parse(chat.anchors ?? 'null'), avatar, (msgs.at(-1)?.pos ?? 0) + 1);
         if (left != null && playModeOf(store,chatKey,getConfig()) === 'full') {
             const tlNow = timelineFor(store, records, chatKey, msgs);
@@ -1216,7 +1239,8 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     if (working) {
         arriving.set(key, working);
         try { got = await working; } finally { arriving.delete(key); }
-        store.setMeta(`arrival_brief:${chatKey}`, JSON.stringify({ who, fp: tip?.fp ?? '', mode, got, ...(knock ? { knock: true, pos: tip?.pos ?? 0 } : {}) }));
+        if(sourceVersion(store,chatKey,tip?.pos??-1)!==version)return {ok:false,why:'进场来源已改变，请重新核对'};
+        store.setMeta(`arrival_brief:${chatKey}`, JSON.stringify({ who, avatar, fp: tip?.fp ?? '', mode, way, origin, sourceVersion:version, got, ...(knock ? { knock: true, pos: tip?.pos ?? 0 } : {}) }));
     }
     if (prepare) { log(`arrive ${chatKey} ${who}: prepared ${got ? 'brief' : 'no brief'}`); return { ok: true, prepared: true }; }
     const at = (msgs.at(-1)?.pos ?? -1) + 1;   // 他从下一条起在场（叩门的：就是他那条）
@@ -1253,7 +1277,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
         try { const c = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null'); if (c) store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ ...c, used: true, usedAt: { pos: at - 1, fp: tip?.fp ?? null, who, avatar } })); } catch {}
     }
     // 他接上了：去向用完了（人到场的清掉；发消息、打电话来的人还在外头，去向留着）、这个时段里"先不"的也清掉
-    if (!/电话|消息/.test(arr.how) && !knock) dropAway(chatKey, who, { at, fp: tip?.fp ?? null, who, avatar });
+    if (!/电话|消息/.test(arr.how) && !knock) dropAway(chatKey, {who,avatar}, { at, fp: tip?.fp ?? null, who, avatar });
     try { store.setMeta(`arrival_hold:${chatKey}`, JSON.stringify((JSON.parse(store.getMeta(`arrival_hold:${chatKey}`) ?? '[]') ?? []).filter(h => !sameName(h.who, who, roster)))); } catch {}
     const last = msgs.at(-1);
     // 他这一条删了重来、又进一次场：上一回进场替他记在同一条上的来由、这段时间、换住处作废，只留这一回的
@@ -2140,6 +2164,7 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
     const tail = () => ({ enabled: true, turnEnabled:cfg.auto.turn!==false, buttons:cfg.auto.buttons!==false, waiting: waitingKnock(store, records, chatKey), lapsed: recentLapsed(store, chatKey), remote: remoteNow() });
     if (peek) return { ...off, ...tail(), left:takePendingLeft(store,chatKey) };
     if (autoBusy.has(chatKey)) await autoBusy.get(chatKey).catch(() => {});   // 同步那一下还在理叩门：等它
+    const source=sourceVersion(store,chatKey);
     const found = autoLeave(store,records,chatKey,{present,config:cfg});
     if(found.length) markLeft(store,chatKey,found);
     for(const l of found) leave({chatKey,who:l.who,avatar:l.avatar,anchor:l,how:l.how}).catch(error=>log(`leave plan failed: ${error.message}`));
@@ -2161,9 +2186,10 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
         } else t.why = t.why ? `${t.why}；${k.why}` : k.why;
     }
     // 调度式预跑：排在头一个的，这句的那一格先组装起来（打字时的草稿和发出去的不一样时，草稿那份用不上）
+    if(sourceVersion(store,chatKey)!==source)return {queue:[],complete:false,knock:null,left,why:'来源已改变，停下重新核对',...tail()};
     const first = t.queue.find(q => q.avatar);
     if (first && recentUser) try { prefetchFor(store, records, { assembler, keyMaker }, { chatKey, recentUser, present, only: [first.avatar] }); } catch {}
-    const out = { queue: t.queue, why: t.why, knock: knock ? { who: knock.who, avatar: knock.avatar, way: knock.way, at: knock.at, label: knock.label ?? '' } : null, left, ...tail() };
+    const out = { queue: t.queue.map(q=>executionFor(store,chatKey,q)), complete:t.complete, why: t.why, knock: knock ? executionFor(store,chatKey,{ who: knock.who, avatar: knock.avatar, way: knock.way, at: knock.at, fp: knock.fp, label: knock.label ?? '' },'knock') : null, left, ...tail() };
     log(`turn ${chatKey}: [${out.queue.map(q => `${q.who}·${q.role}${q.back ? '·叫回来' : ''}`).join(' ')}]${out.knock ? ` 叩门 ${out.knock.who}（${out.knock.way}）` : ''}${out.waiting ? ` 候着 ${out.waiting.who}` : ''}${out.lapsed.length ? ` 作废 ${out.lapsed.map(l => l.who).join(' ')}` : ''}${found.length ? ` 新判定走了 ${found.map(l => l.who).join(' ')}` : ''}${!out.queue.length ? ` — ${out.why}` : ''}`);
     return out;
 }
@@ -2176,8 +2202,8 @@ function autoPredict({ chatKey, present = [], recentUser = '' }) {
     if (!out.length && cfg.auto.knock) { const c = knockCandidate(store, records, chatKey, { present }); if (c?.avatar) out.push(c.avatar); }
     return out;
 }
-async function autoAnswer({ chatKey, who, answer }) {
-    const r = answerKnock(store, chatKey, { who, answer });
+async function autoAnswer({ chatKey, who, avatar = null, answer }) {
+    const r = answerKnock(store, chatKey, { who, avatar, answer });
     if (r.ok) await autoRun({ chatKey });
     return r;
 }

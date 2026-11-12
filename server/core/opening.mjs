@@ -11,6 +11,7 @@ import { personWord } from './pronoun.mjs';
 // 记成记录的几类挂在这个窗口的第一条消息上（开场就有）。开局单改了：对不上的作废、新的补上、没变的不动（后来关上它的那条还接得上）。
 // 题材无关：人名、地方、事都来自开局单。
 import { createHash } from 'node:crypto';
+import { resolveIdentity, sameIdentity } from './cast.mjs';
 import { amountsIn } from './money.mjs';
 import { dueOf } from './promises.mjs';
 import { hasCard } from './arrival.mjs';
@@ -118,7 +119,7 @@ export function ensureOpening(store, records, chatKey) {
     const cast = store.getCast?.(chat.story_id) ?? [];
     const names = uniq([...cast.map(e => e.name), userName]);
     const same = (a, b) => sameName(a, b, names);
-    const want = openingRecords(setup?.data, { userName, names, same, avatarOf: n => cast.find(e => hasCard(e) && same(e.name, n))?.avatar ?? null });
+    const want = openingRecords(setup?.data, { userName, names, same, avatarOf: n => resolveIdentity(cast.filter(hasCard), n).person?.avatar ?? null });
     const wanted = new Set(want.map(seedKey));
     const kept = new Set();
     let added = 0, voided = 0;
@@ -140,10 +141,10 @@ export function seedPlans(data, { roster = [], first = null, same = (a, b) => a 
     const out = {};
     for (const e of roster) {
         if (!e?.name || e.name === CAMERA_NAME || (userName && same(e.name, userName))) continue;
-        const mine = rowsOf(data).filter(x => same(x.谁, e.name) && (x.类 === '在哪' || x.类 === '手头的事'));
+        const mine = rowsOf(data).filter(x => resolveIdentity(roster.filter(p => p.role !== '不用'), x.谁).person?.avatar === e.avatar && (x.类 === '在哪' || x.类 === '手头的事'));
         if (!mine.length) continue;
         const where = mine.find(x => x.类 === '在哪')?.是 ?? '';
-        out[e.avatar ?? `name:${e.name}`] = { who: e.name, avatar: e.avatar ?? null, at: first.pos + 1, fp: first.fp, seed: true,
+        out[e.avatar ?? `name:${e.name}`] = { who: e.name, avatar: e.avatar ?? null, at: first.pos, fp: first.fp, seed: true, absent: /不在(?:场|此处|这里)|已经离开|尚未到场/.test(where),
             where: placeOf(where) ?? (where.slice(0, 30) || null), doing: where || null,
             errands: mine.filter(x => x.类 === '手头的事').map(x => ({ text: x.是 })), span: '说不准', back: '没说', backLine: '' };
     }
@@ -168,7 +169,7 @@ export function awayPlansOf(store, chatKey, { messages = null } = {}) {
         const names = uniq([...roster.map(e => e.name), userName]);
         const same = (a, b) => sameName(a, b, names);
         for (const [k, p] of Object.entries(seedPlans(data, { roster, first: msgs[0], same, userName }))) {
-            const his = x => !!x && (same(x.who ?? x.name ?? '', p.who) || (!!p.avatar && x.avatar === p.avatar));
+            const his = x => sameIdentity(x, p, roster);
             // 进过场才不算开局去向；零长度的封段（拉进来判不在场当场封上，T070）不算进过场（用户 10/15）
             if (Object.values(plans).some(his) || (Array.isArray(arrivals) ? arrivals : []).some(his) || (p.avatar && (anchors?.[p.avatar]?.segments ?? []).some(s => !emptySegment(s)))) continue;
             plans[k] = p;
