@@ -407,7 +407,8 @@ export function evaluationState(store, chatKey) {
 }
 export function saveEvaluation(store, chatKey, patch) {
     const value = { ...evaluationState(store, chatKey), ...patch };
-    store.setMeta?.(`plan_eval:${chatKey}`, JSON.stringify(value));
+    const key = `plan_eval:${chatKey}`, text = JSON.stringify(value);
+    if (store.getMeta?.(key) !== text) store.setMeta?.(key, text);
     return value;
 }
 export function signalEvaluation(store, chatKey, signal) {

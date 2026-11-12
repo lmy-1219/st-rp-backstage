@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { liveEpisodes } from './episodes.mjs';
 import { liveAnchors } from './landing.mjs';
-import { identifyNode, menuVerification } from './held.mjs';
+import { identifyNode, createMenuVerifier } from './held.mjs';
 
 // 这几种重新规划（玩家转向、弄断、局面变了）交回以后，旧节点里还在口袋里的事一并撤下（menuOf），要用的规划者重写进新的事件（用户 10/4）。
 export const RETIRES_POCKET = new Set(['turn', 'broken', 'shift']);
@@ -897,7 +897,11 @@ export function openStore(file) {
         if (!match || !value) return value;
         try { const v = JSON.parse(value); return v && !basisLive(match[2], v.pos ?? v.at, v.basisDay) ? null : value; } catch { return value; }
     }
-    function setMeta(key, value) { q('insert or replace into meta(key, value) values (?, ?)').run(key, value == null ? null : String(value)); }
+    function setMeta(key, value) {
+        // 比较原始落库值（含 null），不能用会过滤失效来源的 getMeta 判断是否相同。
+        q('insert into meta(key, value) values (?, ?) on conflict(key) do update set value = excluded.value where meta.value is not excluded.value')
+            .run(key, value == null ? null : String(value));
+    }
 
     // ---------- 规划与菜单（M6）：跟着消息走 ----------
     // 要规划、进口袋、用掉、沉底，每一步都记在"当时这个窗口的最后一条消息"上。
@@ -1405,6 +1409,14 @@ export function openStore(file) {
             const parent = logs.find(p => p.id === proof.conditionStep && p.item_id === s.item_id && p.id < s.id);
             return !!parent && baseLive(parent) && conditionLive(parent, proofs.get(parent.id));
         });
+        const active = plans.filter(p => !replaced.has(p.id)).at(-1);
+        const current = active?.id;
+        // 转向、弄断、局面变了以后的新规划：旧节点里还在口袋里的也撤下（新规划里要用的已经重写进去了）
+        const retire = RETIRES_POCKET.has(active?.reason);
+        // 局势后续和明确留下的旧件，换了规划仍按原状态保留。
+        const follow = m => m.motif === '后续' || m.motif === '后续·当下';
+        const included = m => m.plan_id === current || ((follow(m) || m.kept_pos != null) && (m.status === 'waiting' || m.status === 'pocket')) || (m.status !== 'waiting' && !(retire && m.status === 'pocket'));
+        const verify = createMenuVerifier({ getMeta, setMeta, currentMessages, requireChat, setupOf, recordEvidenceLive, readyPlans, lastReadyPlan }, chatKey);
         for (const m of items) {
             readCells(m);
             const contract = fromJson(getMeta(`menu_contract:${m.id}`));
@@ -1425,18 +1437,13 @@ export function openStore(file) {
             const offeredAt = new Set();
             for (const s of steps) if (s.item_id === m.id) { if (s.status === 'waiting') offeredAt.clear(); else if (s.status === 'offered') offeredAt.add(s.pos); }
             if (offeredAt.size) m.offered_n = offeredAt.size;
-            m.verification = menuVerification({ getMeta, setMeta, currentMessages, requireChat, setupOf, recordEvidenceLive, readyPlans, lastReadyPlan }, chatKey, m);
+            // 没有核验日志就不可能改变状态；其余旧件仍先核验，完成/演过可能使它重新进入返回集。
+            if (!all && !included(m) && !getMeta(`menu_checks:${chatKey}:${m.id}`)) continue;
+            m.verification = verify(m);
             if (['办完了', '前提没了'].includes(m.verification.state)) { m.beforeVerification = m.status; m.status = 'void'; }
             else if (m.verification.state === '演过了' && ['waiting', 'pocket'].includes(m.status)) m.status = 'shown';
         }
-        const active = plans.filter(p => !replaced.has(p.id)).at(-1);
-        const current = active?.id;
-        // 转向、弄断、局面变了以后的新规划：旧节点里还在口袋里的也撤下（新规划里要用的已经重写进去了）
-        const retire = RETIRES_POCKET.has(active?.reason);
-        // 局势排的后续（发生过的事引来的，不是哪一份规划的）：换了规划也接着排、接着在口袋里（D-171：以前一重新规划就跟着旧节点一起撤了）
-        const follow = m => m.motif === '后续' || m.motif === '后续·当下';
-        // 规划者答了留的旧件（章程 H3）：和局势排的后续一样，换了规划也接着排、接着在口袋里
-        return all ? items : items.filter(m => m.plan_id === current || ((follow(m) || m.kept_pos != null) && (m.status === 'waiting' || m.status === 'pocket')) || (m.status !== 'waiting' && !(retire && m.status === 'pocket')));
+        return all ? items : items.filter(included);
     }
     // 这几份规划里排过的事，不管后来到了哪一步、有没有被新规划接手（menuOf 只留眼下还算数的）——简报数最近两份各类别排了几件用（章程 J1）。
     // 后来补进来的几件照样看它挂的那条消息还在不在

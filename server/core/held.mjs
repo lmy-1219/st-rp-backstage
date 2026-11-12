@@ -110,7 +110,8 @@ export function effectivePlanNode(store, chatKey, plan, ctx = {}) {
     try { node = JSON.parse(plan?.node ?? 'null'); } catch { return null; }
     try { revisions = JSON.parse(store.getMeta?.(`mind_stale:${plan?.id}`) ?? '[]'); } catch {}
     if (!node) return null;
-    const context = { ...nodeContext(store, chatKey), ...ctx }, history = [], inherited = [];
+    const context = ctx.messages && ctx.factLive && ctx.recordLive ? ctx : { ...nodeContext(store, chatKey), ...ctx };
+    const history = [], inherited = [];
     for (const old of store.readyPlans?.(chatKey) ?? []) {
         if (old.id >= plan.id) continue;
         let base, rows;
@@ -135,14 +136,24 @@ export function nodeBasis(node, store, chatKey, planId) {
     if (material !== old) store.setMeta(key, JSON.stringify({ ...state, material }));
     return JSON.stringify(material);
 }
-export function menuVerification(store, chatKey, item, ctx = nodeContext(store, chatKey)) {
+// 只在这一次菜单读取中共用；下一次读取仍重新核对来源、证据和修订。
+export function createMenuVerifier(store, chatKey, ctx) {
+    const context = ctx ?? nodeContext(store, chatKey);
+    const plan = store.lastReadyPlan(chatKey);
+    // nodeBasis 会维护材料版本；必须在空日志、终结证据或旧件过滤之前执行，整次读取只做一次。
+    const basis = nodeBasis(effectivePlanNode(store, chatKey, plan, context), store, chatKey, plan?.id);
+    return item => verifyMenuItem(store, chatKey, item, context, basis);
+}
+export function menuVerification(store, chatKey, item, ctx) {
+    return createMenuVerifier(store, chatKey, ctx)(item);
+}
+function verifyMenuItem(store, chatKey, item, context, basis) {
     let rows;
     try { rows = JSON.parse(store.getMeta(`menu_checks:${chatKey}:${item.id}`) ?? '[]'); } catch { return { state: '未核' }; }
-    if (!Array.isArray(rows)) return { state: '未核' };
-    const valid = rows.filter(r => r.source === JSON.stringify(item.sourceAt ?? null) && verificationProofLive(r, ctx));
+    if (!Array.isArray(rows) || !rows.length) return { state: '未核' };
+    const valid = rows.filter(r => r.source === JSON.stringify(item.sourceAt ?? null) && verificationProofLive(r, context));
+    if (!valid.length) return { state: '未核' };
     const completed = valid.filter(r => ['办完了', '前提没了', '演过了'].includes(r.state));
-    const plan = store.lastReadyPlan(chatKey);
-    const basis = nodeBasis(effectivePlanNode(store, chatKey, plan), store, chatKey, plan?.id);
     const candidates = completed.length ? completed : valid.filter(r => r.nodeBasis === basis);
     const last = candidates.length ? Math.max(...candidates.map(r => r.through ?? -1)) : -1;
     const latest = candidates.filter(r => (r.through ?? -1) === last);
