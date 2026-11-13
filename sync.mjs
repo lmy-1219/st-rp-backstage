@@ -554,6 +554,38 @@ export async function applyLeaveEvent(event,{close,mute,reopen,unmute,ack}) {
     if(event.id) await ack({id:event.id,version:event.version,action:event.action});
 }
 
+// 只在明确执行 /isolate-leave 的源头记人工操作，不从普通区间差量猜来源。
+const manualLeaveCallbacks = new WeakMap();
+export function observeManualLeaveCommand(c, { enabled = () => true, onLeave, speaker = speakerOf } = {}) {
+    const command = c?.SlashCommandParser?.commands?.['isolate-leave'];
+    if (typeof command?.callback !== 'function') return false;
+    const installed = manualLeaveCallbacks.get(command.callback);
+    if (installed) { installed.context = c; installed.options = { enabled, onLeave, speaker }; return true; }
+    const original = command.callback, record = { context: c, options: { enabled, onLeave, speaker } };
+    command.callback = async function (...args) {
+        const c = record.context, options = record.options, chat = c.chat, meta = c.chatMetadata;
+        const active = options.enabled();
+        const before = active ? structuredClone(meta?.contextIsolation?.anchors ?? {}) : {};
+        const result = await original.apply(this, args);
+        if (!active || !options.enabled() || c.chat !== chat || c.chatMetadata !== meta) return result;
+        for (const [avatar, anchor] of Object.entries(meta?.contextIsolation?.anchors ?? {})) {
+            const person = c.characters?.find(p => p.avatar === avatar);
+            if (!person) continue;
+            const closed = anchor.segments?.filter(s => Number.isInteger(s.to) && s.to > s.from
+                && !before[avatar]?.segments?.some(b => b.from === s.from && b.to === s.to));
+            if (closed?.length !== 1) continue;
+            const at = closed[0].to - 1, message = chat?.[at];
+            if (!message || message.is_system) continue;
+            anchor.rpeManualRevision=crypto.randomUUID();
+            await c.saveMetadata?.();
+            await options.onLeave?.({ who: person.name, avatar, anchor: { at, fp: fingerprintMessage(message, options.speaker(message)) } });
+        }
+        return result;
+    };
+    manualLeaveCallbacks.set(command.callback, record);
+    return true;
+}
+
 
 // 在场账：读现状、分类、写入并核验。
 const object=v=>v&&typeof v==='object'&&!Array.isArray(v);
@@ -661,7 +693,8 @@ export function boardSegmentEdit(segments, { at, until = null, present }) {
     }
     if(present)after.push({from:at,fromDate:'',to:end,toDate:''});
     after.sort((a,b)=>a.from-b.from);
-    return {before,after,at,end};
+    // until 是纠正意图的后继界限；end 只是本轮投影结果，不能作为下轮输入。
+    return {before,after,at,until,end};
 }
 export function undoBoardSegmentEdit(segments, edit) {
     const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);

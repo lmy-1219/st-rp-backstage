@@ -834,6 +834,7 @@ function dropAway(chatKey, person, by = null) {
 }
 const leaving = new Map();
 async function leave({ chatKey, who, avatar = null, anchor = null, how = null, manual = false }) {
+    manual = manual === true;
     const chat = store.requireChat(chatKey);
     const roster = store.getCast(chat.story_id) ?? [], named = roster.filter(p=>p.name===who);
     avatar ??= named.length===1 ? named[0].avatar : null;

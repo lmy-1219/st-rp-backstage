@@ -52,7 +52,7 @@ import { driftItems, longGive, activeLong } from './drift.mjs';
 import { episodeLines, asksPast, EPISODE_CHARS } from './episodes.mjs';
 import { lifeSheet, lifeLines, homeLines, ownHomeLines, seedOf } from './life.mjs';
 import { hasCard, arrivedLines, isRemote, remoteLine, playerThereLines, validAwayPlan, remoteAt } from './arrival.mjs';
-import { boardFor, boardLoader } from './board.mjs';
+import { boardFor, boardLoader, departureSource } from './board.mjs';
 import { pendingFor } from './pending.mjs';
 import { doorFor, doorLines } from './door.mjs';
 import { stepWaits, dropTry } from './waiting.mjs';
@@ -1635,7 +1635,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
     try { board = boardFor(store, records, chatKey, { present, recentUser: '', timeline: timelineFor(store, records, chatKey, messages) }); } catch {}
     const here = present.length ? present : [...new Set([...(board?.people?.filter(p => p.status === 'present' || p.status === 'remote').map(p => p.name) ?? []), userName].filter(Boolean))];
 
-    // ⑦ 去向只有一个门（D-174 第 4 步乙）：隔离扩展把他的区间关上了（静音、移出群、/isolate-leave 都算）、他又没去向，就替他记一份——
+    // ⑦ 只消费有离场来源的闭段。连续拆段、自动准备重算和未知来源不补成新离场。
     // 跟扩展点"离场"是同一条路（main.leave 自己认重，先到的那次算）。他回来了去向怎么清：走进场那套的 main.arrive 清；
     // 这里不按区间重开清——扩展的"进场"是先开区间、同步、再调进场，这儿一清进场就拿不到结算的结果了。
     // 头一回见到这局（没记过区间）只记下，不动：旧闭段不是刚走的。闭在最近几条之外的也不算刚走。
@@ -1655,18 +1655,20 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             // 零长度的封段（拉进来判不在场当场封上，T070；拉进来又移出、一句没说）不算刚走（用户 10/15），不替他补去向
             const ended = now.filter(s => s.to != null && s.to >= lastPos - 3 && !emptySegment(s) && !old.some(o => o.from === s.from && o.to === s.to)).sort((a, b) => a.to - b.to).at(-1);
             if (!ended) continue;
+            if(now.some(s=>s!==ended&&s.from<=ended.to&&(s.to==null||s.to>ended.to)))continue;
+            const source=departureSource(store,chatKey,card.avatar,ended.to);
+            if(!source)continue;
             // 他牵头、当面办过了的那几件收起来
-            if (!present.some(n => sameName(n, card.name, rosterNames))) try { closeLed({ records, chatKey, storyId, who: card.name, fp: last.fp, same: (a, b) => sameName(a, b, rosterNames) }); } catch {}
+            if (!present.some(n => sameName(n, card.name, rosterNames))) try { closeLed({ records, chatKey, storyId, who: card.name, fp: source.fp, same: (a, b) => sameName(a, b, rosterNames) }); } catch {}
             // 他这回的来意跟着他离场过去（场记章程 B2）
-            if (!present.some(n => sameName(n, card.name, rosterNames))) try { closeIntents({ records, chatKey, storyId, who: card.name, fp: last.fp, same: (a, b) => sameName(a, b, rosterNames) }); } catch {}
+            if (!present.some(n => sameName(n, card.name, rosterNames))) try { closeIntents({ records, chatKey, storyId, who: card.name, fp: source.fp, same: (a, b) => sameName(a, b, rosterNames) }); } catch {}
             // 区间是在最后一条上关的，场面表在这一条上还把他算在场：只按扩展带来的名单挡（名单里有他就是还在）；
             // 挡下的这回先不记成"见过"，同步那次（没名单）再看一遍
             if (present.some(n => sameName(n, card.name, rosterNames))) { next[card.avatar] = old; continue; }
             const hasPlan = Object.values(plans).some(p => (p?.who === card.name || (card.avatar && p?.avatar === card.avatar)) && !!validAwayPlan(p, messages, source => store.basisLive?.(chatKey, source.pos, source.day) !== false));
-            // 区间的 to 不含在段内：最后在场的 to - 1 才是这次离场来源。
-            // 后面可能已经接了几句；不能把补记挂在那些新句上，否则删离场原文撤不掉。
-            const source = messages.find(m => !m.hidden && m.pos === ended.to - 1);
-            if (!hasPlan && source && leave) leave({ chatKey, who: card.name, avatar: card.avatar, anchor: { at: source.pos, fp: source.fp } })?.catch?.(() => {});
+            // 自动离场来源是 to - 1；人工纠正来源是裁决所在楼，均由 departureSource 核实。
+            // 不能把补记挂在后来的新句上，否则删离场原文撤不掉。
+            if (!hasPlan && leave) leave({ chatKey, who: card.name, avatar: card.avatar, anchor: { at: source.at, fp: source.fp }, how:source.how, manual:source.manual })?.catch?.(() => {});
         }
         const nowSeen = JSON.stringify(next);
         if (nowSeen !== segmentsRaw) store.setMeta?.(`segments_seen:${chatKey}`, nowSeen);
@@ -1793,7 +1795,8 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             const segs = (card.avatar ? anchors[card.avatar]?.segments ?? [] : []).filter(s => !emptySegment(s));
             if (!segs.length || segs.some(s => s.to == null)) continue;
             const ended = Math.max(...segs.map(s => Number(s.to)).filter(Number.isFinite));
-            if (Number.isFinite(ended)) try { closeIntents({ records, chatKey, storyId, who: card.name, fp: last.fp, same, before: ended }); } catch {}
+            const source=Number.isFinite(ended)?departureSource(store,chatKey,card.avatar,ended):null;
+            if (source) try { closeIntents({ records, chatKey, storyId, who: card.name, fp: source.fp, same, before: ended }); } catch {}
         }
     }
     // ③戊 收期（用户 10/12，N-362：口袋没有结束点，琐事没完没了；剧情要有聚焦）：先照最新一份规划办它对上一份口子的答（收／续），

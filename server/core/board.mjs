@@ -264,7 +264,7 @@ export function boardAt(input = {}) {
         // 人工离场的来源随原楼撤销；后来正常进场/人工在场已经生效时不再拦截。
         const marked = personMark && markValue(personMark);
         const markedStatus = typeof marked === 'object' ? marked?.status : marked;
-        const manualAt = plan?.manualAt ?? (plan && !plan.seed && (plan.manual || plan.how == null) ? { pos: Number(plan.at) - 1, fp: plan.fp } : null);
+        const manualAt = plan?.manual === true && !plan.seed ? (plan.manualAt ?? { pos: Number(plan.at) - 1, fp: plan.fp }) : null;
         const manualSource = [
             ...(['不在', '外头'].includes(markedStatus) ? [{ pos: personMark.pos, fp: messages.find(m => m.pos === personMark.pos)?.fp }] : []),
             ...(manualAt && messages.some(m => !m.hidden && m.pos === manualAt.pos && m.fp === manualAt.fp) ? [manualAt] : []),
@@ -487,4 +487,29 @@ export function factInput(store, chatKey) {
     const chat = store.requireChat(chatKey);
     let identityChoices = {}; try { identityChoices = JSON.parse(store.getMeta?.(`card_choices:${chatKey}`) ?? '{}'); } catch {}
     return { messages: store.currentMessages(chatKey), roster: store.getCast?.(chat.story_id) ?? [], identityChoices };
+}
+
+// 闭段是投影，只有仍有效的离场事件或明确人工裁决才是离场来源。
+export function departureSource(store, chatKey, avatar, end) {
+    const input=factInput(store,chatKey),person=input.roster.find(p=>p.avatar===avatar);
+    if(!person)return null;
+    const live=input.messages.filter(m=>!m.hidden);
+    let events=[];try{events=JSON.parse(store.getMeta?.(`auto_leave_events:${chatKey}`)??'[]')??[];}catch{}
+    const event=events.findLast(e=>e.avatar===avatar&&e.action!=='undo'&&e.at===end-1
+        &&live.some(m=>m.pos===e.at&&m.fp===e.fp)&&factCurrent(e,input)
+        &&(e.throughFp==null||live.some(m=>m.pos===e.through&&m.fp===e.throughFp))
+        &&(!e.basis||e.basis.every(b=>live.some(m=>m.pos===b.pos&&m.fp===b.fp))));
+    if(event)return {at:event.at,fp:event.fp,how:event.how??'自动离场',manual:false};
+    const marked=live.find(m=>m.pos===end);
+    if(marked){
+        let mark;try{mark=typeof marked.boardMark==='string'?JSON.parse(marked.boardMark):marked.boardMark;}catch{}
+        const value=mark&&typeof mark==='object'?personMarkValue(mark,person,input.roster,input.identityChoices):null;
+        if(['不在','外头'].includes(typeof value==='object'?value?.status:value))
+            return {at:marked.pos,fp:marked.fp,how:'人工纠正',manual:true};
+    }
+    let plans={};try{plans=JSON.parse(store.getMeta?.(`away_plan:${chatKey}`)??'{}')??{};}catch{}
+    const plan=Object.values(plans).find(p=>p?.avatar===avatar&&p.manual===true&&!p.seed);
+    const source=plan?.manualAt??(plan?{pos:Number(plan.at)-1,fp:plan.fp}:null);
+    return source&&source.pos===end-1&&live.some(m=>m.pos===source.pos&&m.fp===source.fp)
+        ?{at:source.pos,fp:source.fp,how:'人工离场',manual:true}:null;
 }

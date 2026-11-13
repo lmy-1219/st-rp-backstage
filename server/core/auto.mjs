@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 // 存的都挂在消息上（条号＋指纹），删消息＝没发生过（D-185）。题材无关（D-37）。
 import { turnDetail } from './director.mjs';
 import { knockState, knockTiming, wayOf as knockWayOf } from './knock.mjs';
-import { leftAt } from './leaving.mjs';
+import { leftAt, completedDeparture, qualifiedAt } from './leaving.mjs';
 import { callsOf } from './camera-turn.mjs';
 import { normalizeRelations } from './relations.mjs';
 import { boardFor, sourceVersion, factBasis, factCurrent, factInput } from './board.mjs';
@@ -42,7 +42,7 @@ const rowsOf = tl => pos => (tl.firmRows ?? tl.rows).filter(r => r.pos <= pos).a
 
 function currentSource(store, chatKey, item, log = true) {
     const ok = !item.sourceVersion || item.sourceVersion === sourceVersion(store, chatKey, item.through ?? item.checkedAt ?? item.at);
-    if (!ok && log) store.logEvent?.(chatKey, 'auto_stale_result', { avatar: item.avatar, at: item.at, reason: '来源版本已改变，保留当前状态' });
+    if (!ok && log) store.logEvent?.(chatKey, 'auto_stale_result', { avatar: item.avatar, at: item.at, reason: '判定依据已更新，保留当前状态' });
     return ok;
 }
 
@@ -52,13 +52,24 @@ function executionBasis(store, chatKey, item) {
     let members=[],anchors={};try{members=JSON.parse(chat.members??'[]');anchors=JSON.parse(chat.anchors??'{}');}catch{}
     const person=board.people.find(p=>p.avatar===item.avatar);
     const scope=store.getCast?.(chat.story_id)??[];
+    const manualRevision=createHash('sha256').update(JSON.stringify([
+        anchors?.[item.avatar]?.rpeManualRevision??null,
+        store.currentMessages(chatKey).filter(m=>m.pos<=(item.through??Infinity)&&m.boardMark).map(m=>[m.pos,m.boardMark]),
+        store.getMeta?.(`card_choices:${chatKey}`)??null,scope.map(p=>[p.avatar,p.name,p.role]),
+    ])).digest('hex');
     return { person:person ? [person.avatar,person.status,person.since,person.way,person.manualAway??null] : null,
         plan:person?.plan??null, arrivals:readRaw(store,`arrivals:${chatKey}`,[]).filter(p=>sameIdentity(p,item,scope)),
-        member:members.some(p=>(typeof p==='string'?p:p.avatar)===item.avatar), segments:anchors?.[item.avatar]?.segments??[] };
+        member:members.some(p=>(typeof p==='string'?p:p.avatar)===item.avatar), segments:anchors?.[item.avatar]?.segments??[],
+        manualRevision };
 }
 function executionCurrent(store, chatKey, e) {
     const current=executionBasis(store,chatKey,e),before=e.eligibility;
     if(!before||JSON.stringify(before)===JSON.stringify(current))return true;
+    if(executionReprojected(store,chatKey,e,current)&&['present','remote'].includes(current.person?.[1])
+        &&current.person[1]===before.person?.[1]){
+        const person=[...current.person];person[2]=before.person[2];
+        if(JSON.stringify({...current,segments:before.segments,person})===JSON.stringify(before))return true;
+    }
     if(!['enter','back','knock'].includes(e.action)||!current.member)return false;
     // 凭据明确授权的准备动作只可新增这一段；其他进离场和人工裁决仍使它失效。
     const added=current.segments.at(-1);
@@ -68,8 +79,21 @@ function executionCurrent(store, chatKey, e) {
     if(!samePerson&&!(current.person?.[1]==='present'&&current.person[2]===e.openAt&&!current.person[4]))return false;
     return JSON.stringify({...current,segments:before.segments,member:before.member,person:before.person})===JSON.stringify(before);
 }
+function executionReprojected(store,chatKey,e,current=executionBasis(store,chatKey,e)) {
+    if(!e.eligibility)return false;
+    // 来源正文、裁决和人工入口有自己的留痕；没有用户正证据的区间变化默认是系统重新核对。
+    return (!Object.hasOwn(e.eligibility,'manualRevision')||current.manualRevision===e.eligibility.manualRevision)
+        &&JSON.stringify(current.person?.[4]??null)===JSON.stringify(e.eligibility.person?.[4]??null);
+}
 function executionSource(messages, through) {
-    return createHash('sha256').update(JSON.stringify([through, messages.find(m => m.pos === through)?.fp ?? null])).digest('hex');
+    return 'v2:'+createHash('sha256').update(JSON.stringify([through,messages.filter(m=>m.pos<=through)
+        .map(m=>[m.pos,m.fp,!!m.hidden])])).digest('hex');
+}
+function executionSourceMatches(e,messages) {
+    if(!e.source)return messages.some(m=>m.pos===e.through);
+    if(e.source.startsWith('v2:'))return e.source===executionSource(messages,e.through);
+    // 旧指纹只覆盖末楼；无法证明更早正文是否改变时保留原来的暂停与显式核对。
+    return e.source===createHash('sha256').update(JSON.stringify([e.through,messages.find(m=>m.pos===e.through)?.fp??null])).digest('hex');
 }
 export function executionFor(store, chatKey, item, kind = 'speak', retryOf = null) {
     if (item.who !== '旁白' && !hasCard(item)) throw Error(`${item.who}的卡身份未对上，请认卡确认后重新排队`);
@@ -81,14 +105,22 @@ export function executionFor(store, chatKey, item, kind = 'speak', retryOf = nul
     const floor=Math.max(0,...eligibility.segments.filter(s=>s.to!=null&&s.to>s.from).map(s=>s.to));
     const openAt=Number.isInteger(item.enter?.at)&&item.enter.at>=floor?item.enter.at:through+1;
     const all = read(store, `auto_execution:${chatKey}`, []);
+    for(const old of all)if(old.avatar===(item.avatar??null)&&old.through===through
+        &&old.source&&!executionSourceMatches(old,messages))
+        old.state='superseded';
+    const withdrawn=all.find(e=>e.avatar===(item.avatar??null)&&e.through===through&&e.state==='delivered'
+        &&!messages.some(m=>m.pos>e.through&&!m.hidden&&!m.is_user&&(e.avatar?m.speaker===e.avatar:m.name==='旁白')));
+    if(!retryOf&&withdrawn){withdrawn.state='superseded';retryOf=withdrawn.id;}
+    const held=all.find(e=>e.avatar===(item.avatar??null)&&e.through===through&&executionSourceMatches(e,messages)
+        &&(['running','unconfirmed','cancelled','error','waiting','delivered'].includes(e.state)||e.retryOf&&e.state==='queued'));
+    // 改稿又换回原稿时来源哈希会回到旧值，不能复用已经作废的同名执行 ID。
+    if(!retryOf&&!held)retryOf=all.find(e=>e.avatar===(item.avatar??null)&&e.through===through&&e.state==='superseded'
+        &&e.source&&executionSourceMatches(e,messages))?.id??null;
     const stamp=createHash('sha256').update(JSON.stringify([version,action,openAt,eligibility,...(retryOf?[retryOf,all.length]:[])])).digest('hex');
     const id = `${kind}:${encodeURIComponent(action === 'camera' ? 'narrator' : item.avatar)}:${through}:${stamp}`;
     // 发出过的同身份、同来源执行先核实；自身准备或纠正不能绕过未确认回执。
-    let e = !retryOf && (all.find(e => e.avatar === (item.avatar ?? null) && e.through === through
-        // 旧回执没有来源指纹，无法证明是另一件事时继续暂停，留给显式重试核实。
-        && (!e.source || e.source === source)
-        && (['running','unconfirmed','cancelled','error','waiting','delivered'].includes(e.state)||e.retryOf&&e.state==='queued'))
-        ?? all.find(e => e.id === id));
+    // 旧回执信息不足时仍暂停；已发出/未确认的同来源执行优先于作废历史。
+    let e = !retryOf && (held??all.find(e => e.id === id&&e.state!=='superseded'));
     if (!e) {
         e = { id, kind, source, action, eligibility, openAt, who: item.who, avatar: item.avatar ?? null, through, sourceVersion: version, state: 'queued' };
         if(retryOf)e.retryOf=retryOf;
@@ -112,7 +144,7 @@ export function executionResult(store, chatKey, receipt, { records = null, confi
         const facts={...input,messages};
         return {ok:true,preparationLive:factCurrent(preparation,facts)&&cameBasisLive(preparation,live(messages)),
             ownReplies:(receipt.ownReplies??[]).filter(m=>messages.some(s=>!s.hidden&&s.pos===m.pos&&s.fp===m.fp)
-                &&inPersonEvidence(m)).map(m=>({pos:m.pos,fp:m.fp})),
+                &&inPersonEvidence(m, m.text, { who: input.roster.find(p=>p.avatar===preparation.avatar)?.name, roster: input.roster })).map(m=>({pos:m.pos,fp:m.fp})),
             laterCame:activeCame(store,chatKey,live(messages)).filter(c=>c.avatar===preparation.avatar
                 &&factCurrent(c,facts)&&cameBasisLive(c,live(messages))).map(c=>({pos:c.at,fp:c.fp}))};
     }
@@ -126,7 +158,7 @@ export function executionResult(store, chatKey, receipt, { records = null, confi
     if(receipt.result==='start'&&e.state==='superseded')return {ok:false,why:'旧凭据已被替换，请核对当前执行'};
     const messages = live(store.currentMessages(chatKey));
     const landed = messages.find(m => m.pos > e.through && !m.is_user && String(m.text??'').trim() && (e.avatar ? m.speaker === e.avatar : m.name === '旁白'));
-    const sameSource=e.source?e.source===executionSource(messages,e.through):messages.some(m=>m.pos===e.through);
+    const sameSource=executionSourceMatches(e,store.currentMessages(chatKey));
     if(!sameSource)return {ok:false,why:'来源版本已失效'};
     if(e.state==='delivered'&&!landed){e.state='unconfirmed';e.reason='原回复已撤回，请核对后重试';write(store,`auto_execution:${chatKey}`,all.slice(-60));}
     if (landed) { e.state = 'delivered'; e.reply = { pos: landed.pos, fp: landed.fp }; }
@@ -160,10 +192,14 @@ export function executionResult(store, chatKey, receipt, { records = null, confi
         e.state = 'queued'; delete e.reason;
     }
     else if (receipt.result === 'start') {
+        if (e.state !== 'queued') return { ok: false, execution: e, why: '这次执行已发出，先核对消息或由用户重试' };
         const current=executionBasis(store,chatKey,e);
         if(!currentSource(store,chatKey,e)||!executionCurrent(store,chatKey,e)
-            || e.action==='speak'&&(!current.member||!['present','remote'].includes(current.person?.[1])))return {ok:false,why:'在场或成员资格已改变，请重新排队'};
-        if (e.state !== 'queued') return { ok: false, execution: e, why: '这次执行已发出，先核对消息或由用户重试' };
+            || e.action==='speak'&&(!current.member||!['present','remote'].includes(current.person?.[1]))){
+            if(current.member===e.eligibility?.member&&executionReprojected(store,chatKey,e,current))
+                return {ok:false,replan:true,why:'系统在重新核对在场，稍后接上'};
+            return {ok:false,why:'在场或成员资格已改变，请重新排队'};
+        }
         e.state = 'running';
     } else if (['muted','cancelled','error','unconfirmed','waiting'].includes(receipt.result)) {
         e.state = receipt.result; e.reason = String(receipt.reason ?? '').slice(0,300);
@@ -530,23 +566,62 @@ const cameBasisLive = (c, messages) => messages.some(m => m.pos === c.at && m.fp
     && (c.through == null || messages.some(m => m.pos === c.through && m.fp === c.throughFp))
     && (!c.basis || c.basis.every(b => messages.some(m => m.pos === b.pos && m.fp === b.fp)));
 const CAME_QUOTES = /“[^“”]*”|「[^「」]*」|『[^『』]*』|"[^"\n]*"/g;
-const CAME_UNCERTAIN = /想起|回忆|记得|曾经|转述|据说|听说|如果|要是|假如|可能|似乎|仿佛|打算|准备|将要|明天|还没|没有|不会|不在|并未/;
+const CAME_UNCERTAIN = /想起|回忆|记得|曾经|转述|据说|听说|如果|要是|假如|明天/;
 const CAME_ENTER = /^(?:又|已|已经|正|正在|终于|便|就|随后|随即|缓缓|慢慢|径直|突然|亲自|本人|从[^，。；\n]{1,12})*(?:推门(?:走)?进来|推开门(?:走)?进来|走进(?:来|屋|门|房间)|走了进来|进了(?:门|屋)|进来|进屋|进门|回到(?:屋内|面前|这里)|来到(?:面前|身边|这里)|出现在(?:面前|身边|门口))/;
 const CAME_MOTION = /^(?:(?:又|已|已经|正|正在|终于|随后|随即|便|就|缓缓|慢慢|径直|突然|亲自|本人)|(?:推开|拉开|打开)[^，。；\n]{0,8}门|从[^，。；\n]{1,12})*(?:走|跑|迈|跨|踏|钻|挤)?(?:了)?(?:进来|进(?:了)?(?:房间|屋内|屋里|屋|门内|门)|回到(?:屋内|面前|这里))/;
-const CAME_ACT = /^(?:又|已|已经|正|正在|随后|随即|缓缓|慢慢|便|就)*(?:站在(?:我|你|玩家|桌|门|屋)|坐在|坐下|落座|伸手|抬手|拿起|按住|走到|转身|开口(?:说|问)|说道|问道)/;
+const CAME_ACT = /^(?:又|已|已经|正|正在|随后|随即|缓缓|慢慢|便|就|仍|依旧)*(?:站在(?:我|你|玩家|桌|门|屋)|坐在|坐下|落座|伸手|抬手|拿起|按住|扶着|扶住|撑着|靠在|走到|转身|开口(?:说|问)|说道|问道)/;
+// 在已有到场／动作识别的谓语起点核同子句前缀，不要求整句套句首动作格式。
+const CAME_PREDICATE = /站|在|走进|来到|坐|推门|推开门|走了进来|进了|进来|进屋|进门|回到|出现|落座|伸手|抬手|拿起|按住|扶着|扶住|撑着|撑住|靠在|走到|转身|开口|说道|问道/g;
 // 本人消息兜底与到场引文共用远程／私密排除，前端重新推导也交由这里核验。
-const inPersonEvidence = (message, text = message.text ?? '') => !isPrivate(message)
-    && !CAME_UNCERTAIN.test(text) && !/电话|通话|消息|屏幕|终端那头/.test(text);
+const CAME_REMOTE = /电话|通话|消息|屏幕|终端那头/;
+const CAME_FRAME = /想起|回忆|记得|曾经|从前|当年|梦里|梦中|转述|据说|听说|如果|要是|假如/;
+function currentEvidenceSentences(text) {
+    const out=[];
+    for(const paragraph of String(text).replace(CAME_QUOTES,q=>' '.repeat(q.length)).split(/\n\s*\n/)) {
+        let framed=false;
+        for(const sentence of paragraph.split(/[。！？!?\n]/)) {
+            for(const clause of sentence.split(/[；;]/)) {
+                if(CAME_FRAME.test(clause))framed=true;
+                else if(/此刻|现在|眼下|如今|回过神/.test(clause))framed=false;
+                if(!framed&&!CAME_UNCERTAIN.test(clause)&&!CAME_REMOTE.test(sentence))out.push(clause);
+            }
+        }
+    }
+    return out;
+}
+function inPersonEvidence(message, text = message.text ?? '', { who = message.name, roster = [], calls = [] } = {}) {
+    if(isPrivate(message))return false;
+    const others=roster.filter(p=>p.name&&p.name!==who).map(p=>p.name);
+    // 本人回复已由调用方核身份；这里只排除证明句自身的回忆、远程和别人动作。
+    // 不要求动作在句首，也不因全文另一个段落的措辞剔除当前证明句。
+    const narrative=String(text).replace(CAME_QUOTES,'').replace(/[（）()*\s]/g,'');
+    const proofText=narrative?text:String(text).replace(CAME_QUOTES,q=>q.slice(1,-1));
+    for(const paragraph of String(proofText).replace(CAME_QUOTES,q=>' '.repeat(q.length)).split(/\n\s*\n/)) {
+        let framed=false;
+        for(const sentence of paragraph.split(/[。！？!?\n]/)) {
+            for(const clause of sentence.split(/[，,；;：:（）()]/)) {
+                const proof=clause.trim().replace(/^[*\s]+/,'');
+                if(CAME_FRAME.test(proof))framed=true;
+                else if(/此刻|现在|眼下|如今|回过神/.test(proof))framed=false;
+                const subject=proof.replace(/^(?:此刻|现在|眼下|如今)\s*/,'');
+                if(proof&&!framed&&!CAME_UNCERTAIN.test(proof)&&!CAME_REMOTE.test(sentence)
+                    &&!others.some(name=>subject.startsWith(name))&&!/陌生人|别人|目送|看着/.test(proof)
+                    &&![...proof.matchAll(CAME_PREDICATE)].some(m=>qualifiedAt(proof,m.index,[who,...calls,...roster.map(p=>p.name)])))return true;
+            }
+        }
+    }
+    return false;
+}
 // 引文必须落在这一身份本人的当面证据里。引用、回忆和无法消歧的代词保留未判。
 function cameEvidence(evidence, doubt, quote, person, roster) {
     if (isPrivate(evidence)) return false;
     const text = String(evidence.text ?? '');
     const own = messageIsPerson(evidence, { name: doubt.who, avatar: doubt.avatar }, roster);
     const recentlyAway = person && ['away', 'absent'].includes(person.status);
-    const narration = text.replace(CAME_QUOTES, q => ' '.repeat(q.length));
-    const sentences = narration.split(/[。！？!?；;\n]/).filter(s => squashQuote(s).includes(squashQuote(quote)));
+    const calls = [doubt.who,...(doubt.aliases??[]),...roster.map(p=>p.name)].filter(Boolean);
+    const sentences = currentEvidenceSentences(text).filter(s => squashQuote(s).includes(squashQuote(quote)));
     for (const sentence of sentences) {
-        if (!inPersonEvidence(evidence, sentence)) continue;
+        if (!inPersonEvidence(evidence, sentence, { calls })) continue;
         for (const clause of sentence.split(/[，,：:（）()]/)) {
             const lead = clause.trim().replace(/^[*\s]+/, '');
             const subject = (doubt.aliases ?? [doubt.who]).find(n => lead.startsWith(n));
@@ -558,7 +633,7 @@ function cameEvidence(evidence, doubt, quote, person, roster) {
         }
     }
     // 未有离场反证时，精确 avatar 的本人发言也是证据；远程或离场后单独一句话不足以证明物理返场。
-    return own && !recentlyAway && inPersonEvidence(evidence);
+    return own && !recentlyAway && inPersonEvidence(evidence, text, { who: doubt.who, roster, calls });
 }
 // 正文已把有卡的人带到场面：先按名册叫法挑候选，模型只复核这些人。
 export function cameDoubts(store, records, chatKey, { present = [], config = null } = {}) {
@@ -663,22 +738,20 @@ function leaveChecks(store, records, chatKey, options) {
             others:people.filter(x=>x.name!==p.name&&x.status==='present').map(x=>x.name),roster,relations,
             remoteNames:people.filter(x=>x.status==='remote').map(x=>x.name),n:options.config?.auto?.remoteQuiet??3});
         const pending=prior?.state==='被打发未动' && !messages.some(m=>m.pos>prior.evidenceAt&&isOwn(m,person));
-        const turns=pending?messages.filter(m=>m.is_user && m.pos>prior.evidenceAt):[];
-        const expired=pending && turns.length>=2;
         const settled=prior?.state==='走了' && since>messages.at(-1)?.pos;
-        return {p:person,r,prior,pending,expired,turns,settled,done,messages,aliases:callsOf(p.name,{rel:relations?normalizeRelations(relations):null,names}),from:since};
+        return {p:person,r,prior,pending,settled,done,messages,aliases:callsOf(p.name,{rel:relations?normalizeRelations(relations):null,names}),from:since,
+            remoteNames:people.filter(x=>x.status==='remote').map(x=>x.name)};
     });
 }
 export function autoLeave(store, records, chatKey, { present = [], config = null } = {}) {
     if(config?.auto?.enabled===false || config?.auto?.leave===false) return [];
     let checks; try {checks=leaveChecks(store,records,chatKey,{present,config});} catch {return [];}
     const out=[];
-    for(const {p,r,prior,expired,turns,done,messages} of checks) {
-        const event=expired ? {left:true,sure:true,at:turns[1].pos,how:'被打发',why:'被打发后玩家又说两句，他仍未开口或被核实在场'} : r;
+    for(const {p,r:event,done,messages} of checks) {
         if(event.left!==true || !event.sure) continue;
         const fp=messages.find(m=>m.pos===event.at)?.fp;
         if(done.some(d=>sameFor(store,chatKey,d,p)&&d.at===event.at&&d.fp===fp)) continue;
-        out.push({who:p.name,avatar:p.avatar,at:event.at,fp,how:event.how,why:event.why,...(expired?{basis:[{pos:prior.evidenceAt,fp:prior.evidenceFp},...(prior.basis??[]),...turns.slice(0,2).map(m=>({pos:m.pos,fp:m.fp}))]}:{})});
+        out.push({who:p.name,avatar:p.avatar,at:event.at,fp,how:event.how,why:event.why});
     }
     return out;
 }
@@ -687,13 +760,13 @@ export function leaveDoubts(store, records, chatKey, { present = [], config = nu
     if(config?.auto?.enabled===false || config?.auto?.leave===false) return [];
     let checks; try {checks=leaveChecks(store,records,chatKey,{present,config});} catch {return [];}
     const out=[];
-    for(const {p,r,prior,pending,expired,settled,done,messages,aliases,from} of checks) {
-        if(expired || settled || (!pending && r.left!==null)) continue;
+    for(const {p,r,prior,pending,settled,done,messages,aliases,from,remoteNames} of checks) {
+        if(settled || (!pending && r.left!==null)) continue;
         const at=pending ? prior.at : r.at;
         const fp=messages.find(m=>m.pos===at)?.fp;
         if(at==null || done.some(d=>sameFor(store,chatKey,d,p) && d.at===at && d.fp===fp)) continue;
         const last=messages.at(-1);
-        out.push({who:p.name,avatar:p.avatar,at,fp,why:pending?'被打发未动，继续核对是否已在场或离开':r.why,status:p.status,aliases,
+        out.push({who:p.name,avatar:p.avatar,at,fp,why:pending?'被打发未动，继续核对是否已在场或离开':r.why,status:p.status,aliases,remoteNames,
             since:p.since??null,from,through:last.pos,throughFp:last.fp,
             ...(pending?{pendingAt:prior.evidenceAt,pendingQuote:prior.quote}:{}),
             basis:messages.filter(m=>m.pos>=(from??at)).slice(-10).map(m=>({pos:m.pos,fp:m.fp}))});
@@ -717,6 +790,13 @@ export function answerLeaves(store, chatKey, doubts, verdicts) {
         if(evidence.pos>through || (!legacy && evidence.pos<(d.from??d.since??d.at) && !(state==='被打发未动'&&evidence.pos===d.pendingAt))) continue;
         const last=messages.find(m=>m.pos===through);
         if(!last || (d.throughFp && last.fp!==d.throughFp)) continue;
+        if (state === '走了' && !completedDeparture(messages.filter(m => m.pos <= through), d.who, {
+            avatar: d.avatar, aliases: d.aliases, status: d.status, at: evidence.pos, quote: legacy ? null : v['引'],
+            roster: store.getCast(store.requireChat(chatKey).story_id) ?? [], remoteNames: d.remoteNames,
+        })) {
+            store.logEvent?.(chatKey, 'auto_left_rejected', { avatar: d.avatar, at: evidence.pos, reason: '引文不能确认本人已经离场，保留待核' });
+            continue;
+        }
         const old=asked.filter(x=>sameFor(store,chatKey,x,d)&&x.state==='被打发未动'&&(x.since??null)===(d.since??null)).at(-1);
         // 指纹只覆盖实际给出的十条窗口；原始依据与已判末条另有锚点核验。
         const basis=d.basis;
