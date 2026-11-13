@@ -151,7 +151,7 @@ async function api(route, body, timeout = 30000, { background = false } = {}) {
     finally { tick(`后台:${route}`, performance.now() - t0, ok ? '' : '失败'); }
 }
 
-const state = { epoch: 0, chatKey: null, syncing: false, dirty: false, timer: null, status: null, plan: null, planTimer: null, collapsed: null, note: '', door: { items: [], lit: null }, guide: { open: false, items: [] }, remote: null, entering: new Set() };
+const state = { epoch: 0, chatKey: null, syncing: false, dirty: false, timer: null, status: null, plan: null, planTimer: null, collapsed: null, note: '', door: { items: [], lit: null }, guide: { open: false, items: [] }, remote: null, entering: new Map() };
 
 // ---------- T070 新加的数值（用户 10/25：决定过的数值要报；回执"新加的数值"一节逐条列） ----------
 // 单聊门上"某人该来了"那条提示停留多久（毫秒）。话比较长（带怎么转群聊），比现有 8000 稍长
@@ -998,8 +998,10 @@ async function applyOpeningAbsent(reply, chatKey) {
         disabled.add(avatar); added.push(card.name);
     }
     if (added.length) {
-        group.disabled_members = [...disabled];
-        await stGroups.editGroup(group.id, true, false);
+        await changeMembers([...disabled].filter(a => !group.disabled_members?.includes(a)), async () => {
+            group.disabled_members = [...disabled];
+            await stGroups.editGroup(group.id, true, false);
+        });
     }
     if (handled.size !== before) {
         (c.chatMetadata.rp_emergence ??= {}).openingMuted = [...handled];
@@ -1937,6 +1939,7 @@ async function onChatChanged() {
     Object.assign(state, { chatKey: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
     Object.assign(auto, { blocked:null,executionStatus:null,on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null });
     state.memberBase = memberSnapshot();
+    watchMembers();   // 首次接入也核对旧的手动静音标记，不把初始名单当成人工操作
     state.firstMemberSnapshot = state.memberBase && !(ctx().chat??[]).some(m=>m.is_user) ? {...state.memberBase,at:0} : null;   // 开局第一次群快照
     // 换了窗口：群成员名单的基线重记（不触发），不拿上一个窗口的名单比
     arrivals.cancel();   // 拉进群攒着的那批（T070 二）作废
@@ -3608,19 +3611,16 @@ async function autoSpeak(q) {
         const camera=q.role==='旁白'||q.who==='旁白';
         const ch=camera?cameraOf(c):await resolveCard(q.who,q.avatar,{interactive:false});
         if(!ch || q.avatar&&ch.avatar!==q.avatar)throw Error(`${q.who}的卡未能唯一匹配，请确认卡文件`);
-        if(q.enter&&!group.members.includes(ch.avatar)){state.entering.add(ch.avatar);try{await run(`/member-add ${ch.avatar}`);}finally{state.entering.delete(ch.avatar);followBase();}}
+        if(q.enter&&!group.members.includes(ch.avatar))await changeMembers([ch.avatar],()=>run(`/member-add ${ch.avatar}`));
         const at=group.members.indexOf(ch.avatar);
         if(at<0)throw Error(`${q.who}不在当前群里，请先核对成员`);
         if(!camera&&group.disabled_members?.includes(ch.avatar)){
             const manual=c.chatMetadata.rpeManualMuted?.[ch.avatar];
             const owned=!manual&&c.chatMetadata.rp_emergence?.openingMuted?.includes(ch.avatar);
             if(manual||!owned&&!q.back&&!q.enter)throw Error(`${q.who}现在手动静音中，要发言请解除静音后重试`);
-            state.entering.add(ch.avatar);
-            try{
-                await run(`/member-enable ${at}`);
-                if(currentGroup(ctx()).disabled_members?.includes(ch.avatar))throw Error(`${q.who}解除静音后核实失败`);
-                if(owned){c.chatMetadata.rp_emergence.openingMuted=c.chatMetadata.rp_emergence.openingMuted.filter(a=>a!==ch.avatar);await c.saveMetadata();}
-            }finally{state.entering.delete(ch.avatar);followBase();}
+            await setMemberMuted(ch.avatar,false);
+            if(currentGroup(ctx()).disabled_members?.includes(ch.avatar))throw Error(`${q.who}解除静音后核实失败`);
+            if(owned){c.chatMetadata.rp_emergence.openingMuted=c.chatMetadata.rp_emergence.openingMuted.filter(a=>a!==ch.avatar);await c.saveMetadata();}
         }
         if(q.back||q.enter)await openPresence(ch,q.enter?.at);
         auto.noRepeat=q.noRepeat?ch.avatar:null;
@@ -3632,6 +3632,7 @@ async function autoKnock(k) {
     return runScheduled(k,async()=>{
         const c=ctx(),group=currentGroup(c),ch=await resolveCard(k.who,k.avatar,{interactive:false});
         if(!group||!ch||k.avatar&&ch.avatar!==k.avatar)throw Error(`${k.who}的卡身份未对上`);
+        if(group.disabled_members?.includes(ch.avatar)&&c.chatMetadata.rpeManualMuted?.[ch.avatar])throw Error(`${k.who}现在手动静音中，要发言请解除静音后重试`);
         const existing=new Set(c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]?.segments??[]),wasDisabled=group.disabled_members?.includes(ch.avatar);
         let opened=null,openedKey=null;
         const rollback=async()=>{
@@ -3639,14 +3640,14 @@ async function autoKnock(k) {
             if(opened&&anchor?.segments?.includes(opened)&&JSON.stringify(opened)===openedKey){anchor.segments=anchor.segments.filter(s=>s!==opened);await c.saveMetadata();}
             const owned=c.chatMetadata.rpeExecution?.[k.execution?.id]?.preparation;
             if(owned){owned.segments=[];owned.segmentOwned=false;owned.muteOwned=false;}
-            if(wasDisabled&&!group.disabled_members?.includes(ch.avatar)){await run(`/member-disable ${group.members.indexOf(ch.avatar)}`);if(!group.disabled_members?.includes(ch.avatar))throw Error('叩门静音恢复核实失败');}
+            if(wasDisabled&&!group.disabled_members?.includes(ch.avatar)){await setMemberMuted(ch.avatar,true);if(!group.disabled_members?.includes(ch.avatar))throw Error('叩门静音恢复核实失败');}
             auto.pending.delete(ch.avatar);
         };
-        state.entering.add(ch.avatar);
+        const release=acquireMemberChange(ch.avatar);
         try{
             if(!group.members.includes(ch.avatar))await run(`/member-add ${ch.avatar}`);
             const at=group.members.indexOf(ch.avatar);if(at<0)throw Error('叩门角色没有加入群');
-            if(wasDisabled)await run(`/member-enable ${at}`);
+            if(wasDisabled)await setMemberMuted(ch.avatar,false);
             if(group.disabled_members?.includes(ch.avatar))throw Error('叩门解除静音未落实');
             await openPresence(ch);
             opened=(c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]?.segments??[]).find(s=>!existing.has(s));
@@ -3654,7 +3655,7 @@ async function autoKnock(k) {
             auto.pending.set(ch.avatar,{who:ch.name,way:k.way});
             return {at,avatar:ch.avatar,rollback};
         }catch(error){await rollback();throw error;}
-        finally{state.entering.delete(ch.avatar);followBase();}
+        finally{release();followBase();}
     });
 }
 // 他走了（后台已经记了去向）、这次叩门作废了（他没进过场）：关区间、静音，不移出群
@@ -3732,7 +3733,7 @@ async function applyAutoClose(l,why,chatKey) {
         mute:async()=>{
             guard();
             const g=currentGroup(ctx()),i=g?.members.indexOf(ch.avatar)??-1;
-            if(i>=0 && !g.disabled_members?.includes(ch.avatar)) {rec.muting=true;await save();await c.executeSlashCommandsWithOptions(`/member-disable ${i}`);}
+            if(i>=0 && !g.disabled_members?.includes(ch.avatar)) {rec.muting=true;await save();await setMemberMuted(ch.avatar,true,cmd=>c.executeSlashCommandsWithOptions(cmd));}
             if(i>=0 && !currentGroup(ctx())?.disabled_members?.includes(ch.avatar)) throw new Error('角色未静音');
             rec.muted=true;await save();
         },
@@ -3745,9 +3746,9 @@ async function applyAutoClose(l,why,chatKey) {
             guard();
             if(!rec || rec.undone) return;
             const g=currentGroup(ctx()),i=g?.members.indexOf(ch.avatar)??-1;
-            // 撤销离场取消的静音是扩展自己做的：别被 watchMembers 当成玩家手动取消静音（T070 三）
-            if((rec.muted||rec.muting) && !rec.wasDisabled && !laterClose() && i>=0 && g.disabled_members?.includes(ch.avatar)) {state.entering.add(ch.avatar);try{await c.executeSlashCommandsWithOptions(`/member-enable ${i}`);}finally{state.entering.delete(ch.avatar);followBase();}}
-            if((rec.muted||rec.muting) && !rec.wasDisabled && !laterClose() && i>=0 && currentGroup(ctx())?.disabled_members?.includes(ch.avatar)) throw new Error('角色未取消静音');
+            const unmute=(rec.muted||rec.muting)&&!rec.wasDisabled&&!laterClose()&&!c.chatMetadata.rpeManualMuted?.[ch.avatar]&&i>=0;
+            if(unmute && g.disabled_members?.includes(ch.avatar))await setMemberMuted(ch.avatar,false,cmd=>c.executeSlashCommandsWithOptions(cmd));
+            if(unmute && currentGroup(ctx())?.disabled_members?.includes(ch.avatar)) throw new Error('角色未取消静音');
             rec.undone=true;await save();
         },
         ack:receipt=>ackLeave(chatKey,{...receipt,result:rec?.status??'applied'})
@@ -3816,7 +3817,7 @@ async function pickPresence() {
         else {const done=await closeSegment(c,{avatar:x.ch.avatar,name:x.ch.name,at,resident:true,disabled:wasDisabled});rec.after=structuredClone(done.segment);rec.closed=true;rec.status='applied';}
         journal[x.key]=rec;await c.saveMetadata();
         if(member>=0&&!currentGroup(c)?.disabled_members?.includes(x.ch.avatar)){
-            rec.muting=true;await c.saveMetadata();await c.executeSlashCommandsWithOptions('/member-disable '+member);
+            rec.muting=true;await c.saveMetadata();await setMemberMuted(x.ch.avatar,true,cmd=>c.executeSlashCommandsWithOptions(cmd));
             if(!currentGroup(c)?.disabled_members?.includes(x.ch.avatar))throw Error('角色未静音');
         }
         rec.muted=true;await c.saveMetadata();
@@ -4001,6 +4002,33 @@ async function cameraJoin(c, cam) {
 // 到场看见什么 → 让他先开口。
 const hasCommand = name => !!ctx().SlashCommandParser?.commands?.[name];
 const run = cmd => ctx().executeSlashCommandsWithOptions(cmd).catch(() => null);
+// 系统名单归属按角色计数；嵌套和交叠调用各自释放，最后一个结束才放开。
+function acquireMemberChange(avatar) {
+    const entering=state.entering;
+    entering.set(avatar,(entering.get(avatar)??0)+1);
+    let held=true;
+    return () => {
+        if(!held)return;
+        held=false;
+        const count=entering.get(avatar);
+        if(count>1)entering.set(avatar,count-1);else entering.delete(avatar);
+    };
+}
+async function changeMembers(avatars, apply) {
+    const c=ctx(),group=currentGroup(c),releases=[...new Set(avatars)].map(acquireMemberChange);
+    try { return await apply(); }
+    finally {
+        // ST 没发 GROUP_UPDATED 或命令部分成功后报错时，也让基线跟上。
+        try { if(ctx().chat===c.chat&&currentGroup(ctx())===group){watchMembers();followBase();} }
+        finally { for(const release of releases)release(); }
+    }
+}
+// 系统改静音统一从这里走；直接保存名单也使用同一个 changeMembers。
+async function setMemberMuted(avatar, disabled, execute = run) {
+    const group=currentGroup(ctx()),at=group?.members.indexOf(avatar)??-1;
+    if(at<0)return;
+    return changeMembers([avatar],()=>execute(`/member-${disabled?'disable':'enable'} ${at}`));
+}
 function cardNamed(c, who, avatar = null) {
     const group=currentGroup(c),members=group?.members??[c.characters?.[c.characterId]?.avatar].filter(Boolean);
     return cardNamedInGroup(c.characters??[], members, who, avatar, c.chatMetadata?.rpeCardChoices?.[state.chatKey]);
@@ -4075,15 +4103,15 @@ async function enterChar(who, avatar = null, opts = {}) {
     const copy=x=>x==null?null:structuredClone(x);
     const anchor=()=>c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]??null;
     const before=copy(anchor()),wasMember=group.members.includes(ch.avatar),wasDisabled=!!group.disabled_members?.includes(ch.avatar);
-    const manualMute=JSON.stringify(c.chatMetadata.rpeManualMuted?.[ch.avatar]??null),length=chat.length;
+    const manualMute=copy(c.chatMetadata.rpeManualMuted?.[ch.avatar]),length=chat.length;
     let prepared=null,preparedMute=null,failed=true;
-    state.entering.add(ch.avatar);
+    const release=acquireMemberChange(ch.avatar);
     try {
         if (!group.members.includes(ch.avatar)) await run(`/member-add ${ch.avatar}`);
         if(!here())return false;
         let g = currentGroup(ctx()), at = g?.members.indexOf(ch.avatar) ?? -1;
         if (at < 0) { globalThis.toastr?.warning(`没能把${ch.name}加进群。`, 'RP：幕后'); return false; }
-        if (g.disabled_members?.includes(ch.avatar)) await run(`/member-enable ${at}`);
+        if (g.disabled_members?.includes(ch.avatar)) await setMemberMuted(ch.avatar,false);
         if(!here())return false;
         // 从这一条起在场：之前这里说的话他没听见（没装上下文隔离扩展时，后台只能当他一直在）
         await openPresence(ch);
@@ -4103,15 +4131,22 @@ async function enterChar(who, avatar = null, opts = {}) {
         if(here()){state.note=`进场未完成：${String(error.message).slice(0,120)}；可重新认卡或同步后再试。`;globalThis.toastr?.warning(state.note,'RP：幕后');render();}
         return false;
     } finally {
-        // 仅撤回本次仍完整持有的准备。用户改过区间、静音或已有新消息时保留现状。
-        if(failed&&here()&&chat.length===length&&prepared&&JSON.stringify(anchor())===JSON.stringify(prepared)){
+        // 区间和消息仍属本次准备时才能撤回；静音只比较当前结果与准备结果。
+        try { if(failed&&here()&&chat.length===length&&prepared&&JSON.stringify(anchor())===JSON.stringify(prepared)){
             const anchors=c.chatMetadata.contextIsolation?.anchors;
             if(anchors){if(before)anchors[ch.avatar]=before;else delete anchors[ch.avatar];await c.saveMetadata();}
             const g=currentGroup(c),at=g?.members.indexOf(ch.avatar)??-1;
-            if(here()&&at>=0&&preparedMute===!!g.disabled_members?.includes(ch.avatar)&&manualMute===JSON.stringify(c.chatMetadata.rpeManualMuted?.[ch.avatar]??null)&&(wasDisabled||!wasMember))await run(`/member-disable ${at}`);
+            if(here()&&at>=0){
+                const currentMute=!!g.disabled_members?.includes(ch.avatar),unchanged=currentMute===preparedMute,rollbackMute=wasDisabled||!wasMember;
+                if(unchanged&&currentMute!==rollbackMute)await setMemberMuted(ch.avatar,rollbackMute);
+                // 结果不同就保留当前静音和已有标记；仍静音却丢了旧手动标记时补回。
+                if(here()&&currentGroup(c)?.disabled_members?.includes(ch.avatar)&&manualMute!=null&&(unchanged||c.chatMetadata.rpeManualMuted?.[ch.avatar]==null)){
+                    (c.chatMetadata.rpeManualMuted??={})[ch.avatar]=manualMute;
+                    await c.saveMetadata();
+                }
+            }
             if(here())scheduleSync(0);
-        }
-        state.entering.delete(ch.avatar);
+        } } finally { release(); }
         // 名单基线跟上（群名单变了没发事件时，下一次比的时候别把他当成新拉进来的）
         const snap = memberSnapshot();
         if (snap && state.memberBase?.key === snap.key) state.memberBase = snap;
@@ -4130,26 +4165,34 @@ async function arriveNow(ch, opts = {}) {
 // 玩家在群面板里直接把卡移出群（不是静音）：区间没关，后台会一直当他在场。和上一次看到的名单比，少了的有卡的人当作离场。
 // 页面刚打开、切换聊天时只记名单，不触发；静音不算（名单没变）。disabled：静音名单（T070 三，比出玩家手动取消静音的人）
 function memberSnapshot() {
-    const group = currentGroup(ctx());
+    const c=ctx(),group=currentGroup(c),ids=chatIds(c);
+    // 切窗期间群对象可能仍是旧的，名单也可能尚未装好，不能拿缺省空名单清标记。
+    if(!group||ids.groupId==null||String(group.id)!==String(ids.groupId)||ids.stChatId==null||String(group.chat_id??'')!==String(ids.stChatId)||!Array.isArray(group.members)||!Array.isArray(group.disabled_members))return null;
     return group ? { key: `${group.id}|${group.chat_id ?? ''}`, members: [...(group.members ?? [])], disabled: [...(group.disabled_members ?? [])] } : null;
 }
 function watchMembers() {
     const c = ctx(), base = state.memberBase, snap = memberSnapshot();
+    if(!snap)return;
     state.memberBase = snap;
-    if (!settings().enabled || !base || !snap || base.key !== snap.key) return;
+    if (!settings().enabled) return;
+    const manual=c.chatMetadata.rpeManualMuted??={};
+    const save=()=>c.saveMetadata().catch(error=>{state.note=`静音归属尚未保存：${error.message}`;render();});
+    let cleaned=false;
+    // 标记只对实际静音的人有效；首次接入、系统解静音也要清旧脏数据。
+    for(const avatar of Object.keys(manual))if(!snap.disabled.includes(avatar)){delete manual[avatar];cleaned=true;}
+    if (!base || base.key !== snap.key) { if(cleaned)save();return; }
     const now = snap.members;
     for(const avatar of new Set([...base.disabled,...snap.disabled])){
-        if(state.entering.has(avatar)||base.disabled.includes(avatar)===snap.disabled.includes(avatar))continue;
+        if(base.disabled.includes(avatar)===snap.disabled.includes(avatar))continue;
+        if(state.entering.has(avatar))continue;
         for(const e of Object.values(c.chatMetadata.rpeExecution??{}))if(e.avatar===avatar&&e.preparation)e.preparation.muteRelinquished=true;
     }
-    const manual=c.chatMetadata.rpeManualMuted??={};
     for(const avatar of snap.disabled.filter(a=>!base.disabled.includes(a)&&now.includes(a)&&!state.entering.has(a))){
         manual[avatar]=true;
         const owned=c.chatMetadata.rp_emergence?.openingMuted;
         if(owned)c.chatMetadata.rp_emergence.openingMuted=owned.filter(a=>a!==avatar);
     }
-    for(const avatar of base.disabled.filter(a=>!snap.disabled.includes(a)&&!state.entering.has(a)))delete manual[avatar];
-    c.saveMetadata().catch(error=>{state.note=`静音归属尚未保存：${error.message}`;render();});
+    save();
     for (const avatar of removedMembers(base.members, now, { camera: cameraOf(c)?.avatar ?? null })) {
         const ch = (c.characters ?? []).find(x => x.avatar === avatar);
         if (!ch || isCamera(ch)) continue;
@@ -4162,7 +4205,7 @@ function watchMembers() {
     }
     // 玩家在群面板里直接把卡拉进群（场记章程 B1）：和点门一样走进场——从这条起在场、后台替他理怎么来的（门上有他那一项就按那项的方式）。
     // 扩展自己拉进来的（enterChar）不算；不自动让他开口，玩家自己点谁说话
-    for (const avatar of addedMembers(base.members, now, { camera: cameraOf(c)?.avatar ?? null, skip: [...state.entering] })) {
+    for (const avatar of addedMembers(base.members, now, { camera: cameraOf(c)?.avatar ?? null, skip: [...state.entering.keys()] })) {
         const ch = (c.characters ?? []).find(x => x.avatar === avatar);
         if (!ch || isCamera(ch)) continue;
         // 拉进来就静音着的（用户 10/16：全员常驻群，静音＝此刻不在场）：只是放进群，不算进场；取消静音、点门、叩门时才进
@@ -4175,14 +4218,14 @@ function watchMembers() {
     }
     // 玩家在群面板里手动取消静音（T070 三）：只在自动进离场开着时算进场；关着照旧什么都不做
     if (auto.on !== true) return;
-    const unmuted = unmutedMembers(base, snap, { camera: cameraOf(c)?.avatar ?? null, skip: [...state.entering] })
+    const unmuted = unmutedMembers(base, snap, { camera: cameraOf(c)?.avatar ?? null, skip: [...state.entering.keys()] })
         .map(avatar => (c.characters ?? []).find(x => x.avatar === avatar)).filter(ch => ch && !isCamera(ch) && ch.name !== c.name1);
     if (unmuted.length) admitUnmuted(unmuted);
 }
 // 现状的拉人进场（自动进离场关着、或者按场面判不成时）：从这条起在场、后台替他理怎么来的，一人一条提示
 function enterAsBefore(ch, doorItem) {
     const avatar = ch.avatar;
-    state.entering.add(avatar);
+    const release=acquireMemberChange(avatar);
     (async () => {
         try {
             await openPresence(ch);
@@ -4193,7 +4236,7 @@ function enterAsBefore(ch, doorItem) {
             globalThis.toastr?.info(`${ch.name}被拉进了群，已按进场处理：从这条起${ch.name}在场，之前的事${ch.name}没听见${opts.mode === 'remote' ? `（${ch.name}是${opts.way === '电话' ? '打电话' : '发消息'}来的）` : ''}。要${ch.name}说话就点${ch.name}。`, 'RP：幕后', { timeOut: 8000 });
             await arriveNow(ch, opts);
         } finally {
-            state.entering.delete(avatar);
+            release();
             refreshDoor().catch(() => {});
         }
     })().catch(e => globalThis.toastr?.warning(e.message,'在场没落实'));
@@ -4235,7 +4278,7 @@ async function settleArrivals(key, list) {
     // 等的这一会儿里自动进离场关了：照现状逐个进场
     if (auto.on !== true) { for (const p of people) { const ch = cardNamed(c, p.name, p.avatar); if (ch) enterAsBefore(ch, p.doorItem); } return; }
     const legacy = [];
-    for (const p of people) state.entering.add(p.avatar);
+    const releases=people.map(p=>acquireMemberChange(p.avatar));
     try {
         const batch = people.map(p => p.avatar), sealed = [];
         for (const p of people) {
@@ -4271,7 +4314,7 @@ async function settleArrivals(key, list) {
             } else await placeArrivals(sorted, here);
         }
     } finally {
-        for (const p of people) state.entering.delete(p.avatar);
+        for (const release of releases) release();
         followBase();
     }
     if (!here()) return;
@@ -4281,7 +4324,7 @@ async function settleArrivals(key, list) {
 async function placeArrivals({ enter, mute }, here) {
     for (const m of mute) {
         const at = currentGroup(ctx())?.members.indexOf(m.avatar) ?? -1;
-        if (at >= 0) await run(`/member-disable ${at}`);
+        if (at >= 0) await setMemberMuted(m.avatar,true);
         if (!currentGroup(ctx())?.disabled_members?.includes(m.avatar)) console.warn('[RP：幕后] 拉进群：判不在场但没静音上', m.name);
     }
     await admit(enter, here, { all: [...enter, ...mute].map(p => p.name), muted: mute.map(p => p.name) });
@@ -4321,8 +4364,8 @@ function admitUnmuted(list) {
         people.push({ avatar: ch.avatar, name: ch.name, doorItem });
     }
     if (!people.length) return;
-    for (const p of people) state.entering.add(p.avatar);
-    admit(people, here).catch(e => console.warn('[RP：幕后] 取消静音进场没走完', e)).finally(() => { for (const p of people) state.entering.delete(p.avatar); followBase(); });
+    const releases=people.map(p=>acquireMemberChange(p.avatar));
+    admit(people, here).catch(e => console.warn('[RP：幕后] 取消静音进场没走完', e)).finally(() => { for (const release of releases) release(); followBase(); });
 }
 // 扩展自己改了群名单／静音以后：名单基线跟上，别把自己做的当成玩家做的
 function followBase() {
@@ -4335,7 +4378,7 @@ async function leaveChar(who) {
     if (!group || !ch || !group.members.includes(ch.avatar)) { globalThis.toastr?.warning(`群里没有「${who}」。`, 'RP：幕后'); return false; }
     await closeCurrentPresence(ch);
     const at = group.members.indexOf(ch.avatar);
-    if (!group.disabled_members?.includes(ch.avatar)) await run(`/member-disable ${at}`);
+    if (!group.disabled_members?.includes(ch.avatar)) await setMemberMuted(ch.avatar,true);
     await syncNow(true).catch(() => {});
     if (state.remote?.avatar === ch.avatar) state.remote = null;
     // 他走前说了去哪、办什么：后台记下去向，回来的时机照它（D-169；在后台跑，不等）
@@ -4364,10 +4407,10 @@ async function setUpCamera() {
         cam = cameraOf(ctx());
         if (!cam) { globalThis.toastr?.error('卡建好了但没认出来，刷新一下页面再点一次。', 'RP：幕后'); return; }
     }
-    if (!group.members.includes(cam.avatar)) await c.executeSlashCommandsWithOptions(`/member-add ${cam.avatar}`);
+    if (!group.members.includes(cam.avatar)) await changeMembers([cam.avatar],()=>c.executeSlashCommandsWithOptions(`/member-add ${cam.avatar}`));
     const now = currentGroup(ctx());
     const at = now?.members.indexOf(cam.avatar) ?? -1;
-    if (at >= 0 && !now.disabled_members?.includes(cam.avatar)) await c.executeSlashCommandsWithOptions(`/member-disable ${at}`);
+    if (at >= 0 && !now.disabled_members?.includes(cam.avatar)) await setMemberMuted(cam.avatar,true,cmd=>c.executeSlashCommandsWithOptions(cmd));
     // 旁白是你的眼睛，看得见你看得见的全部：上下文隔离扩展别因为它刚加进群就只给它加进来以后的那几条（N-292，D 副本实测）
     // 光清掉不够：它头一回开口时隔离扩展会照"名册里新来的"再记一次进场——直接记成从第 0 条起就在
     await ensureCameraPresence(ctx(),{avatar:cam.avatar,name:cam.name});
@@ -4835,15 +4878,13 @@ async function reconcileBoardState() {
             const later=(anchor(e.avatar)?.segments??[]).some(s=>s.to==null);
             const i=group.members.indexOf(e.avatar);
             if(!chain.length&&r.muteOwned&&!r.muteRelinquished&&!c.chatMetadata.rpeManualMuted?.[e.avatar]&&!retained&&!later&&at==null&&!muteSupported&&i>=0){
-                state.entering.add(e.avatar);
-                try{if(!group.disabled_members?.includes(e.avatar))await run(`/member-disable ${i}`);guard();if(!group.disabled_members?.includes(e.avatar))throw Error('自动准备的静音撤回核实失败');}
-                finally{state.entering.delete(e.avatar);}
+                if(!group.disabled_members?.includes(e.avatar))await setMemberMuted(e.avatar,true);
+                guard();if(!group.disabled_members?.includes(e.avatar))throw Error('自动准备的静音撤回核实失败');
                 if(r.openingMuted){const own=(c.chatMetadata.rp_emergence??={}).openingMuted??=[];if(!own.includes(e.avatar))own.push(e.avatar);}
             }
             if(!chain.length&&r.muteOwned&&!r.muteRelinquished&&!c.chatMetadata.rpeManualMuted?.[e.avatar]&&at!=null&&i>=0&&group.disabled_members?.includes(e.avatar)){
-                state.entering.add(e.avatar);
-                try{await run(`/member-enable ${i}`);guard();if(group.disabled_members?.includes(e.avatar))throw Error('自动准备的静音推导核实失败');}
-                finally{state.entering.delete(e.avatar);}
+                await setMemberMuted(e.avatar,false);
+                guard();if(group.disabled_members?.includes(e.avatar))throw Error('自动准备的静音推导核实失败');
                 if(r.openingMuted)c.chatMetadata.rp_emergence.openingMuted=(c.chatMetadata.rp_emergence.openingMuted??[]).filter(a=>a!==e.avatar);
             }
             r.live=live;
@@ -4856,7 +4897,7 @@ async function reconcileBoardState() {
                 ||(anchor(r.avatar)?.segments??[]).some(s=>s.from>r.pos||s.to!=null&&s.to>r.pos);
             if(r.muteChanged&&!later){
                 const i=group.members.indexOf(r.avatar),disabled=!!group.disabled_members?.includes(r.avatar);
-                if(i>=0&&disabled===r.disabledAfter){state.entering.add(r.avatar);try{await run(`/member-${r.wasDisabled?'disable':'enable'} ${i}`);if(!!group.disabled_members?.includes(r.avatar)!==r.wasDisabled)throw Error('撤销纠正的静音核实失败');}finally{state.entering.delete(r.avatar);}}
+                if(i>=0&&disabled===r.disabledAfter){await setMemberMuted(r.avatar,r.wasDisabled);if(!!group.disabled_members?.includes(r.avatar)!==r.wasDisabled)throw Error('撤销纠正的静音核实失败');}
             }
             delete journal[id];await save();
         }
@@ -4874,9 +4915,8 @@ async function reconcileBoardState() {
             const laterBoundary=edit.end!=null;
             const i=group.members.indexOf(w.avatar);
             if(!laterBoundary&&i>=0&&record.wasDisabled!==record.disabledAfter){
-                state.entering.add(w.avatar);
-                try{await run(`/member-${record.disabledAfter?'disable':'enable'} ${i}`);guard();if(!!group.disabled_members?.includes(w.avatar)!==record.disabledAfter)throw Error('纠正静音状态核实失败');record.muteChanged=true;}
-                finally{state.entering.delete(w.avatar);}
+                await setMemberMuted(w.avatar,record.disabledAfter);
+                guard();if(!!group.disabled_members?.includes(w.avatar)!==record.disabledAfter)throw Error('纠正静音状态核实失败');record.muteChanged=true;
             }
             record.applied=true;await save();
         }
@@ -4894,15 +4934,14 @@ async function recoverOpeningMuted() {
         const p=board.people?.find(p=>p.avatar===avatar);
         if(!p||!['present','remote'].includes(p.status)||c.chatMetadata.rpeManualMuted?.[avatar])continue;
         const at=group.members.indexOf(avatar);if(at<0)continue;
-        state.entering.add(avatar);
         try{
-            if(group.disabled_members?.includes(avatar))await run(`/member-enable ${at}`);
+            if(group.disabled_members?.includes(avatar))await setMemberMuted(avatar,false);
             if(group.disabled_members?.includes(avatar))throw Error(`${p.name}的系统静音恢复核实失败`);
             recovered[avatar]={sourceVersion:board.sourceVersion,disabled:false,at:Date.now()};
             c.chatMetadata.rp_emergence.openingMuted=owned.filter(a=>!recovered[a]);await c.saveMetadata();
             auto.blocked=null;globalThis.toastr?.info(`${p.name}已恢复发言，已核实群里解除静音；原因为系统开局静音与当前在场证据冲突。`);
         }catch(error){state.boardReconcile=`系统静音待恢复：${error.message}`;render();throw error;}
-        finally{state.entering.delete(avatar);followBase();}
+        finally{followBase();}
     }
 }
 document.addEventListener('click', event => {
