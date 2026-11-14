@@ -3,7 +3,7 @@
 // ② 每次某个角色要发言前，向后台要"只给他的那一格"，临时塞进这次请求，用完即清；
 // ③ 设置面板里的开关与状态。后台连不上时什么都不做，ST 照常。
 import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStaleOn, guideClosed, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, classify, openSegment, closeSegment, residentFromStart, ensureCameraPresence, repairResidentSegment, restoreSegment, runLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
-import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
+import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, captureDoorHandoff, doorHandoffs, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 import { observeManualLeaveCommand } from './sync.mjs';
 import { cutByPresence, storyTimeAt } from './presence.mjs';
 import { boardSegmentEdit, undoBoardSegmentEdit } from './sync.mjs';
@@ -1767,12 +1767,13 @@ async function syncOnce(force = false, light = false) {
             cameraOf(c);   // 旁白卡写的记 narrator：先认出它再算指纹
             const tb = performance.now();
             const generating = activeGeneration();
-            const { seq, bodies, pending } = buildSequence(c.chat, fallbackAvatar(c), generating);
+            const { seq, bodies, pending, doorHandoffs } = buildSequence(c.chat, fallbackAvatar(c), generating, state.boardCast ?? []);
             tick('同步:算指纹', performance.now() - tb, `${seq.length} 条`);
             if (pending) { state.pendingSyncEpoch = epoch; setStage(state, 'sync', '等待', '消息或生成状态尚未稳定'); return false; }
             const payload = {
                 chatKey: state.chatKey, seq, force, members: members(c),
                 anchors: c.chatMetadata?.contextIsolation?.anchors ?? null,
+                doorHandoffs,
             };
             setStage(state, 'sync', '进行中', '提交消息');
             let result = await api('sync', payload);
@@ -3435,9 +3436,9 @@ async function autoDrive(type) {
     if (afterReply && typingNow()) { console.log('[RP：幕后] 玩家在打字，先停'); return false; }
     // 同一条之后只问一次：叫的人没生成成（断网、被拒）群聊收尾又会走到这里，别一直重叫
     const sourceKey=()=>`${ctx().chat.length}:${fingerprintMessage({mes:JSON.stringify(ctx().chat.map(m=>
-        [fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null]))},'')}`;
+        [fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null,m.extra?.rp_door??null,m.swipe_id??0]))},'')}`;
     const key = sourceKey();
-    const version = () => JSON.stringify([ctx().chat?.map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null]),state.boardCast?.map(p=>[p.avatar,p.role]),currentGroup(ctx())?.members,currentGroup(ctx())?.disabled_members,ctx().chatMetadata?.contextIsolation?.anchors]);
+    const version = () => JSON.stringify([ctx().chat?.map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null,m.extra?.rp_door??null,m.swipe_id??0]),state.boardCast?.map(p=>[p.avatar,p.role]),currentGroup(ctx())?.members,currentGroup(ctx())?.disabled_members,ctx().chatMetadata?.contextIsolation?.anchors]);
     let localVersion = version();
     if (auto.blocked?.key === key && auto.blocked.version === localVersion) return false;
     const chatKey = state.chatKey, epoch = state.epoch, length = c.chat.length;
@@ -3455,7 +3456,7 @@ async function autoDrive(type) {
     try {
         if (!auto.on || auto.unavailable) { await autoPeek(); if (auto.unavailable || auto.on===null) return false; if (!auto.on) return 'off'; }
         // 同步会重放系统区间，执行基线取同步之后；正文、裁决和人工静音仍须保持。
-        const inputs=()=>JSON.stringify([ctx().chat.map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null]),
+        const inputs=()=>JSON.stringify([ctx().chat.map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null,m.extra?.rp_door??null,m.swipe_id??0]),
             state.boardCast?.map(p=>[p.avatar,p.name,p.role]),currentGroup(ctx())?.members,ctx().chatMetadata?.rpeManualMuted??null,
             Object.entries(ctx().chatMetadata?.contextIsolation?.anchors??{}).filter(([,r])=>r.rpeManualRevision!=null)
                 .map(([avatar,r])=>[avatar,r.rpeManualRevision])]);
@@ -3513,7 +3514,7 @@ async function runScheduled(q, prepare) {
     if(prior)q={...q,execution:{...prior[1].q.execution}};
     const id=q.execution?.id??`${q.avatar??'narrator'}:${chat.length}:${fingerprintMessage(chat.at(-1),speakerOf(chat.at(-1),fallbackAvatar(c)))}`;
     const length=journal[id]?.at??chat.length;
-    const snapshot=()=>JSON.stringify(chat.slice(0,length).map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(c))),!!m.is_system,m.extra?.rp_board??null]));
+    const snapshot=()=>JSON.stringify(chat.slice(0,length).map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(c))),!!m.is_system,m.extra?.rp_board??null,m.extra?.rp_door??null,m.swipe_id??0]));
     const prefix=snapshot();
     // 展示数据会随消息刷新；执行只固定卡身份、档位和本局实际选中的卡，空认卡条目等同未选择。
     const roleSnapshot=()=>JSON.stringify([(state.boardCast??[]).map(p=>[p.avatar,p.name,p.role]),
@@ -3891,13 +3892,10 @@ async function pickPresence() {
 }
 // ---------- 事件 ----------
 
-async function stripDoorMark(id) {
+async function stripDoorMark(id, event = 'read') {
     const c = ctx(), m = c.chat?.[id];
     if (!m || m.is_user || speakerOf(m, fallbackAvatar(c)) !== 'narrator') return;
-    const mark = doorMark(m.mes);
-    if (!mark.who) return;
-    m.mes = mark.text;
-    if (Array.isArray(m.swipes) && m.swipes[m.swipe_id ?? 0]) m.swipes[m.swipe_id ?? 0] = mark.text;
+    if (!captureDoorHandoff(m, 'narrator', event)) return;
     c.updateMessageBlock(id, m);
     await c.saveChat();
 }
@@ -3925,7 +3923,7 @@ document.addEventListener('click', event => {
 on('CHAT_CHANGED', () => { if (state.guide.open) { state.guide = guideClosed(); render(); } onChatChanged(); });
 for (const event of ['PERSONA_CHANGED', 'SETTINGS_UPDATED']) on(event, () => { personaWatch.check(); void sendPersona().catch(() => {}); });
 for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'MESSAGE_UPDATED', 'GROUP_UPDATED']) {
-    on(name, (id) => { if (guideStaleOn(name) && state.guide.open) { state.guide = guideClosed(); render(); } if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED') stripDoorMark(id).catch(() => {}); if (name === 'GROUP_UPDATED') watchMembers(); scheduleSync(); if (name !== 'MESSAGE_SENT') refreshDoor(); if (name === 'MESSAGE_RECEIVED') askGuide(false).catch(() => {}); });
+    on(name, (id) => { if (guideStaleOn(name) && state.guide.open) { state.guide = guideClosed(); render(); } if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED' || name === 'MESSAGE_RECEIVED') stripDoorMark(id, name === 'MESSAGE_EDITED' ? 'edit' : 'read').catch(() => {}); if (name === 'GROUP_UPDATED') watchMembers(); scheduleSync(); if (name !== 'MESSAGE_SENT') refreshDoor(); if (name === 'MESSAGE_RECEIVED') askGuide(false).catch(() => {}); });
 }
 on('OAI_PRESET_CHANGED_AFTER', restoreCameraPrompts);
 for (const name of ['GENERATION_ENDED', 'GENERATION_STOPPED']) on(name, () => {
@@ -3942,7 +3940,7 @@ on('MESSAGE_RECEIVED', () => {
     const knock = auto.pending.get(who) ?? auto.remote?.get(who) ?? null;   // 叩门那条、远程的人之后写的每一条
     if (knock) {
         auto.pending.delete(who);
-        if (knock.way !== '上门' && !last.extra?.rp_vis) { last.extra = { ...(last.extra ?? {}), rp_vis: { from: knock.who, fromAvatar: who, way: knock.way } }; c.saveChat().catch(() => {}); }
+        if (['消息', '电话'].includes(knock.way) && !last.extra?.rp_vis) { last.extra = { ...(last.extra ?? {}), rp_vis: { from: knock.who, fromAvatar: who, way: knock.way } }; c.saveChat().catch(() => {}); }
     }
     const r = state.remote;
     if (r && r.chatKey === state.chatKey && who === r.avatar) {
@@ -3954,34 +3952,14 @@ on('MESSAGE_RECEIVED', () => {
         }).catch(() => {});
     }
     if (who !== 'narrator') return;
+    // 同步部分在第一个 await 之前完成；第一人称提醒也不能让内部记号漏进正文。
+    stripDoorMark(c.chat.length - 1).catch(() => {});
     if (narratorSaysI(last.mes)) {
         globalThis.toastr?.warning('旁白这段的叙述用了"我"，写成了某个人的口吻。点这里重写这一段（原来那段留在左边）。', 'RP：幕后', { timeOut: 20000, onclick: () => { $('#chat .last_mes .swipe_right').first().trigger('click'); } });
         return;
     }
-    // 旁白留的记号（D-175）：不管点的是谁都先从消息里剥掉（同步是延后跑的，这里同步改掉，进后台的就是剥过的）；
-    // 点的是门名单里的人才亮门、先把进场那份理好（点了个不在名单上的人，就当它没点）
-    const mark = doorMark(last.mes);
-    if (mark.who) {
-        last.mes = mark.text;
-        if (Array.isArray(last.swipes) && last.swipes[last.swipe_id ?? 0]) last.swipes[last.swipe_id ?? 0] = mark.text;
-        c.updateMessageBlock(c.chat.length - 1, last);
-        c.saveChat().catch(() => {});
-    }
-    // 手上的名单可能是上一次刷的（D 副本 10/7：玩家刚说完那句还没同步完旁白就写好了）：对不上就先刷一次再认
-    const pick = list => mark.who ? list.find(x => namedIn(mark.who, [x.who]) || namedIn(x.who, [mark.who])) : list.find(x => namedIn(last.mes, [x.who]));
-    const chatKey = state.chatKey;
-    (async () => {
-        let hit = pick(state.door?.items ?? []);
-        if (!hit) { await syncNow(true).catch(() => {}); await refreshDoor(); hit = pick(state.door?.items ?? []); }
-        if (!hit || chatKey !== state.chatKey) return;
-        if (mark.who) {
-            const mode = mark.way === '去找他' ? 'go' : mark.way === '消息' || mark.way === '电话' ? 'remote' : 'come';
-            await api('door-lit', { chatKey, who: hit.who, way: mark.way ?? '', by: 'narrator' }).catch(() => {});
-            // 自动进离场开着：记号只当"该叩门了"的免费信号（后台叩门时优先他），进场那份后台自己提前理
-            if (auto.on===false) api('arrive', { chatKey, who: hit.who, avatar: hit.avatar, prepare: true, mode, way: mode === 'remote' ? mark.way : '' }, 240000).catch(() => {});
-        } else await api('door-lit', { chatKey, who: hit.who, way: '', by: 'named' }).catch(() => {});
-        await refreshDoor();
-    })().catch(() => {});
+    // 交接随现有 sync 提交，autoDrive 的现有同步屏障之后才计算候选。
+    // 不读可能过时的门名单，不另发亮门/准备请求；关闭自动时仍留着依据待重试。
 });
 // 这一次实际发出去多长（N-288）：字数现量，token 数用 ST 自己的算法（它就按这个砍聊天记录），算好了下一轮带给后台。
 // 只量我们注入过的那次生成；不等它算完（不拖慢发送）。

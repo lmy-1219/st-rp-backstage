@@ -33,7 +33,7 @@ import { planRoster, normalizeRelations, toText as relationsText, fromText as re
 import { boardFor } from './board.mjs';
 import { executionResult } from './auto.mjs';
 import { pendingFor, playerView } from './pending.mjs';
-import { doorFor, capFresh } from './door.mjs';
+import { doorFor, capFresh, receiveDoorHandoff, narratorHandoff, syncDoorHandoffs } from './door.mjs';
 import { occasionOf, WHY as OCCASION_WHY } from './occasion.mjs';
 import { cameraShouldSpeak } from './camera-turn.mjs';
 import { promptOptionsFor, promptEnvironmentFor, allowedTiers, slotTable, setGlobalPromptPack, DEFAULT_PACK } from './prompt-slots.mjs';
@@ -245,6 +245,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
                 members: Array.isArray(b.members) ? b.members : null,
                 anchors: b.anchors && typeof b.anchors === 'object' ? b.anchors : null,
             }));
+            if (result.committed) syncDoorHandoffs(store, records, chatKey, b.doorHandoffs);
             // 开局单"人物开场状态"里要记成记录的那几类（约定、欠账、名声、手头的事）落到第一条消息上；开局单没变就不动（opening.mjs）
             if (result.committed && records) try { ensureOpening(store, records, b.chatKey); } catch {}
             // 进场时替他记的那几笔挂到他那条回复上：删了、换了跟着看不见，又开口了跟着回来（landing.mjs）
@@ -375,14 +376,15 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const last = messages.at(-1);
             let mark = null;
             try { const v = JSON.parse(store.getMeta(`door_lit:${chatKey}`) ?? 'null'); if (v && (last?.pos ?? 0) - v.pos <= 4 && messages.find(m => m.pos === v.pos)?.fp === v.fp) mark = v; } catch {}
-            const items = capFresh(store, records, chatKey, { present: strings(b.present, 60, 200), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', timeline: timelineFor(store, records, chatKey, messages), litWho: ['narrator', 'named'].includes(mark?.by) ? mark.who : null });
+            const handoff = narratorHandoff(store, chatKey);
+            const items = capFresh(store, records, chatKey, { present: strings(b.present, 60, 200), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', timeline: timelineFor(store, records, chatKey, messages), litWho: mark?.by === 'named' ? mark.who : null, litPerson: handoff && !handoff.reason ? handoff : null });
             const chat = store.requireChat(chatKey);
             const occasion = occasionOf(messages, { roster: store.getCast(chat.story_id), relations: store.relationsOf?.(chat.story_id) }), holdReason = occasion ? `场合不合适：${OCCASION_WHY[occasion]}` : null;
             let lit = null;
-            if (mark && (!holdReason || mark.by !== 'program') && items.some(i => i.who === mark.who && (mark.by !== 'program' || i.ready))) lit = mark;
-            if (!lit && !holdReason) { const first = items.find(i => i.ready && i.known); if (first) lit = { who: first.who, way: first.ways[0] ?? '他过来', by: 'program' }; }
+            if (mark && !mark.consumed && !handoff?.reason && (!holdReason || mark.by !== 'program') && items.some(i => mark.avatar ? i.avatar === mark.avatar : i.who === mark.who && items.filter(x => x.who === mark.who).length === 1)) lit = mark;
+            if (!lit && !handoff && !holdReason) { const first = items.find(i => i.ready && i.known); if (first) lit = { who: first.who, way: first.ways[0] ?? '他过来', by: 'program' }; }
             // 由头（reason，后台排的那件的原话）、他递过的那条的应答（sent）留在后台给进场那份用，扩展只要 label、ways
-            return { items: items.map(({ reason, sent, ...item }) => item), lit, holdReason };
+            return { items: items.map(({ reason, sent, ...item }) => item), lit, holdReason, handoff };
         },
         // 停住时的「接下来」路标卡（T074，core/guide.mjs）。manual＝手动按钮（随时能看，不看停住、不看场面）；否则是自动弹那次问（看停住、看场面，弹了就记一笔）。
         // 卡不是聊天消息：这里只算要给玩家看的几行，不写进 chat、不进任何提示词。
@@ -409,11 +411,11 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/door-lit': b => {
             const chatKey = str(b.chatKey, 'chatKey'), who = str(b.who, 'who', { max: 80 }), way = str(b.way ?? '', 'way', { max: 20 }), by = str(b.by ?? 'named', 'by', { max: 20 });
             if (!['narrator', 'named', 'program'].includes(by)) bad('by invalid');
+            if (by === 'narrator' && Number.isInteger(b.pos) && isFp(b.fp)) return receiveDoorHandoff(store, records, chatKey, { who, way, avatar: b.avatar, pos: b.pos, fp: b.fp, revision: b.revision });
+            if (by === 'narrator') return receiveDoorHandoff(store, records, chatKey, { who, way });
             const messages = store.currentMessages(chatKey), last = messages.at(-1);
             const items = doorFor(store, records, chatKey, { present: [], recentUser: '', timeline: timelineFor(store, records, chatKey, messages) }).items;
             if (!items.some(i => i.who === who) && !(store.getCast?.(store.requireChat(chatKey).story_id) ?? []).some(e => e.name === who)) bad('who invalid');
-            // 旁白点的人不在门上（还没到他的时候）：不记（用户 10/8："没到触发剧情的点还是不要提示可以让角色进场了"）
-            if (by === 'narrator' && !items.some(i => i.who === who)) return { ok: false, notDue: true };
             store.setMeta(`door_lit:${chatKey}`, JSON.stringify({ who, way, by, pos: last?.pos ?? 0, fp: last?.fp ?? null }));
             return { ok: true };
         },

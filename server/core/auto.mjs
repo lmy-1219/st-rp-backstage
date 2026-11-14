@@ -15,7 +15,7 @@ import { leftAt, completedDeparture, qualifiedAt } from './leaving.mjs';
 import { callsOf } from './camera-turn.mjs';
 import { normalizeRelations, leaderOf, personOf } from './relations.mjs';
 import { boardFor, sourceVersion, factBasis, factCurrent, factInput } from './board.mjs';
-import { capFresh } from './door.mjs';
+import { capFresh, narratorHandoff } from './door.mjs';
 import { pendingFor } from './pending.mjs';
 import { timelineFor, paceFor, playModeOf } from './slot.mjs';
 import { isOpenMatter, INTENT, closeIntents } from './matters.mjs';
@@ -106,6 +106,7 @@ export function executionFor(store, chatKey, item, kind = 'speak', retryOf = nul
     const floor=Math.max(0,...eligibility.segments.filter(s=>s.to!=null&&s.to>s.from).map(s=>s.to));
     const openAt=Number.isInteger(item.enter?.at)&&item.enter.at>=floor?item.enter.at:through+1;
     const all = read(store, `auto_execution:${chatKey}`, []);
+    for (const old of all) if (old.handoff && old.state === 'queued' && !sameHandoff(old.handoff, narratorHandoff(store, chatKey))) old.state = 'superseded';
     for(const old of all)if(old.avatar===(item.avatar??null)&&old.through===through
         &&old.source&&!executionSourceMatches(old,messages))
         old.state='superseded';
@@ -117,13 +118,14 @@ export function executionFor(store, chatKey, item, kind = 'speak', retryOf = nul
     // 改稿又换回原稿时来源哈希会回到旧值，不能复用已经作废的同名执行 ID。
     if(!retryOf&&!held)retryOf=all.find(e=>e.avatar===(item.avatar??null)&&e.through===through&&e.state==='superseded'
         &&e.source&&executionSourceMatches(e,messages))?.id??null;
-    const stamp=createHash('sha256').update(JSON.stringify([version,action,openAt,eligibility,...(retryOf?[retryOf,all.length]:[])])).digest('hex');
+    const stamp=createHash('sha256').update(JSON.stringify([version,action,openAt,eligibility,item.handoff??null,...(retryOf?[retryOf,all.length]:[])])).digest('hex');
     const id = `${kind}:${encodeURIComponent(action === 'camera' ? 'narrator' : item.avatar)}:${through}:${stamp}`;
     // 发出过的同身份、同来源执行先核实；自身准备或纠正不能绕过未确认回执。
     // 旧回执信息不足时仍暂停；已发出/未确认的同来源执行优先于作废历史。
     let e = !retryOf && (held??all.find(e => e.id === id&&e.state!=='superseded'));
     if (!e) {
         e = { id, kind, source, action, eligibility, openAt, who: item.who, avatar: item.avatar ?? null, through, sourceVersion: version, state: 'queued' };
+        if (item.handoff) e.handoff = item.handoff;
         if(retryOf)e.retryOf=retryOf;
         if(['enter','back','knock'].includes(action)){
             const fact=action==='enter'?activeCame(store,chatKey).find(c=>c.avatar===item.avatar&&c.at===item.enter.at):null;
@@ -156,6 +158,7 @@ export function executionResult(store, chatKey, receipt, { records = null, confi
             && (p.avatar===null||typeof p.avatar==='string')&&typeof p.who==='string')e={...p,state:'unconfirmed'};
     }
     if (!e) return { ok: false, why: '来源版本已失效' };
+    if (e.handoff && ['start', 'retry', 'check'].includes(receipt.result) && !sameHandoff(e.handoff, narratorHandoff(store, chatKey))) return { ok: false, why: '原旁白交接已撤回或换稿' };
     if(receipt.result==='start'&&e.state==='superseded')return {ok:false,why:'旧凭据已被替换，请核对当前执行'};
     const messages = live(store.currentMessages(chatKey));
     const landed = messages.find(m => m.pos > e.through && !m.is_user && String(m.text??'').trim() && (e.avatar ? m.speaker === e.avatar : m.name === '旁白'));
@@ -267,8 +270,17 @@ export function unrequestedFollower(store, chatKey, person, { through = Infinity
     if (person.source?.type === 'named') return false;
     return !playerRequestFor(store, chatKey, person, { through });
 }
+const sameHandoff = (a, b) => !!a && !!b && !b.reason && a.avatar === b.avatar && a.pos === b.pos && a.fp === b.fp && a.revision === b.revision && a.way === b.way;
 export const pendingKnock = (store, chatKey) => {
     const k=read(store,PENDING(chatKey),null);
+    const handoff = narratorHandoff(store, chatKey);
+    const executions = read(store, `auto_execution:${chatKey}`, []);
+    const issued = k && executions.some(e => e.kind === 'knock' && e.avatar === k.avatar && e.through + 1 === k.at && ['running', 'unconfirmed', 'waiting', 'delivered'].includes(e.state));
+    const conflict = k && handoff && !issued && (handoff.reason || k.avatar !== handoff.avatar || (handoff.way && k.way !== (handoff.way === '他过来' ? '上门' : handoff.way)) || (k.handoff && !sameHandoff(k.handoff, handoff)));
+    if (conflict || (k?.handoff && !handoff && !issued)) {
+        store.logEvent?.(chatKey, 'door_handoff_pending_cancelled', { avatar: k.avatar, handoff, reason: conflict ? '未递出的旧叩门让位于原旁白交接' : '原旁白交接已撤回' });
+        write(store, PENDING(chatKey), null); dropKnockArrival(store, chatKey, k); return null;
+    }
     let valid=!k||currentSource(store,chatKey,k,false);
     // 联系/口袋的来源读口已核过日期和步骤；只改措辞的同一消息沿用项目既有改稿链。
     if(k&&!valid&&k.sourceBasis&&['contact','pocket'].includes(k.source?.type)&&k.sourceStep&&store.knockLive?.(chatKey,k)===true){
@@ -319,7 +331,7 @@ export function wayFor(item, plan = null) {
     if (type === 'promise' || type === 'contact' || type === 'named') return '上门';
     return '消息';
 }
-const modeOf = way => (way === '上门' ? 'come' : 'remote');
+const modeOf = way => (way === '上门' ? 'come' : way === '去找他' ? 'go' : 'remote');
 
 function context(store, records, chatKey, { present = [], recentUser = '', timeline = null } = {}) {
     const chat = store.requireChat(chatKey);
@@ -355,27 +367,44 @@ function verdictFor(store, chatKey, doubts, d, verdicts) {
  * 不叩：关着；已经有一条候着的（pending 或状态机里候着）；时机不到（knockTiming）；门上没人到时候；门上那一项作废过（等结算换一条新的）
  */
 // 门上该叩的那一项（不看时机）：到时候了、没作废过的头一项；旁白刚留的记号（door_lit，四条内）指着的优先。返回 { who, avatar, way, mode, source, label } 或 null
-export function knockCandidate(store, records, chatKey, { present = [], timeline = null } = {}) {
+export function knockCandidate(store, records, chatKey, { present = [], timeline = null, prepare = false } = {}) {
     const ctx = context(store, records, chatKey, { present, timeline });
     const { messages, tl, names } = ctx;
     const last = messages.at(-1);
     if (!last) return null;
     const knocks = knocksOf(store, chatKey);
     const lit = read(store, `door_lit:${chatKey}`, null);
+    const handoff = narratorHandoff(store, chatKey);
     const litOk = lit && num(lit.pos) != null && last.pos - num(lit.pos) <= 4 && messages.find(m => m.pos === num(lit.pos))?.fp === lit.fp;
-    const items = capFresh(store, records, chatKey, { present, timeline: tl, litWho: litOk && ['narrator', 'named'].includes(lit.by) ? lit.who : null }).filter(i => i.ready);
+    const scope = ctx.roster.filter(p => p.role !== '不用');
+    const litPerson = handoff ? resolveIdentity(scope, handoff).person : litOk && lit.by === 'named' ? resolveIdentity(scope, lit).person : null;
+    const reject = why => {
+        const result = { who: null, why, handoff };
+        // 后台预准备只探查；手动进场可能已开区间，拒绝留到实际调度时登记。
+        if (prepare) return result;
+        if (handoff) write(store, `door_lit:${chatKey}`, { ...handoff, reason: why });
+        store.logEvent?.(chatKey, 'door_handoff_rejected', result);
+        return result;
+    };
+    if (handoff?.reason) return reject(handoff.reason);
+    if (handoff?.consumed) return { who: null, why: '原旁白交接已经准备进场', handoff };
+    const items = capFresh(store, records, chatKey, { present, timeline: tl, litPerson }).filter(i => i.ready);
     const lapsed = new Set(knocks.filter(k => k.lapsed && k.source).map(k => `${k.source.type}:${k.source.id}`));
     const fresh = items.filter(i => !(i.source && lapsed.has(`${i.source.type}:${i.source.id}`)));
-    const item = (litOk ? fresh.find(i => sameName(i.who, lit.who, names)) : null) ?? fresh[0] ?? null;
+    const item = handoff ? fresh.find(i => sameIdentity(i, litPerson, scope)) : (litPerson ? fresh.find(i => sameIdentity(i, litPerson, scope)) : null) ?? fresh[0] ?? null;
+    if (handoff && !item) return reject('旁白点名的人没有合法且到时候的门候选');
     if (!item) return { who: null, why: items.length ? '门上的都叩过了、没人接' : '门上没人到时候' };
     let plan = null;
     try { plan = ctx.board().people.find(p => sameIdentity(p, item, ctx.roster))?.plan ?? null; } catch {}
-    const way = wayFor(item, plan);
+    const chosen = handoff?.way === '他过来' ? '上门' : handoff?.way;
+    const allowed = (item.ways ?? []).map(w => w === '他过来' ? '上门' : w);
+    if (chosen && !allowed.includes(chosen)) return reject('旁白指定的联系方式与门候选冲突');
+    const way = chosen || wayFor(item, plan);
     const origin = ['promise', 'reach'].includes(item.source?.type) ? records?.visible?.(chatKey)?.find(r => r.id === item.source.id) : null;
     const sourceAt = origin ? { pos: origin.pos, fp: origin.fp } : item.source?.type === 'errand' && plan?.fp ? { pos: messages.find(m => m.fp === plan.fp)?.pos, fp: plan.fp } : null;
     const avatar = avatarFor(ctx, item.who, item.avatar);
     if (!avatar) return { who: null, why: `${item.who}的卡身份未能唯一匹配，请确认卡文件` };
-    return { who: item.who, avatar, way, mode: modeOf(way), source: item.source ?? null, sourceAt, label: item.label ?? '' };
+    return { who: item.who, avatar, way, mode: modeOf(way), source: item.source ?? null, sourceAt, label: item.label ?? '', ...(handoff ? { handoff } : {}) };
 }
 
 export function knockNow(store, records, chatKey, { present = [], timeline = null, config = null } = {}) {
@@ -388,10 +417,8 @@ export function knockNow(store, records, chatKey, { present = [], timeline = nul
     if (pendingKnock(store, chatKey)) return { ok: false, why: pendingKnock(store,chatKey).error || '有一条候着的还没写出来' };
     const knocks = knocksOf(store, chatKey);
     const c = knockCandidate(store, records, chatKey, { present, timeline: tl });
-    const lit = read(store, `door_lit:${chatKey}`, null);
-    const litPos = num(lit?.pos);
-    const summoned = !!c?.who && (c.source?.type === 'named' || (lit?.by === 'narrator' && litPos != null
-        && last.pos - litPos <= 4 && messages.find(m => m.pos === litPos)?.fp === lit.fp && sameName(c.who, lit.who, names)));
+    const summoned = !!c?.who && (c.source?.type === 'named' || !!c.handoff && c.avatar === c.handoff.avatar);
+    if (c?.handoff && !c.who) return { ok: false, why: c.why };
     const cards = ctx.board().people.filter(p=>p.card && ['present','remote'].includes(p.status)).map(p=>p.name);
     const timing = knockTiming({ messages, knocks, pace: paceFor(store, chatKey), present: cards, rowAt, parts: tl.parts, roster, relations, userName, maxTurns: auto.maxTurns, summoned, occasion: !summoned });
     if (!timing.ok) return { ok: false, why: timing.why };
@@ -427,6 +454,7 @@ export function recentLapsed(store, chatKey) {
 export function beginKnock(store, chatKey, k) {
     const basisDay = k.basisDay ?? store.confirmedDayAt?.(chatKey, k.at - 1) ?? timelineFor(store, null, chatKey).firmToday;
     const pending = { who: k.who, avatar: k.avatar ?? null, way: k.way, mode: k.mode ?? modeOf(k.way), at: k.at, fp: k.fp, through:k.at-1, sourceVersion:sourceVersion(store,chatKey,k.at-1), basisDay, source: k.source ?? null, sourceStep: sourceStep(store, chatKey, k), label: k.label ?? '', since: Date.now() };
+    if (k.handoff) pending.handoff = k.handoff;
     const chat = store.requireChat(chatKey), raw = store.relationsOf?.(chat.story_id);
     const names = (store.getCast(chat.story_id) ?? []).map(p => p.name);
     // 联系候选可能排在 named 前面；进场会消费 arrival_request，先把可核实的请求随这次叩门留下。

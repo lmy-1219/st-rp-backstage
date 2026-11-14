@@ -49,6 +49,63 @@ const list = value => Array.isArray(value) ? value : Object.values(value ?? {});
 const read = (store, key, fallback = null) => {
     try { return JSON.parse(store.getMeta?.(key) ?? 'null') ?? fallback; } catch { return fallback; }
 };
+
+// 一次旁白交接绑定原楼、唯一卡和方式。拒绝也保留来源，防止下游换人。
+export function narratorHandoff(store, chatKey) {
+    const lit = read(store, `door_lit:${chatKey}`);
+    if (lit?.by !== 'narrator') return null;
+    const messages = store.currentMessages(chatKey).filter(m => !m.hidden);
+    const source = messages.find(m => m.pos === lit.pos && m.fp === lit.fp);
+    if (!source || (messages.at(-1)?.pos ?? 0) - lit.pos > 4) return null;
+    const drafts = read(store, `door_handoffs:${chatKey}`);
+    if (drafts && !drafts.some(d => d.pos === lit.pos && d.fp === lit.fp && d.revision === lit.revision && d.who === lit.who && d.way === lit.way && (!d.avatar || d.avatar === lit.avatar))) return null;
+    const roster = (store.getCast(store.requireChat(chatKey).story_id) ?? []).filter(p => p.role !== '不用');
+    const person = resolveIdentity(roster, lit).person;
+    return { ...lit, avatar: person?.avatar ?? null, reason: lit.reason || (!person ? '旁白点名的卡身份不唯一或已失效' : null) };
+}
+
+export function doorHandoffLive(store, chatKey, handoff) {
+    const current = narratorHandoff(store, chatKey);
+    return !!handoff && !!current && !current.reason
+        && ['who', 'avatar', 'way', 'pos', 'fp', 'revision'].every(k => handoff[k] === current[k]);
+}
+
+export function receiveDoorHandoff(store, records, chatKey, input) {
+    const messages = store.currentMessages(chatKey), last = messages.at(-1);
+    const pos = input.pos ?? last?.pos, fp = input.fp ?? last?.fp;
+    if (!messages.some(m => !m.hidden && m.pos === pos && m.fp === fp)) return { ok: false, why: '原旁白来源已失效' };
+    const drafts = read(store, `door_handoffs:${chatKey}`);
+    if (drafts && !drafts.some(d => d.pos === pos && d.fp === fp && d.revision === input.revision && d.who === input.who && d.way === (input.way ?? '') && (d.avatar ?? null) === (input.avatar ?? null))) return { ok: false, why: '原旁白稿本已撤回或换稿' };
+    const roster = (store.getCast(store.requireChat(chatKey).story_id) ?? []).filter(p => p.role !== '不用');
+    const identity = resolveIdentity(roster, input), person = identity.person;
+    const items = doorFor(store, records, chatKey).items;
+    const reason = !person || (input.avatar && person.name !== input.who) ? '旁白点名的卡身份不唯一、不在活跃名册或与姓名不符' : !items.some(i => sameIdentity(i, person, roster) && i.ready) ? '旁白点名的人不在门名单、没有合法请求或还没到时候' : null;
+    const lit = { who: input.who, avatar: person?.avatar ?? input.avatar ?? null, way: input.way ?? '', by: 'narrator', pos, fp, ...(input.revision ? { revision: input.revision } : {}), reason };
+    store.setMeta(`door_lit:${chatKey}`, JSON.stringify(lit));
+    if (reason) store.logEvent?.(chatKey, 'door_handoff_rejected', lit);
+    return { ok: !reason, why: reason, handoff: lit };
+}
+
+// 跟随已经提交的消息序列更新，空稿也有依据；独立晚到的亮门请求不能复活旧稿。
+export function syncDoorHandoffs(store, records, chatKey, drafts) {
+    if (!Array.isArray(drafts)) return;
+    const messages = store.currentMessages(chatKey);
+    const byPos = new Map(messages.map(m => [m.pos, m]));
+    const rows = drafts.filter(d => d && Number.isInteger(d.pos) && typeof d.fp === 'string'
+        && typeof d.revision === 'string' && d.revision.length <= 100
+        && byPos.has(d.pos) && !byPos.get(d.pos).hidden && !byPos.get(d.pos).is_user && byPos.get(d.pos).speaker === 'narrator' && byPos.get(d.pos).fp === d.fp)
+        .map(d => ({ pos: d.pos, fp: d.fp, revision: d.revision, who: typeof d.who === 'string' ? d.who.slice(0, 80) : null, way: typeof d.way === 'string' ? d.way.slice(0, 20) : '', avatar: typeof d.avatar === 'string' ? d.avatar : null }));
+    store.setMeta(`door_handoffs:${chatKey}`, JSON.stringify(rows));
+    const latest = rows.sort((a, b) => a.pos - b.pos).at(-1);
+    const lit = read(store, `door_lit:${chatKey}`);
+    if (!latest?.who) {
+        if (lit?.by === 'narrator') store.setMeta(`door_lit:${chatKey}`, null);
+        return;
+    }
+    // 同一稿的拒绝也保留，守卫暂缓不消费它；不在每次同步重建或重报。
+    if (lit?.revision === latest.revision && lit?.fp === latest.fp && lit?.pos === latest.pos && lit?.who === latest.who && lit?.way === latest.way) return;
+    receiveDoorHandoff(store, records, chatKey, latest);
+}
 const remoteWay = text => /电话|来电/.test(text ?? '') ? '电话' : /消息|短讯|短信|发来/.test(text ?? '') ? '消息' : '';
 const concrete = place => place && !/^(?:这里|那里|那儿|这儿|外头|别处|不明|未知)$/.test(place);
 const priority = { contact: 0, named: 1, promise: 2, errand: 3, pocket: 4, reach: 5 };
@@ -177,12 +234,14 @@ export function doorAt(input = {}) {
 }
 
 // 只在门对外展示与自动叩门挑人时限量；组格和等待记录仍读 doorFor 的原始 items。
-export function capFresh(store, records, chatKey, { present = [], recentUser = '', timeline = null, litWho = null } = {}) {
+export function capFresh(store, records, chatKey, { present = [], recentUser = '', timeline = null, litWho = null, litPerson = null } = {}) {
     const messages = store.currentMessages(chatKey);
     timeline ??= timelineFor(store, records, chatKey, messages);
     const { items, allReady = items } = doorFor(store, records, chatKey, { present, recentUser, timeline });
     const chat = store.requireChat(chatKey), roster = store.getCast?.(chat.story_id) ?? [];
     const names = roster.map(c => c.name), relations = store.relationsOf?.(chat.story_id);
+    const scope = roster.filter(p => p.role !== '不用');
+    const litIdentity = litPerson ?? resolveIdentity(scope, litWho).person;
     const rel = relations ? normalizeRelations(relations) : null;
     const same = (a, b) => !!a && !!b && (sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names)));
     const knocks = read(store, `knocks:${chatKey}`, []), arrivals = read(store, `arrivals:${chatKey}`, []);
@@ -202,7 +261,7 @@ export function capFresh(store, records, chatKey, { present = [], recentUser = '
     const limit = PER_PART[pace];
     let used = came.length;
     return allReady.map(i => {
-        if (!['pocket', 'contact', 'reach'].includes(i.source.type) || i.sent || same(i.who, litWho) || came.some(w => same(w, i.who))) return i;
+        if (!['pocket', 'contact', 'reach'].includes(i.source.type) || i.sent || sameIdentity(i, litIdentity, scope) || came.some(w => same(w, i.who))) return i;
         if (used >= limit) return { ...i, ready: false };
         used++; return i;
     }).sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b) || (a.at ?? 0) - (b.at ?? 0));
@@ -265,6 +324,6 @@ export function doorLines(items) {
     return !items.length ? [] : [
         '外头的人（有自己的卡，旁白不替他们写话和动作）：',
         ...items.map(item => `· ${item.who}：${item.lines.join('；')}（可选：${item.ways.join('、')}）`),
-        '这几位里哪位这会儿顺理成章该出现了（说好的时候到了、玩家正往他那儿去、他该来消息了），就别写他，写到他出现之前那一刻停，末尾单独一行：（该来：名字／去找他、他过来、消息、电话里挑一个）。没到时候就不写这一行。一段最多点一个。',
+        '这几位里哪位这会儿顺理成章该出现了（说好的时候到了、玩家正往他那儿去、他该来消息了）：消息、电话写出玩家看得到的消息抬头或来电显示上的来信人名字，到这里停，正文留给他自己说；他过来、去找他，写到他出现之前那一刻停。末尾单独一行：（该来：名字／去找他、他过来、消息、电话里挑一个）。没到时候就不写这一行。一段最多点一个。',
     ];
 }

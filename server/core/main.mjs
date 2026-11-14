@@ -44,7 +44,7 @@ import { boardFor, sourceVersion } from './board.mjs';
 import { executionFor, unrequestedFollower } from './auto.mjs';
 import { awayPlansOf } from './opening.mjs';
 import { unansweredLine, promisesFor, pullOf, placeNow } from './waiting.mjs';
-import { doorFor } from './door.mjs';
+import { doorFor, narratorHandoff, doorHandoffLive } from './door.mjs';
 import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFor, autoLeave, markLeft, waitingKnock, pendingKnock, knocksOf, sourceStep, recentLapsed, leaveDoubts, answerLeaves, cameDoubts, answerCame, takePendingLeft, acknowledgeLeaves, KNOCK_JUDGE_SYSTEM, knockJudgePrompt, parseKnockJudge } from './auto.mjs';   // 自动进离场与调度（D-201）
 import { pendingFor } from './pending.mjs';
 import { beatBrief, planningInput, completePlanningBeat, receivePlanningCheck, planningCheckBasis, planBrief, planningView, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimatePlanOptions } from './slot.mjs';
@@ -1153,12 +1153,18 @@ function rejoined(chat, { avatar, who, len }) {
 }
 
 // anchor（叩门，auto.mjs）：他那条已经落在 anchor.at 上了，进场挂在它前一条（fp）上、他从那条起在场；knock＝候着（上门的去向先不清，玩家回应了再清）
-async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'come', way = '', anchor = null, knock = false }) {
+async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'come', way = '', anchor = null, knock = false, handoff = null }) {
     const chat = store.requireChat(chatKey);
     const identities = store.getCast(chat.story_id).filter(e => e.role !== '不用');
     const matches = identities.filter(e => avatar ? e.avatar === avatar : e.name === who);
     if (matches.length !== 1) return { ok: false, why: `${who}的卡身份未能唯一匹配，请确认：${matches.map(e=>e.avatar).join('、') || avatar || who}` };
     avatar = matches[0].avatar; who = matches[0].name;
+    const currentHandoff = narratorHandoff(store, chatKey);
+    const handoffWay = h => h?.way === '他过来' ? '上门' : h?.way;
+    handoff ??= currentHandoff?.avatar === avatar && (!currentHandoff.way || handoffWay(currentHandoff) === way) ? currentHandoff : null;
+    const handoffValid = () => !handoff || (handoff.avatar === avatar && (!handoff.way || handoffWay(handoff) === way)
+        && ({ 消息: 'remote', 电话: 'remote', 上门: 'come', 去找他: 'go' }[way] ?? mode) === mode && doorHandoffLive(store, chatKey, handoff));
+    if (!handoffValid()) return { ok: false, why: '原旁白交接已撤回或换稿' };
     const all = store.currentMessages(chatKey);
     const msgs = anchor ? all.filter(m => m.pos < Number(anchor.at)) : all;
     const tip = msgs.at(-1);
@@ -1170,17 +1176,21 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     // 刚移出就原地拉回来（用户 10/14："不小心把人移出群聊，再原地拉回来就接不上戏了"）：他没走开——不理进场那份、不编"这段时间"、不当他从外头来；
     // 跟着别人出现的人（关系表"跟着"），带他的人眼下就在群里，也一样（他只能跟着那人，不会自己上门）
     if (mode === 'come' && rejoined(chat, { avatar, who, len: (tip?.pos ?? -1) + 1 })) return { ok: true, skipped: 'rejoin' };
-    const version=sourceVersion(store,chatKey,tip?.pos??-1);
-    const origin=JSON.stringify([anchor,knock]);
-    const key = `${chatKey}\u0001${avatar}\u0001${tip?.fp ?? ''}\u0001${mode}\u0001${way}\u0001${origin}\u0001${version}`;
+    // 手动交接的准备认原旁白楼；后来普通对话不另理一份，进场仍挂当前 tip。
+    const briefMessages = handoff && !knock ? msgs.filter(m => m.pos <= handoff.pos) : msgs;
+    const briefTip = briefMessages.at(-1);
+    const version=sourceVersion(store,chatKey,briefTip?.pos??-1);
+    const origin=JSON.stringify([knock && handoff ? { at: (tip?.pos ?? -1) + 1, fp: tip?.fp ?? '' } : anchor,knock]);
+    const key = `${chatKey}\u0001${avatar}\u0001${briefTip?.fp ?? ''}\u0001${mode}\u0001${way}\u0001${origin}\u0001${version}\u0001${JSON.stringify(handoff)}`;
     let brief = null;
     try { brief = JSON.parse(store.getMeta(`arrival_brief:${chatKey}`) ?? 'null'); } catch {}
+    if (JSON.stringify(brief?.handoff ?? null) !== JSON.stringify(handoff)) brief = null;
     // 先理好的那份认人、认那一条、也认方式（"你去找他"和"他过来"理出来的不一样）
     // 叩门提前理的那份（knock）：隔了几条也认——怎么来的、为什么来、看得见什么几条之内不会变，省得时机到了再等几十秒
     const briefNear = brief?.knock && Number.isFinite(Number(brief.pos)) && (tip?.pos ?? 0) >= Number(brief.pos) && (tip?.pos ?? 0) - Number(brief.pos) <= 6;
-    if (brief && !((brief.avatar ? brief.avatar === avatar : identities.filter(e=>e.name===brief.who).length===1 && brief.who===who) && (brief.mode ?? 'come') === mode && (brief.way??'')===way && (!brief.origin||brief.origin===origin) && (!brief.sourceVersion||brief.sourceVersion===version) && (brief.fp === (tip?.fp ?? '') || briefNear))) brief = null;
+    if (brief && !((brief.avatar ? brief.avatar === avatar : identities.filter(e=>e.name===brief.who).length===1 && brief.who===who) && (brief.mode ?? 'come') === mode && (brief.way??'')===way && (!brief.origin||brief.origin===origin) && (!brief.sourceVersion||brief.sourceVersion===version) && (brief.fp === (briefTip?.fp ?? '') || briefNear))) brief = null;
     if (prepare && (brief || arriving.has(key))) return { ok: true, prepared: true };
-    if (!prepare && !brief && arriving.has(key)) { await arriving.get(key).catch(() => {}); return arrive({ chatKey, who, avatar, mode, way, anchor, knock }); }
+    if (!prepare && !brief && arriving.has(key)) { await arriving.get(key).catch(() => {}); return arrive({ chatKey, who, avatar, mode, way, anchor, knock, handoff }); }
     let offer = null;
     try { offer = JSON.parse(store.getMeta(`arrival_offer:${chatKey}`) ?? 'null'); } catch {}
     // 门上点进来的（D-175）：由头取门的名单里他那一项；结算写的联系照旧算 settle（进场后标用掉）
@@ -1236,7 +1246,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     let got = brief?.got ?? null;
     const think = async () => {
         const user = arrivalPrompt({ who, userName, reason: offer?.from === 'settle' && mode !== 'go' ? `他这回来是为了说：${offer?.why ?? ''}` : (offer?.why ?? ''), tie: String(tie).slice(0, 200), place, away, way: offer?.way ?? '',
-            mode, sent: offer?.sent ?? null, messages: msgs.slice(-8).filter(m => !m.hidden).map(m => ({ name: m.speaker === 'narrator' ? '旁白' : (m.name ?? m.speaker), text: clean(m.text).slice(-1200) })) });
+            mode, sent: offer?.sent ?? null, messages: briefMessages.slice(-8).filter(m => !m.hidden).map(m => ({ name: m.speaker === 'narrator' ? '旁白' : (m.name ?? m.speaker), text: clean(m.text).slice(-1200) })) });
         const started = Date.now();
         try {
             const r = await createModelClient({ ...s, maxOutputTokens: 1500 }).complete({ system: renderPronouns(ARRIVAL_SYSTEM, { ...playerContext(store, chatKey), person: who }), user });
@@ -1254,9 +1264,11 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     if (working) {
         arriving.set(key, working);
         try { got = await working; } finally { arriving.delete(key); }
-        if(sourceVersion(store,chatKey,tip?.pos??-1)!==version)return {ok:false,why:'进场来源已改变，请重新核对'};
-        store.setMeta(`arrival_brief:${chatKey}`, JSON.stringify({ who, avatar, fp: tip?.fp ?? '', mode, way, origin, sourceVersion:version, got, ...(knock ? { knock: true, pos: tip?.pos ?? 0 } : {}) }));
+        if(sourceVersion(store,chatKey,briefTip?.pos??-1)!==version)return {ok:false,why:'进场来源已改变，请重新核对'};
+        if (!handoffValid()) return { ok: false, why: '原旁白交接已撤回或换稿' };
+        store.setMeta(`arrival_brief:${chatKey}`, JSON.stringify({ who, avatar, fp: briefTip?.fp ?? '', mode, way, origin, handoff, sourceVersion:version, got, ...(knock ? { knock: true, pos: tip?.pos ?? 0 } : {}) }));
     }
+    if (!handoffValid() || sourceVersion(store, chatKey, briefTip?.pos ?? -1) !== version) return { ok: false, why: '进场来源已改变，请重新核对' };
     if (prepare) { log(`arrive ${chatKey} ${who}: prepared ${got ? 'brief' : 'no brief'}`); return { ok: true, prepared: true }; }
     const at = (msgs.at(-1)?.pos ?? -1) + 1;   // 他从下一条起在场（叩门的：就是他那条）
     // 递的时候说好了是发消息、打电话来的（结算定的、玩家点名叫的），模型答"上门"也不算：旁白写的是终端响了，他不能这一条就走进屋（D 副本假模型 10/7 撞到）
@@ -1286,7 +1298,9 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     store.setMeta(`arrival_offer:${chatKey}`, null);
     store.setMeta(`arrival_request:${chatKey}`, null);
     store.setMeta(`arrival_brief:${chatKey}`, null);
-    store.setMeta(`door_lit:${chatKey}`, null);
+    // 门上隐藏与执行来源分开：发令、重试和落消息仍须核对原稿本。
+    if (handoff) store.setMeta(`door_lit:${chatKey}`, JSON.stringify({ ...handoff, consumed: true }));
+    else if (!narratorHandoff(store, chatKey)) store.setMeta(`door_lit:${chatKey}`, null);
     if (offer?.from === 'settle') {
         // 用掉那一下挂在这次进场上（landing.contactUsed）：他那条回复删了、换了别人在说，这条联系回来
         try { const c = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null'); if (c) store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ ...c, used: true, usedAt: { pos: at - 1, fp: tip?.fp ?? null, who, avatar } })); } catch {}
@@ -2160,7 +2174,14 @@ const pendingLeftLog = new Map();
 const autoBusy = new Map();   // chatKey → 正在跑的那一次（同步钩子起的；扩展问"谁接"时先等它跑完，别拿到作废前的旧账）
 async function autoRun({ chatKey }) {
     const cfg = getConfig();
-    if (!cfg.auto?.enabled) return { ok: true, skipped: true };
+    if (!cfg.auto?.enabled) {
+        // sync 已提交稿本后后台理好手动进场那份；不把这次工作串到发送前。
+        const handoff = narratorHandoff(store, chatKey);
+        if (!handoff || handoff.reason || handoff.consumed) return { ok: true, skipped: true };
+        const c = knockCandidate(store, records, chatKey, { prepare: true });
+        if (!c?.who || !c.handoff) return { ok: true, skipped: true };
+        return arrive({ chatKey, who: c.who, avatar: c.avatar, mode: c.mode, way: c.way, prepare: true, handoff: c.handoff });
+    }
     if (autoBusy.has(chatKey)) return autoBusy.get(chatKey);
     const work = autoRunNow({ chatKey, cfg });
     autoBusy.set(chatKey, work);
@@ -2172,12 +2193,12 @@ async function autoRunNow({ chatKey, cfg }) {
         if (r.finalized || r.entered.length || r.lapsed.length) log(`auto ${chatKey}: ${[r.finalized ? `${r.finalized.who} 叩门（${r.finalized.way}）` : '', ...r.entered.map(k => `${k.who} 进场`), ...r.lapsed.map(k => `${k.who} 作废（${k.lapsed.why}）`)].filter(Boolean).join('、')}`);
         // 门上到时候了的那一位：进场那份先理好（几条内理过的不重理），时机到了直接叩、不用等几十秒
         if (cfg.auto.knock && !pendingKnock(store, chatKey) && !waitingKnock(store, records, chatKey)) {
-            const c = knockCandidate(store, records, chatKey, {});
+            const c = knockCandidate(store, records, chatKey, { prepare: true });
             const last = store.currentMessages(chatKey).filter(m => !m.hidden).at(-1);
             let prep = null; try { prep = JSON.parse(store.getMeta(`knock_prep:${chatKey}`) ?? 'null'); } catch {}
             if (c?.who && last && !(prep && prep.who === c.who && prep.mode === c.mode && last.pos - prep.pos < 6)) {
                 store.setMeta(`knock_prep:${chatKey}`, JSON.stringify({ who: c.who, mode: c.mode, pos: last.pos }));
-                arrive({ chatKey, who: c.who, avatar: c.avatar, prepare: true, mode: c.mode, way: c.way, knock: true }).catch(() => {});
+                arrive({ chatKey, who: c.who, avatar: c.avatar, prepare: true, mode: c.mode, way: c.way, knock: true, handoff: c.handoff ?? null }).catch(() => {});
             }
         }
         return { ok: true, ...r };
@@ -2212,14 +2233,17 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
             knock = beginKnock(store, chatKey, k);
             log(`auto ${chatKey}: ${k.who} 该来了（${k.way}，${k.label}）`);
             // 进场那份按叩门那条接上（提前理过的几秒就回；没理过的这里等模型几十秒）：他那条写出来时怎么来的、为什么来已经在他那一格里
-            try { await arrive({ chatKey, who: k.who, avatar: k.avatar, mode: k.mode, way: k.way, anchor: { at: k.at, fp: k.fp }, knock: true }); } catch (error) { log(`auto ${chatKey}: arrive for knock failed ${error.message}`); }
+            try {
+                const result = await arrive({ chatKey, who: k.who, avatar: k.avatar, mode: k.mode, way: k.way, anchor: { at: k.at, fp: k.fp }, knock: true, handoff: k.handoff ?? null });
+                if (!result.ok) { knock = null; t.why = result.why; }
+            } catch (error) { knock = null; log(`auto ${chatKey}: arrive for knock failed ${error.message}`); }
         } else t.why = t.why ? `${t.why}；${k.why}` : k.why;
     }
     // 调度式预跑：排在头一个的，这句的那一格先组装起来（打字时的草稿和发出去的不一样时，草稿那份用不上）
     if(sourceVersion(store,chatKey)!==source)return {queue:[],complete:false,knock:null,left,why:'来源已改变，停下重新核对',...tail()};
     const first = t.queue.find(q => q.avatar);
     if (first && recentUser) try { prefetchFor(store, records, { assembler, keyMaker }, { chatKey, recentUser, present, only: [first.avatar] }); } catch {}
-    const out = { queue: t.queue.map(q=>executionFor(store,chatKey,q)), complete:t.complete, why: t.why, knock: knock ? executionFor(store,chatKey,{ who: knock.who, avatar: knock.avatar, way: knock.way, at: knock.at, fp: knock.fp, label: knock.label ?? '' },'knock') : null, left, ...tail() };
+    const out = { queue: t.queue.map(q=>executionFor(store,chatKey,q)), complete:t.complete, why: t.why, knock: knock ? executionFor(store,chatKey,{ who: knock.who, avatar: knock.avatar, way: knock.way, at: knock.at, fp: knock.fp, label: knock.label ?? '', ...(knock.handoff ? { handoff: knock.handoff } : {}) },'knock') : null, left, ...tail() };
     log(`turn ${chatKey}: [${out.queue.map(q => `${q.who}·${q.role}${q.back ? '·叫回来' : ''}`).join(' ')}]${out.knock ? ` 叩门 ${out.knock.who}（${out.knock.way}）` : ''}${out.waiting ? ` 候着 ${out.waiting.who}` : ''}${out.lapsed.length ? ` 作废 ${out.lapsed.map(l => l.who).join(' ')}` : ''}${found.length ? ` 新判定走了 ${found.map(l => l.who).join(' ')}` : ''}${!out.queue.length ? ` — ${out.why}` : ''}`);
     return out;
 }

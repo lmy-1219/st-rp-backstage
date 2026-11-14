@@ -28,7 +28,7 @@ import { warmWords } from './tone.mjs';
 import { keepWay, wayOnly } from './fresh.mjs';
 import { factionLedger, factionSlotLines, factionBrief, nameResolver, samePerson } from './factions.mjs';
 import { situationReader, situationNow, dueEchoes, moveLive, situationPrompt, deliverDue, situationSlotLines, situationBrief, repLines } from './situation.mjs';
-import { closeness, roleOf, BOND_DEFAULT, mentionedIn } from './cast.mjs';
+import { closeness, roleOf, BOND_DEFAULT, mentionedIn, resolveIdentity, sameIdentity, messageIsPerson } from './cast.mjs';
 import { slotLines, sameName, reserveOpen, toText as setupText, backstoryText, staleBackstory, knowsRow, heldBackstory, activeIntimate, checkIntimate } from './setup.mjs';
 import { heldLines, activeLeaks, withSecretLeaks, secretLeakLines, effectivePlanNode, nodeContext, nodeProjection, correctionRev } from './held.mjs';
 import { openingLines, bodyRows, OPEN_SCENE } from './opening.mjs';
@@ -57,6 +57,7 @@ import { pendingFor } from './pending.mjs';
 import { doorFor, doorLines } from './door.mjs';
 import { stepWaits, dropTry } from './waiting.mjs';
 import { enteredSince, emptySegment } from './landing.mjs';
+import { arrivalLive } from './landing.mjs';
 import { settleMatters, mattersFor, sharedMatter, matterLines, matterBrief, PURSUE, closeLed, closeIntents, handOf, stageLines, LEAD, INTENT, closeDue, lapseMatters, gapSteps } from './matters.mjs';
 import { optionsFor } from './options.mjs';
 import { findSkip, liveSkips, settleSkip, skipDays, skipPromptLines, firstAfterSkip, skipLines, SKIP_MISSED, skipEvents } from './skip.mjs';
@@ -148,11 +149,12 @@ export const CAMERA_NAME = '旁白';
 // D-169（用户 10/6："旁白应该是第三人称写环境和 NPC"；选了叙述里对玩家用"你"）：旁白卡是空的，以前这些只在聊天中间一段提醒里，
 // 上文全是各人用"我"写的，旁白照着写成了某个人的"我"。现在这是旁白的定义，放在"角色定义之后"那块（对旁白就相当于它的卡），
 // 聊天中间只留一句短的（cameraNudge）。称呼旁白用"旁白"，免得和"正文里称玩家为'你'"混在一起。
-export const cameraRule = (name, others = [], { cards = [] } = {}) => [
+export const cameraRule = (name, others = [], { cards = [], remote = [] } = {}) => [
     `【场记】旁白是谁（一直算数）：旁白是这场戏的镜头，不是戏里的哪个人，跟着${name}的眼睛看。${others.length ? `${name}身边有${others.join('、')}——他们的话和动作由他们自己来，旁白不替他们写。这一轮只写没卡的人的回应和周围的动静，有卡的人刚说的话不重复、不替他们接。` : `${name}这会儿身边没有别人。`}`,
     `· 写什么：${name}周围看得见、听得见的——天气和光线、这地方的样子、近处远处的动静；这里没有卡的人：路人、店里的人、来搭话的生人、找上门的陌生人、捎来的话和消息（按这个世界说得通的方式）。没卡的人由旁白来演，说什么、做什么都可以写，可以一来一回接着往下演，同一个人前后一致（长相、说话的样子、前面说过的话）。他们是这地方的一部分，也各有各的心思和处境，回应从这些和眼前的事里来。旁白一轮给一两句、一个动作，不发长篇，不一口气把场面往前推；${name}问起时，别为了控制篇幅故意挤牙膏。`,
     `· 怎么写：叙述放在括号里。正文里称${name}为"你"；别的人、这地方用第三人称。旁白没有"我"——叙述里不出现"我"，不用谁的口吻、不从谁的眼睛里写。没卡的人开口，话放在引号里，写清是谁说的。聊天记录里各人用"我"写的是他们自己的视角，旁白别跟着学。`,
-    `· 不写什么：${cards.length ? `有自己卡的人（${cards.join('、')}）` : '有自己卡的人'}的话和动作，一个字都不替他们写；他们要来，写到他出现之前就停。${name}的话、心思和决定是${name}自己的：不替${name}说话，不写${name}心里想什么，不替${name}拿主意、动手；旁白写的是这个世界和这些人对它的回应。`,
+    `· 不写什么：${cards.length ? `有自己卡的人（${cards.join('、')}）` : '有自己卡的人'}的话和动作，一个字都不替他们写；他们要来，写到他出现之前就停；消息或电话可以写抬头、来电显示上的名字，正文由他自己说。${name}的话、心思和决定是${name}自己的：不替${name}说话，不写${name}心里想什么，不替${name}拿主意、动手；旁白写的是这个世界和这些人对它的回应。`,
+    ...remote.map(p => `${p.name}隔着${p.way || '消息／电话'}联系，人不在身边。`),
     `· 要紧的事不编：有名有姓的新人、具体的地址和门路、价钱、哪个势力在干什么、谁在找谁——场记里没给的别造。${name}问起场记里没有的，让人答得含糊（"认识个人，回头给你地方"）或者答不上，后面自会有安排。能编的只是眼前的小东西：光、声音、一个路人、一句搭腔。`,
     `· 写到哪停：写到${name}能接话的地方就停；篇幅跟着${name}走——${name}写两句，旁白三五句就够，不比${name}写得多。抓${name}这句里的事回应，别顺着自己上一条往下铺；没卡的人答了就停，不替${name}总结局面、不抒情。没什么事就写一小段安静的此刻，别硬造事。`,
     '样子（只看写法，内容照眼下的场面）：',
@@ -528,12 +530,13 @@ export async function composeSlot(store, records, args, opts = {}) {
     // 她的身子她说了算（bodyGuardFor）：镜头照玩家的眼睛看，按玩家知道的
     const guard = bodyGuardFor(store, records, chatKey, { anchor: args.anchor ?? null, recentUser: args.recentUser ?? '', knower: camera ? userName : speakerName || speaker, userName,
         speaker: args.speaker, absence: opts.absence ?? null, camera, carry: (opts.mood ?? {}).carry !== false });
+    const scene = slotScene(store, records, args);
     const base = await memorySlot(store, records, eyes, { ...opts, skipOpen: promised?.shownIds ?? null, pendingLedger, scale: fit.s, episodes: store.episodesOf?.(chatKey) ?? [], guard });
     const backstoryPick = await backstorySense(store, chatKey, args.recentUser, opts.vectors);
-    const { lines: extra, blocks = null, contact, carry = [], linger = [], dayOf: seenDayOf = null, stance = null } = extrasFor(store, records, eyes, { ...opts, pendingAway: pending, pendingLedger, backstoryPick, promised, guard }, base);
+    const { lines: extra, blocks = null, contact, carry = [], linger = [], dayOf: seenDayOf = null, stance = null } = extrasFor(store, records, eyes, { ...opts, pendingAway: pending, pendingLedger, backstoryPick, promised, guard, scene }, base);
     const name = camera ? CAMERA_NAME : speakerName || speaker;
     // 隔着消息、电话的人没"进门"：旧事那段开头那句换成人不在这儿（试玩 10/13：他发消息来，场记写他刚到场、进门之前的事没看见）
-    if (stance?.status === 'remote' && base?.text) base.text = base.text.split('\n').map(l => (l.startsWith(`${name}刚到场。`) ? `${name}这会儿隔着${stance.way || '消息'}，人不在这儿；这里之前发生的事、说过的话，${name}没看见也没听见，除非有人告诉过${name}。` : l)).join('\n');
+    if (stance && base?.text && !['present', 'arrived'].includes(stance.status)) base.text = base.text.split('\n').map(l => l.startsWith(`${name}刚到场。`) ? stance.status === 'remote' ? `${name}这会儿隔着${stance.way || '消息／电话'}，人不在这儿；这里之前发生的事、说过的话，${name}没看见也没听见，除非有人告诉过${name}。` : `${name}人不在这儿；在场情况没有确认。` : l).join('\n');
     // 情绪余波（mood.mjs）：前几格给过、他心里还没过去的，接着给他之后的开口；平常戏里持续几天的"改变"也在这里。
     const mood = opts.mood ?? {};
     const on = mood.carry !== false;
@@ -608,7 +611,7 @@ export async function composeSlot(store, records, args, opts = {}) {
     // 群聊里别人括号里写的心里话也在上文里，前台会当成听见了（实测：别人心里算的账，刚进门的人张口就说了）。
     // 他不知道的别让前台自己补上、猜中（试玩 9/30）
     if (out.text) say(renderPronouns("（别人括号里写的心里话，你听不见也看不见；你只知道他们说出口的话和看得见的动作。场记和聊天里都没有的别人的内情、底细、秘密，〔当事人〕不知道，别替〔当事人〕补全，也别让〔当事人〕猜中。）", { person: name }));
-    const cameraDef = camera ? cameraRule(userName ?? '玩家', (args.present ?? []).filter(n => n && n !== userName), { cards: cameraCards(store, records, { chatKey, storyId: chat.story_id, anchor: args.anchor, present: args.present ?? [], recentUser: args.recentUser ?? '', contacts: opts.contacts, planner: opts.planner }) }) : '';
+    const cameraDef = camera ? cameraRule(userName ?? '玩家', scene.people.filter(p => p.status === 'present' && p.name !== userName).map(p => p.name), { remote: scene.people.filter(p => p.status === 'remote'), cards: cameraCards(store, records, { chatKey, storyId: chat.story_id, anchor: args.anchor, present: args.present ?? [], recentUser: args.recentUser ?? '', contacts: opts.contacts, planner: opts.planner }) }) : '';
     if (camera && split) say(cameraNudge(userName ?? '玩家'));
     // 给前台的那一句口味：这一轮对用户这句话怎么接，由前台当场定。
     say(mood.cue && !camera ? cueLine({ name, userName: userName ?? '对方', recentUser: args.recentUser }) : null);
@@ -1024,17 +1027,31 @@ function awayDue(store, chatKey, { speaker, name, userName = null, camera = fals
     return { due, fresh, opening, away: awayLines(fresh.story, { name, userName: userName ?? '对方', same, opening }) };
 }
 
-function arrivalForSlot(store, chatKey, arrived, name, names) {
-    if (arrived && sameName(arrived.who, name, names)) return arrived;
+// 场记的参与口径只从当前锚点的同一身份投影取得；旧进场不能替未知场面补成在场。
+export function slotScene(store, records, { chatKey, speaker, speakerName, anchor = null, present = [], recentUser = '', timeline = null }) {
+    const chat = store.requireChat(chatKey);
+    const roster = (store.getCast?.(chat.story_id) ?? []).filter(p => p.role !== '不用');
+    const person = resolveIdentity(roster, { name: speakerName, ...(speaker && !speaker.startsWith('name:') && speaker !== CAMERA ? { avatar: speaker } : {}) }).person;
+    const messages = uptoAnchor(store.currentMessages(chatKey), anchor);
+    let board = null, entries = [], meta = null, anchors = null;
+    try { board = boardFor(store, records, chatKey, { anchor, present, recentUser, timeline: timeline ?? timelineFor(store, records, chatKey, messages) }); } catch {}
     try {
-        const entries = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? [];
-        const own = entries.findLast(e => e?.brief && sameName(e.who, name, names));
-        if (!own) return arrived;
-        const away = Object.values(JSON.parse(store.getMeta?.(`away_plan:${chatKey}`) ?? '{}') ?? {}).find(p => p?.who && sameName(p.who, name, names) && !p.dropped && Number(p.at) >= Number(own?.at));
-        const anchors = JSON.parse(store.requireChat(chatKey).anchors ?? 'null');
-        const segment = (anchors?.[own.avatar]?.segments ?? []).findLast(s => Number(s.from) === Number(own.at));
-        return !away && (segment?.to == null) ? { ...own, ...own.brief } : arrived;
-    } catch { return arrived; }
+        entries = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]');
+        meta = JSON.parse(store.getMeta?.(`arrived:${chatKey}`) ?? 'null');
+        anchors = JSON.parse(chat.anchors ?? 'null');
+    } catch {}
+    const same = x => !!person && sameIdentity(x, person, roster);
+    const row = person ? board?.people?.find(same) ?? null : null;
+    const valid = e => same(e) && arrivalLive(e, messages, entries, anchors) && store.knockLive?.(chatKey, e) !== false;
+    const arrival = [...entries, ...(meta ? [meta] : [])].filter(valid).sort((a,b) => a.at - b.at).at(-1) ?? null;
+    const arr = arrival ? { ...arrival, ...arrival.brief } : null;
+    const spoke = arr && person ? messages.filter(m => m.pos >= arr.at && messageIsPerson(m, person, roster)).length : 0;
+    const metNow = row?.status === 'present' && !!arr && isRemote(arr.how);
+    const justCame = row?.status === 'present' && !!arr && !isRemote(arr.how) && (messages.at(-1)?.pos ?? 0) - arr.at <= ARRIVAL_SPAN && spoke < 2;
+    const status = row?.status === 'remote' ? 'remote' : justCame ? 'arrived' : row?.status === 'present' ? 'present' : 'absent';
+    const stance = { status, way: status === 'remote' ? row.way || (arr && isRemote(arr.how) ? arr.how : '') : '' };
+    const people = (board?.people ?? []).filter(p => resolveIdentity(roster, p).person);
+    return { board, person, row, arr, spoke, metNow, justCame, stance, people };
 }
 
 // 旧事之外的几块，都是程序算的：聊到钱时的行情与他知道的账；用户离开后回来的第一轮；
@@ -1048,18 +1065,14 @@ function staleMindReasons(store, planId) {
         return Array.isArray(stale) ? stale : [];
     } catch { return []; }
 }
-function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { economy = null, contacts = null, absence = null, planner = null, world = null, factions = null, situation = null, pendingAway = false, pendingLedger = null, slot = null, backstoryPick = null, drift = null, promised = null, pace = null, mood = null, guard: given = null }, base) {
+function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { economy = null, contacts = null, absence = null, planner = null, world = null, factions = null, situation = null, pendingAway = false, pendingLedger = null, slot = null, backstoryPick = null, drift = null, promised = null, pace = null, mood = null, guard: given = null, scene = null }, base) {
     const drama = fullPlay(store, chatKey);
     const ts = scaleFor(store, chatKey);   // 这一局的时间尺度（章程 G2）
     // 她的身子她说了算（bodyGuardFor）：记账来的几块（规矩、心里没过去的、生活现状、碰上了／来意、还想知道的）拿 fed，不拿 visible
     const guard = given ?? bodyGuardFor(store, records, chatKey, { anchor, recentUser, knower: camera ? null : speakerName || speaker });
     const name = speakerName || speaker;
-    // 场面表是统一的读口；拿不到时继续沿用本函数原有判断。
-    let board = null;
-    try {
-        const boardMessages = anchor ? uptoAnchor(store.currentMessages(chatKey), anchor) : store.currentMessages(chatKey);
-        board = boardFor(store, records, chatKey, { anchor, present, recentUser, timeline: timelineFor(store, records, chatKey, boardMessages) });
-    } catch {}
+    scene ??= slotScene(store, records, { chatKey, speaker, speakerName, anchor, present, recentUser });
+    const board = scene.board;
     const { material, queryKeys = [] } = base;
     const lines = [], blocks = [];
     const add = (tier, arr, place = 'now', scope = 'person', candidate = null) => { if (arr?.length) { blocks.push({ tier, lines: arr, place, scope, ...(candidate ? { candidate } : {}) }); lines.push(...arr); } };
@@ -1073,6 +1086,13 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     const storyId = store.requireChat(chatKey).story_id;
     const roster = store.getCast?.(storyId) ?? [];
     const rosterNames = roster.map(e => e.name);
+    const activeRoster = roster.filter(e => e.role !== '不用');
+    const scenePerson = who => !camera && who === name ? scene.person : resolveIdentity(activeRoster, who).person;
+    const boardPerson = who => {
+        if (!camera && who === name) return scene.row;
+        const person = scenePerson(who);
+        return person ? scene.people.find(p => sameIdentity(p, person, activeRoster)) ?? null : null;
+    };
     const rawRel = store.relationsOf?.(storyId);
     const rel = rawRel ? normalizeRelations(rawRel) : null;
     const me = rel ? personOf(rel, name, rosterNames) : null;
@@ -1145,16 +1165,17 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     const closedRules = new Set((pendingLedger?.items ?? []).filter(x => x.kind === '规矩' && ['失效', '办了'].includes(x.status)).map(x => x.source?.id).filter(x => x != null));
     add(0, agreedLines(fed, { name, dayOf: seenDayOf, today: seenToday, closed: closedRules, when: ago }), 'base', 'person');
     // 他刚进场的那一份（进场、发消息打电话来的）：生活现状和下面的进场那几行都要看
-    let arr = null;
-    try { arr = JSON.parse(store.getMeta?.(`arrived:${chatKey}`) ?? 'null'); } catch {}
-    arr = arrivalForSlot(store, chatKey, arr, name, rosterNames);
-    // D-169（试玩 10/6）：理进场那份比他开口慢、旧的那份按条号对上了，他用了已经删掉的那一回——现在认那条的指纹
-    const arrLive = !!(arr?.who && sameName(arr.who, name, rosterNames) && (arr.fp == null || (m => !!m && (m.fp === arr.fp || !!store.sameMessage?.(m.fp, arr.fp)))(messages.find(m => m.pos === arr.at - 1))));
-    // 远程：进场那份写的是消息、电话，而且还没当面碰上（场面表认，metInPerson）
-    const remote = arrLive && isRemote(arr.how) && (board?.people?.find(p => sameName(p.name, name, rosterNames))?.status ?? 'remote') === 'remote';
+    const remote = scene.stance.status === 'remote';
+    // 旧实体 brief 不能越过当前远程投影；方式变了，旧感官描述也不再适用。
+    const sameArrivalWay = scene.arr && isRemote(scene.arr.how)
+        && /电话|来电/.test(scene.arr.how) === /电话|来电/.test(scene.stance.way);
+    const arr = remote && scene.arr ? { ...scene.arr, how: scene.stance.way,
+        saw: sameArrivalWay ? scene.arr.saw : '', where: sameArrivalWay ? scene.arr.where : '', meanwhile: sameArrivalWay ? scene.arr.meanwhile : '' } : scene.arr;
+    const arrLive = !!arr;
+    const here = ['present', 'arrived'].includes(scene.stance.status);
     // 他那头：接通以后他那几条里写到的他自己的位置（此刻的样子读出来的；用户 10/8：他在他那头走动，不在镜头这间屋里）
     const uptoPos = anchor ? (uptoAnchor(store.currentMessages(chatKey), anchor).at(-1)?.pos ?? lastPos) : lastPos;
-    const hisNow = remote ? (foldState((store.stateNotesOf?.(chatKey) ?? []).filter(n => n.pos >= (arr.at ?? 0) && n.pos <= uptoPos)).find(n => n.aspect === '位置' && sameName(n.who, name, rosterNames))?.text ?? '') : '';
+    const hisNow = remote ? (foldState((store.stateNotesOf?.(chatKey) ?? []).filter(n => n.pos >= (arr?.at ?? 0) && n.pos <= uptoPos)).find(n => n.aspect === '位置' && sameName(n.who, name, rosterNames))?.text ?? '') : '';
     // 生活现状（N-288）：他知道的住处、衣服、身边的东西每次都带；家里的样子镜头在那儿才给。换掉的就不在表里，不会越攒越多。
     // 开局单写了开场时的样子就先铺上（他是那人、或在"还有谁知道"里），聊天里的变化往上改。名字照关系表认（开局单写"甲"、聊天里叫"甲某"）
     // 开局单"人物开场状态"里的身体那几条（opening.mjs）也铺在底下：好了、加重了，记账跟着改
@@ -1168,9 +1189,9 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         // 住处取料只认场面表里的结构化镜头地点。
         const scene = board?.camera?.place ?? '';
         // 他是发消息、打电话来的：人不在那处住处，家里的样子不给（试玩 10/6：他在摊子上发短讯，那一格写着"这处住处现在的样子，镜头就在这儿"）
-        add(0, lifeLines(sheet, { name, present: remote ? [] : present, scene: remote ? '' : scene, same, names: [...rosterNames, userName].filter(Boolean), board: remote ? null : board }), 'base', 'person');
+        add(0, lifeLines(sheet, { name, present: here ? present : [], scene: here ? scene : '', same, names: [...rosterNames, userName].filter(Boolean), board: here ? board : null }), 'base', 'person');
         // 他在他自己住的地方发消息、打电话（用户 10/8：他屋里添了什么没给他，前文买的被褥被写成了别的料子）：那处的样子给他，镜头不在那儿
-        if (remote) add(0, ownHomeLines(sheet, { name, where: [arr.where, hisNow].filter(Boolean).join('；'), same, names: [...rosterNames, userName].filter(Boolean) }), 'base', 'person');
+        if (remote) add(0, ownHomeLines(sheet, { name, where: [arr?.where, hisNow].filter(Boolean).join('；'), same, names: [...rosterNames, userName].filter(Boolean) }), 'base', 'person');
     } else {
         // 旁白：这处住处现在的样子是这地方的事（镜头在屋里就得知道新门、新面板），按全部记录折，不按谁知道
         const same = (a, b) => sameName(a, b, rosterNames) || (!!rel && !!personOf(rel, a, rosterNames) && personOf(rel, a, rosterNames) === personOf(rel, b, rosterNames));
@@ -1187,27 +1208,25 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 刚进场的有卡的人（N-292）：进场时理好的怎么来的、为什么来、到场那一刻看得见什么——他进场后头两回开口带着
     let stance = null;
     if (!camera) {
-        const boardPerson = board?.people?.find(p => sameName(p.name, name, rosterNames));
-        const live = boardPerson ? boardPerson.status === 'remote' : arrLive;
-        const spoke = arrLive ? messages.filter(m => m.pos >= arr.at && !m.is_user && m.name === name).length : 0;
+        const { spoke, metNow, justCame } = scene;
+        const live = remote;
         // 发消息、打电话来、又已经当面碰上了的：进场那份（人不在这儿）不再给，换一句他就在这儿
-        const metNow = !!boardPerson && boardPerson.status !== 'remote' && arrLive && isRemote(arr.how);
+
         // 镜头外求证的回话（offstage.mjs，用户 10/8）：他隔着消息、电话问过不在场的人，后台替那人回了——他开口时带上，直到他开过口
         let rp = null;
         try { rp = JSON.parse(store.getMeta?.(`offstage_reply:${chatKey}:${name}`) ?? 'null'); } catch {}
         // 他在回话写下之后开过口，就不再带——按眼下的消息认，他那条删了又带上（不看存下的 used，方案 删消息等于没发生过）
         if (rp && messages.some(m => m.pos === rp.pos && m.fp === rp.fp) && !messages.some(m => m.pos > (rp.at ?? rp.pos) && !m.is_user && m.name === name)) add(0, replyLines(rp, { name }), 'now', 'moment');
         // "此刻能做的"（options.mjs）要知道他是隔着电话、消息，刚到，还是就在这儿：场面表认的为准，没有就看他这次进场
-        const remoteNow = !metNow && (boardPerson ? boardPerson.status === 'remote' : arrLive && isRemote(arr.how));
-        const justCame = !metNow && !remoteNow && arrLive && lastPos - arr.at <= ARRIVAL_SPAN && spoke < 2;
-        stance = { status: remoteNow ? 'remote' : justCame ? 'arrived' : 'present', way: remoteNow ? (/电话|来电/.test(`${boardPerson?.way ?? ''} ${arrLive ? arr.how ?? '' : ''}`) ? '电话' : '消息') : '' };
+        stance = scene.stance;
         // 三选一：已经当面碰上了／刚接通、刚到（头两回）／人不在这儿（之后每回）
         if (metNow) add(0, [`（${name}刚才还在外头发消息、打电话，眼下已经和${userName ?? '对方'}当面碰上了：人就在这儿，看得见、碰得着。）`], 'now', 'moment');
-        else if (arrLive && lastPos - arr.at <= ARRIVAL_SPAN && spoke < 2) add(0, arrivedLines({ ...arr, now: hisNow, userName: userName ?? '对方' }), 'now', 'moment');
-        else if (live && arr && isRemote(arr.how)) add(0, [remoteLine({ ...arr, now: hisNow, userName: userName ?? '对方' })], 'now', 'scene');
+        else if (arrLive && (remote || justCame) && lastPos - arr.at <= ARRIVAL_SPAN && spoke < 2) add(0, arrivedLines({ ...arr, now: hisNow, userName: userName ?? '对方' }), 'now', 'moment');
+        else if (remote) add(0, [arr ? remoteLine({ ...arr, how: stance.way, now: hisNow, userName: userName ?? '对方' }) : `${name}隔着${stance.way || '消息／电话'}，人不在这儿。`], 'now', 'scene');
+        else if (!here) add(0, [`${name}人不在这儿；在场情况没有确认。`], 'now', 'scene');
         // 打电话来的人：玩家此刻实际在哪、什么样子（用户 10/7："要不让他收到我位置和状态的场记"）——是镜头知道的，不是他知道的；
         // 给了他就不会照上回的印象替玩家编出一辆车来。发消息来的不给：他看不见也听不见，给了他就照着写（用户 10/9："他是发消息，场景不该是吧台边"）
-        if (live && arr && /电话|来电/.test(arr.how ?? '') && userName) {
+        if (live && /电话|来电/.test(stance.way ?? '') && userName) {
             const upto = anchor ? (uptoAnchor(store.currentMessages(chatKey), anchor).at(-1)?.pos ?? lastPos) : lastPos;
             const mineNow = foldState((store.stateNotesOf?.(chatKey) ?? []).filter(n => n.pos <= upto)).filter(n => sameName(n.who, userName, rosterNames) && ['位置', '穿着'].includes(n.aspect)).map(n => n.text);
             add(0, playerThereLines({ who: name, userName, place: board?.camera?.place ?? '', now: mineNow }), 'now', 'scene');
@@ -1263,7 +1282,8 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 那人开场以后进过场、走开过，或者开场那场戏过去了他一直在场，他"开场在哪"就不再给
     if (setup?.开场状态?.length) {
         const gone = who => {
-            const bp = board?.people?.find(p => sameName(p.name, who, rosterNames));
+            const bp = boardPerson(who);
+            if (!bp && resolveIdentity(activeRoster, who).status === 'ambiguous') return true;
             if (!bp) return lastPos >= OPEN_SCENE;
             if (bp.status === 'away') return !bp.plan?.seed;
             if (bp.status === 'present' || bp.status === 'remote') return (bp.since ?? 0) > 1 || lastPos >= OPEN_SCENE;
@@ -1369,8 +1389,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
 
     // 有卡的人谁能来、什么时候来：不再由这一格挑（D-175）——门的名单（door.mjs）列人选，旁白看时机留记号，玩家点了才进场。
     // 这里只认"不在场的有卡的人"：他牵头的口袋、来联系挑中的他，镜头都不替他演
-    const cardOf = who => roster.find(e => hasCard(e) && e.name !== CAMERA_NAME && sameName(e.name, who, rosterNames)) ?? null;
-    const boardPerson = who => board?.people?.find(p => sameName(p.name, who, rosterNames)) ?? null;
+    const cardOf = who => (e => e && hasCard(e) && e.name !== CAMERA_NAME ? e : null)(scenePerson(who));
     const absentCard = who => {
         if (!cardOf(who)) return false;
         const bp = boardPerson(who);
@@ -1452,9 +1471,9 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 余波（方案"场记的分量与连续性"D 层）：他心里还没过去的那股劲，紧挨此刻的样子之前；和刚递到手上的同一档，不让位
     if (!camera && mood?.carry !== false) add(0, afterLines(fed, { name, dayOf: seenDayOf, today: seenToday, lastPos, timeScale: ts, tag: n => tagDay(n) }), 'now', 'person');
     // 此刻的样子（用户 9/30）：聊天里写到过的穿着、位置、天气……只给在场的人（开口的人、玩家）；每轮都带，没写到就没有
-    add(0, stateBlock(store, { chatKey, name, present, userName, rosterNames, rel, dayOf: seenDayOf, today: seenToday, records, anchor, keepNote: guard.keepNote }), 'now', 'moment');
+    add(0, stateBlock(store, { chatKey, name, present, userName, rosterNames, rel, dayOf: seenDayOf, today: seenToday, records, anchor, scene, keepNote: guard.keepNote }), 'now', 'moment');
     // 此刻能做的（场记章程第二节第 5 条、B3）：隔着电话／消息、刚到、就在这儿，各几样可以做的，由他挑——不写该做什么、不写对方会怎样。只给有卡的人，旁白不给
-    if (!camera && stance) {
+    if (!camera && stance && stance.status !== 'absent') {
         const same = (a, b) => sameName(a, b, rosterNames) || (!!rel && !!personOf(rel, a, rosterNames) && personOf(rel, a, rosterNames) === personOf(rel, b, rosterNames));
         const hand = handOf(visible, { name, same });
         add(0, optionsFor({ ...stance, intent: hand.intent, matters: hand.matters, userName: userName ?? '对方', name }), 'now', 'person');
@@ -1518,7 +1537,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         partAt: (parts => pos => parts.get(pos) ?? null)(new Map(timelineFor(store, records, chatKey, messages).rows.map(r => [r.pos, r.part]))),
         awaySince: pos => absences.some(a => a.days > 0 && a.from_pos != null && a.from_pos >= pos),
         ...(({ names, same }) => ({ named: names, same }))(nameFinder(rel, rosterNames)),
-        carded: who => absentCard(who), board, anchorAt: anchor ? (uptoAnchor(messages, anchor).at(-1)?.pos ?? null) : null,
+        carded: who => absentCard(who), board, speakerRow: scene.row, anchorAt: anchor ? (uptoAnchor(messages, anchor).at(-1)?.pos ?? null) : null,
         // 交给他的那几步挂在被回的那条上、等他这条回复（方案 删消息等于没发生过）：他这条删了、换了别人开口，那一步就撤
         anchorMsg: (anchor ? uptoAnchor(messages, anchor) : messages).at(-1) ?? null,
         upto: anchor ? uptoAnchor(messages, anchor) : messages,
@@ -2315,7 +2334,7 @@ export function uptoAnchor(messages, anchor) {
 }
 
 // keepNote：她的身体那一笔给不给（bodyGuardFor）
-export function stateBlock(store, { chatKey, name, present = [], userName = null, rosterNames = null, rel = undefined, dayOf = null, today = null, records = null, anchor = null, keepNote = null }) {
+export function stateBlock(store, { chatKey, name, present = [], userName = null, rosterNames = null, rel = undefined, dayOf = null, today = null, records = null, anchor = null, scene = null, keepNote = null }) {
     if (!store.stateNotesOf) return [];
     const storyId = store.requireChat(chatKey).story_id;
     const names = rosterNames ?? (store.getCast?.(storyId) ?? []).map(e => e.name);
@@ -2342,11 +2361,12 @@ export function stateBlock(store, { chatKey, name, present = [], userName = null
     const lastPos = upto ?? (cut ?? store.currentMessages(chatKey)).at(-1)?.pos ?? null;
     let moved = null, remote = [];
     try {
-        const b = boardFor(store, records, chatKey, { anchor, present });
+        const b = scene?.board ?? boardFor(store, records, chatKey, { anchor, present });
         const cam = b.camera;
         if (cam?.place && cam.from !== 'state') moved = { place: cam.place, pos: cam.since };
         // 发消息、打电话来的人：他那头的样子和这儿分开给（用户 10/8）
-        remote = (b.people ?? []).filter(p => p.status === 'remote').map(p => ({ name: p.name, way: p.way ?? '' }));
+        remote = (scene?.people ?? b.people ?? []).filter(p => p.status === 'remote' && (!scene?.person || p.name !== name || sameIdentity(p, scene.person))).map(p => ({ name: p.name, way: p.way ?? '' }));
+        if (scene && name !== user && !['present', 'arrived'].includes(scene.stance.status) && !remote.some(p => p.name === name)) remote.push({ name, way: '' });
     } catch {}
     return stateLines(foldState(notes, same, { lastPos }), { people: [name, ...present, user].filter(Boolean), same, dayOf: day, today: now, clock, moved, remote, name });
 }
@@ -2419,11 +2439,13 @@ function swapState(text, lines) {
 }
 function refreshPinned(store, records, { chatKey, speaker, speakerName, present, anchor = null }, text, parts, { fresh = null, pace = null } = {}) {
     const name = speakerName || speaker;
+    const messages = uptoAnchor(store.currentMessages(chatKey), anchor);
+    const userName = [...messages].reverse().find(m => m.is_user)?.name ?? (speaker === CAMERA ? present?.[0] : null);
+    const eyes = speaker === CAMERA ? userName ?? '玩家' : name;
     let lines = [], vary = null;
-    try { lines = stateBlock(store, { chatKey, name, present, records, anchor, keepNote: bodyGuardFor(store, records, chatKey, { anchor, knower: speaker === CAMERA ? null : name }).keepNote }); } catch { return { text, parts }; }
+    try { lines = stateBlock(store, { chatKey, name: eyes, userName, present, records, anchor, scene: slotScene(store, records, { chatKey, speaker, speakerName: eyes, present, anchor, timeline: {} }), keepNote: bodyGuardFor(store, records, chatKey, { anchor, knower: speaker === CAMERA ? userName : name, userName, speaker, camera: speaker === CAMERA }).keepNote }); } catch { return { text, parts }; }
     try {
-        const messages = uptoAnchor(store.currentMessages(chatKey), anchor);
-        vary = varyFor(store, { chatKey, speaker, name, userName: [...messages].reverse().find(m => m.is_user)?.name ?? null, messages, fresh, pace });
+        vary = varyFor(store, { chatKey, speaker, name, userName, messages, fresh, pace });
     } catch {}
     const hasOld = String(text ?? '').split('\n').some(l => STATE_HEAD.test(l) || VARY.test(l));
     if (!lines.length && !vary && !hasOld) return { text, parts };
@@ -2822,7 +2844,7 @@ const focusNodeFor = (store, chatKey) => {
     const last = playModeOf(store, chatKey) === 'full' ? store.lastReadyPlan?.(chatKey) : null;
     return effectivePlanNode(store, chatKey, last);
 };
-function menuFor(store, chatKey, { records = null, isCarded = () => false, scene = '', partAt = () => null, awaySince = () => false, speaker, present, recentUser, userName, today, dayOf = null, firm = null, at = 0, passive = false, record, carry = null, followers = () => [], giver = () => null, face = () => false, faceCard = () => false, player = [], hold = null, keep = () => false, stranger = () => null, named = () => [], same = () => false, camera = false, carded = () => false, arrive = null, board = null, wentOff = null, anchorAt = null, anchorMsg = null, upto = null, given = null, hide = () => false }) {
+function menuFor(store, chatKey, { records = null, isCarded = () => false, scene = '', partAt = () => null, awaySince = () => false, speaker, present, recentUser, userName, today, dayOf = null, firm = null, at = 0, passive = false, record, carry = null, followers = () => [], giver = () => null, face = () => false, faceCard = () => false, player = [], hold = null, keep = () => false, stranger = () => null, named = () => [], same = () => false, camera = false, carded = () => false, arrive = null, board = null, speakerRow = null, wentOff = null, anchorAt = null, anchorMsg = null, upto = null, given = null, hide = () => false }) {
     // 在同一条上换了个人开口：前一个人那一步（他那条回复删了）不算，那件回到之前那一步（store.menuOf）
     const allowed = intimateAllowed(store, records, chatKey, { present });
     const allMenu = menuDays(store, store.menuOf(chatKey, { speaker }), dayOf);
@@ -2865,7 +2887,7 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     // 递出去就先锁给他；他走了、或者隔了 HOLD_SPAN 条他都没再开口，才放给别人。
     // 冲着某个在场的人来的（路人冲谁嚷嚷）：先等那个人开口；等了 AIM_WAIT 条还没轮到，才给别人，并写明只写自己看见听见的。
     const holder = m => (m.held_by && present.some(n => sameAs(n, m.held_by)) && at - (m.held_pos ?? -Infinity) < HOLD_SPAN ? m.held_by : null);
-    const remoteSpeaker = board?.people?.some(p => sameAs(p.name, speaker) && p.status === 'remote');
+    const remoteSpeaker = speakerRow?.status === 'remote';
     const mine = m => remoteSpeaker ? m.who === speaker : (m.who === speaker || ((isPlayer(m.who) || !present.includes(m.who)) && (h => !h || sameAs(h, speaker))(holder(m))));
     const forOthers = m => {
         if (m.who === speaker) return null;
@@ -3667,7 +3689,10 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
         const plan = store.lastReadyPlan?.(chatKey);
         const mindVersion = plan ? ':mind:' + createHash('sha1').update(nodeProjection(effectivePlanNode(store, chatKey, plan))).digest('hex').slice(0, 16) : '';
         const instance = uptoAnchor(store.currentMessages(chatKey), anchor).at(-1)?.sent_at;
-        return (instance ? ':instance:' + createHash('sha1').update(String(instance)).digest('hex').slice(0, 16) : '') + intimateSlotVersion(store, chatKey, (v => v ? ':time:' + v : '')(timeStateFor(store, records, chatKey, uptoAnchor(store.currentMessages(chatKey), anchor)).version)) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion + causalVersion + mindVersion + conditionVersion + checkVersion + (repair ? `:swipe:${repair}` : '') + (correction ? `:fix:${correction}` : '');
+        // 版本只读参与投影；时段仍由已有 timeState 版本覆盖，不再为缓存核验重复折时间线。
+        const scene = slotScene(store, records, { chatKey, speaker, speakerName, present, anchor, recentUser, timeline: {} });
+        const sceneVersion = ':scene-v2:' + createHash('sha1').update(JSON.stringify([scene.person, scene.people.map(p => [p.avatar, p.status, p.way, p.since]), scene.arr])).digest('hex').slice(0, 16);
+        return sceneVersion + (instance ? ':instance:' + createHash('sha1').update(String(instance)).digest('hex').slice(0, 16) : '') + intimateSlotVersion(store, chatKey, (v => v ? ':time:' + v : '')(timeStateFor(store, records, chatKey, uptoAnchor(store.currentMessages(chatKey), anchor)).version)) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion + causalVersion + mindVersion + conditionVersion + checkVersion + (repair ? `:swipe:${repair}` : '') + (correction ? `:fix:${correction}` : '');
     };
     const version = versionNow();
     const pinned = store.getSlot({ chatKey, speaker, anchor, ver: version });

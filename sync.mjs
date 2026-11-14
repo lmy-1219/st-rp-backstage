@@ -114,7 +114,7 @@ export function fingerprintMessage(message, speaker) {
 }
 
 // 当前聊天 → 序列（每条的指纹）＋ 按指纹找正文的表。
-export function buildSequence(chat, fallbackAvatar = null, generating = null) {
+export function buildSequence(chat, fallbackAvatar = null, generating = null, roster = []) {
     const seq = [];
     const bodies = new Map();
     let pending = false;
@@ -152,7 +152,7 @@ export function buildSequence(chat, fallbackAvatar = null, generating = null) {
         const v = message.extra?.rp_vis && typeof message.extra.rp_vis === 'object' ? message.extra.rp_vis : null;
         if (!bodies.has(f)) bodies.set(f, { f, u: !!message.is_user, s: speaker, n: message.name ?? null, t: String(message.mes ?? ''), ...(l.length ? { l } : {}), ...(v ? { v } : {}) });
     }
-    return { seq, bodies, pending };
+    return { seq, bodies, pending, doorHandoffs: doorHandoffs(chat.slice(0, end), fallbackAvatar, roster) };
 }
 
 // 按大致字节数分批上传，避免单次请求太大。
@@ -279,6 +279,40 @@ export function doorMark(text) {
     if (!all.length) return { who: null, way: null, text: s };
     const hit = all.at(-1);
     return { who: hit[1].trim(), way: hit[2] ?? null, text: s.replace(DOOR_MARK, (mark, who) => valid(who) ? '' : mark).replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trimEnd() };
+}
+
+// 记号剥去后按稿本保留交接；正文指纹不能分辨“相同正文、无记号”的另一稿。
+export function captureDoorHandoff(message, speaker, event = 'read') {
+    if (!message || message.is_user || speaker !== 'narrator') return false;
+    const mark = doorMark(message.mes), swipe = message.swipe_id ?? 0;
+    const extra = message.extra ??= {}, drafts = extra.rp_door ??= {};
+    if (mark.who) {
+        message.mes = mark.text;
+        if (Array.isArray(message.swipes)) message.swipes[swipe] = mark.text;
+        extra.rp_door_version = (extra.rp_door_version ?? 0) + 1;
+        drafts[swipe] = { who: mark.who, way: mark.way ?? '', fp: fingerprintMessage(message, speaker), revision: `${swipe}:${extra.rp_door_version}` };
+        return true;
+    }
+    const old = drafts[swipe];
+    if (old && (event === 'edit' || old.fp !== fingerprintMessage(message, speaker))) {
+        delete drafts[swipe];
+        return true;
+    }
+    return false;
+}
+
+export function doorHandoffs(chat, fallbackAvatar = null, roster = []) {
+    const start = Math.max(0, chat.length - 5); // 现有亮门只在四条内有效；旧稿依据仍保存在原消息上
+    return chat.slice(start).flatMap((message, index) => {
+        const pos = start + index;
+        const speaker = speakerOf(message, fallbackAvatar);
+        if (message.is_user || message.is_system || speaker !== 'narrator') return [];
+        const fp = fingerprintMessage(message, speaker), swipe = message.swipe_id ?? 0;
+        const draft = message.extra?.rp_door?.[swipe];
+        const live = draft?.fp === fp ? draft : null;
+        const person = live ? resolveIdentity(roster.filter(p => p.role !== '不用'), live.who).person : null;
+        return [{ pos, fp, revision: live?.revision ?? `${swipe}:none`, who: live?.who ?? null, way: live?.way ?? '', avatar: person?.avatar ?? null }];
+    });
 }
 
 // 谁看得见（和后台 core/visibility.mjs 一个判法）：发消息、打电话来的那条（extra.rp_vis.way 消息／电话）只有本人、玩家、旁白、发给的那人看得见；
