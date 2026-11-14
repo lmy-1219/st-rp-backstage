@@ -207,12 +207,13 @@ export function openSituation(db) {
     db.exec(SCHEMA);
     // lag：玩家交代跳过的一段里补跑的那几次（skip.mjs）挂在空白过后的那条上，推的却是空白里早几天——早几天记在这儿，按现在的天数重算时不挪错
     try { db.exec('alter table situation_ticks add column lag integer'); } catch {}
+    try { db.exec('alter table situation_ticks add column time_basis text'); } catch {}
     const q = sql => db.prepare(sql);
     const now = () => new Date().toISOString();
-    function putTick({ storyId, chatKey, day, anchor, raw, moves = [], spreads = [], outcomes = [], reviews = [], lag = 0 }) {
+    function putTick({ storyId, chatKey, day, anchor, raw, moves = [], spreads = [], outcomes = [], reviews = [], lag = 0, timeBasis = null }) {
         db.exec('begin');
         try {
-            const id = Number(q('insert into situation_ticks(story_id, chat_key, day, anchor_pos, anchor_fp, raw, created_at, lag) values (?, ?, ?, ?, ?, ?, ?, ?)').run(storyId, chatKey, day, anchor.pos, anchor.fp, raw ?? null, now(), Number(lag) || 0).lastInsertRowid);
+            const id = Number(q('insert into situation_ticks(story_id, chat_key, day, anchor_pos, anchor_fp, raw, created_at, lag, time_basis) values (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(storyId, chatKey, day, anchor.pos, anchor.fp, raw ?? null, now(), Number(lag) || 0, timeBasis ? JSON.stringify(timeBasis) : null).lastInsertRowid);
             for (const m of moves) q('insert into situation_moves(tick_id, who, what, seen, why) values (?, ?, ?, ?, ?)').run(id, m.who, m.what, m.seen || null, JSON.stringify(m.why));
             for (const r of reviews) q('insert into situation_move_reviews(tick_id, move_id, verdict, what, seen) values (?, ?, ?, ?, ?)').run(id, r.move, r.verdict, r.what ?? null, r.seen || null);
             for (const s of spreads) q('insert into situation_spreads(tick_id, source, target, channel, due, heard) values (?, ?, ?, ?, ?, ?)').run(id, s.source, s.target, s.channel, s.due, s.heard);
@@ -273,9 +274,15 @@ export function moveLive(move, { records = [], messages = [], arrivals = [], anc
 // dayOf：按现在的天数重算——推演记的是当时算出来的第几天；天数算法改正过以后（D-171，试玩 10/6），"第 3 天到"整个挪到了还没到的日子。
 // 传开、动向的日子改按"推演那条消息现在是第几天＋当时说的隔几天"算。
 // live：给了就按 moveLive 筛动向（{ records, messages, arrivals, anchors, principal, ... }）；没给只去掉回头看答了"停了"的。
-export function situationNow(sit, { storyId, messages, visibleIds, dayOf = null, live = null }) {
+export function situationNow(sit, { storyId, messages, visibleIds, dayOf = null, live = null, proofLive = null }) {
     const fps = new Set(messages.map(m => m.fp));
-    const ticks = sit.ticksFor(storyId, fps).filter(t => !t.anchor_fp || !dayOf || !Number.isFinite(t.day) || dayOf(t.anchor_pos + 0.5) - (Number(t.lag) || 0) >= t.day);
+    const ticks = sit.ticksFor(storyId, fps).filter(t => {
+        if (!t.time_basis) return true;
+        let proof;
+        try { proof = JSON.parse(t.time_basis); } catch { return false; }
+        return !!proof.sentAt && messages.some(m => m.pos === proof.pos && m.fp === proof.fp && m.sent_at === proof.sentAt)
+            && (!proofLive || proofLive(proof));
+    }).filter(t => !t.anchor_fp || !dayOf || !Number.isFinite(t.day) || dayOf(t.anchor_pos + 0.5) - (Number(t.lag) || 0) === t.day);
     const ids = ticks.map(t => t.id);
     const tickOf = new Map(ticks.map(t => [t.id, t]));
     const base = x => { const t = tickOf.get(x.tick_id); return dayOf && t && Number.isFinite(t.day) ? dayOf(t.anchor_pos + 0.5) - (Number(t.lag) || 0) - t.day : 0; };
@@ -309,12 +316,12 @@ function movesWithReviews(sit, ids, tickOf, base) {
 
 // 到日子的传开：替他记一条"听说"（只他知道），挂在眼下最后一条消息上。addRecord 由调用方给（records.addDerived）。
 // 传到主角的是"这边收到的消息"：记成一条"消息"（只主角知道），这一格里给在场的人一行，由他挑时候拿出来。
-export function deliverDue(sit, now, { today, anchor, storyId, addRecord, principal = null, withBasis = false }) {
+export function deliverDue(sit, now, { today, anchor, timeBasis = null, storyId, addRecord, principal = null, withBasis = false }) {
     const out = [];
     for (const s of now.pending.filter(x => x.due <= today)) {
         const notice = !!principal && s.target === principal;
         const tick = withBasis ? now.ticks?.find(t => t.id === s.tick_id) : null;
-        const id = addRecord({ storyId, fp: anchor.fp, ...(notice ? { matter: { kind: '消息', title: s.channel ?? '' } } : {}), type: notice ? '消息' : '听说', text: notice ? `${s.target}这边收到：${s.heard}（${s.channel}）` : `${s.target}听说：${s.heard}（${s.channel}）`, holder: s.target, holderName: s.target, audience: [s.target], about: s.target, quotes: [], keys: [], ...(tick ? { known: [{ basis: { pos: tick.anchor_pos, fp: tick.anchor_fp, day: tick.day + (Number(tick.lag) || 0), exact: true } }, { basis: { pos: anchor.pos, fp: anchor.fp, day: today } }] } : {}) });
+        const id = addRecord({ storyId, fp: anchor.fp, ...(notice ? { matter: { kind: '消息', title: s.channel ?? '' } } : {}), type: notice ? '消息' : '听说', text: notice ? `${s.target}这边收到：${s.heard}（${s.channel}）` : `${s.target}听说：${s.heard}（${s.channel}）`, holder: s.target, holderName: s.target, audience: [s.target], about: s.target, quotes: [], keys: [], ...(tick ? { known: [{ basis: { pos: tick.anchor_pos, fp: tick.anchor_fp, day: tick.day + (Number(tick.lag) || 0), exact: true, timeBasis: tick.time_basis ? JSON.parse(tick.time_basis) : {} } }, { basis: { pos: anchor.pos, fp: anchor.fp, day: today, exact: true, timeBasis: timeBasis ?? {} } }] } : {}) });
         sit.setDelivered(s.id, id);
         out.push({ ...s, record_id: id, notice });
     }
@@ -361,7 +368,7 @@ export function situationSlotLines(now, { name, today, records, dayOf, notices =
 }
 
 // 回响只是候选信号，复用推演关联 meta；不写正文记录或菜单。
-export function saveEchoes(store, records, chatKey, echoes, { anchor, day, tickId = null }) {
+export function saveEchoes(store, records, chatKey, echoes, { anchor, day, timeBasis = null, tickId = null }) {
     if (!echoes?.length) return;
     const key = `situation_echoes:${chatKey}`;
     let old;
@@ -370,7 +377,7 @@ export function saveEchoes(store, records, chatKey, echoes, { anchor, day, tickI
     const visible = records.visible(chatKey);
     const fresh = echoes.flatMap((e, i) => {
         const sources = e.sourceIds.map(id => visible.find(r => r.id === id));
-        return sources.every(Boolean) ? [{ ...e, id: `${tickId ?? anchor.fp}:${i}`, anchor, due: day + e.afterDays,
+        return sources.every(Boolean) ? [{ ...e, id: `${tickId ?? anchor.fp}:${i}`, anchor, timeBasis, due: day + e.afterDays,
             sources: sources.map(r => ({ id: r.id, text: r.raw_text ?? r.text, fp: r.fp, pos: r.pos })) }] : [];
     });
     store.setMeta(key, JSON.stringify([...old, ...fresh.filter(e => !old.some(x => x.id === e.id))]));
@@ -383,6 +390,7 @@ export function dueEchoes(store, records, chatKey, today) {
     let evaluated = [];
     try { evaluated = JSON.parse(store.getMeta?.(`plan_eval:${chatKey}`) ?? '{}').echoesDone ?? []; } catch {}
     return rows.filter(e => e.due <= today && messages.some(m => m.pos === e.anchor?.pos && m.fp === e.anchor?.fp)
+        && e.timeBasis && store.sourceLive?.(chatKey, { ...e.anchor, timeBasis: e.timeBasis })
         && Array.isArray(e.sources) && e.sources.length && e.sources.every(s => visible.some(r => r.id === s.id && r.fp === s.fp && (r.raw_text ?? r.text) === s.text))
         && !evaluated.some(x => x.key === JSON.stringify(e) && messages.some(m => m.pos === x.at?.pos && m.fp === x.at?.fp)));
 }

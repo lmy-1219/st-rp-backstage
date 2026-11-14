@@ -227,6 +227,13 @@ export function openStore(file) {
         const before = parts.indexOf(basisPart), now = parts.indexOf(point?.part);
         return before >= 0 && Number.isFinite(point?.day) && (point.day > basisDay || (point.day === basisDay && now >= before && now >= 0));
     };
+    const timeProofLive = (chatKey, proof) => {
+        if (!proof?.sentAt || !currentMessages(chatKey).some(m => m.pos === proof.pos && m.fp === proof.fp
+            && m.sent_at === proof.sentAt)) return false;
+        if (!confirmedPointOf) return true;
+        const point = confirmedPointOf(chatKey, proof.pos);
+        return point?.day === proof.day && point?.version === proof.version;
+    };
     db.exec('pragma journal_mode = wal; pragma foreign_keys = on; pragma busy_timeout = 3000;');
     db.exec(SCHEMA);
     for (const column of ['partial text', 'continuation text', 'partial_kind text', 'repairable integer not null default 0', 'repair_error text', 'repaired integer not null default 0', 'source text']) {
@@ -511,12 +518,12 @@ export function openStore(file) {
             for (let k = 0; k < Math.min(oldRows.length, seq.length); k++) if (!swipeAt(k) && oldRows[k].fp !== seq[k].f && sameMessage(seq[k].f, oldRows[k].fp)) renamed.push([oldRows[k].fp, seq[k].f]);
             if (renamed.length) {
                 const rows = q('select key, value from meta where key in (?, ?, ?) or key like ? or key like ?').all(`arrived:${chatKey}`, `arrivals:${chatKey}`, `away_plan:${chatKey}`, `settled_contact:${chatKey}:%`, `settled:${chatKey}:%`);
-                const relink = (value, source = false) => typeof value === 'string' ? source ? value : renamed.reduce((s, [a, b]) => s.split(a).join(b), value)
-                    : Array.isArray(value) ? value.map(v => relink(v, source)) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, relink(v, source || k === 'sourceStep')])) : value;
+                const relink = (value, source = false, keepStep = false) => typeof value === 'string' ? source ? value : renamed.reduce((s, [a, b]) => s.split(a).join(b), value)
+                    : Array.isArray(value) ? value.map(v => relink(v, source, keepStep)) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, relink(v, source || k === 'timeBasis' || (keepStep && k === 'sourceStep'), keepStep)])) : value;
                 for (const { key, value } of rows) {
                     let v = String(value ?? '');
-                    if (/^(arrived|arrivals):/.test(key)) { try { v = JSON.stringify(relink(JSON.parse(v))); } catch {} }
-                    else for (const [a, b] of renamed) v = v.split(a).join(b);
+                    if (/^(arrived|arrivals):/.test(key)) { try { v = JSON.stringify(relink(JSON.parse(v), false, true)); } catch {} }
+                    else { try { v = JSON.stringify(relink(JSON.parse(v))); } catch {} }
                     if (v !== value) setMeta(key, v);
                 }
             }
@@ -895,7 +902,7 @@ export function openStore(file) {
         }
         const match = /^(settled|settled_contact|crew_pushed):([^:]+):/.exec(key);
         if (!match || !value) return value;
-        try { const v = JSON.parse(value); return v && !basisLive(match[2], v.pos ?? v.at, v.basisDay) ? null : value; } catch { return value; }
+        try { const v = JSON.parse(value); return v && ((!basisLive(match[2], v.pos ?? v.at, v.basisDay)) || (v.timeBasis && !timeProofLive(match[2], v.timeBasis))) ? null : value; } catch { return value; }
     }
     function setMeta(key, value) {
         // 比较原始落库值（含 null），不能用会过滤失效来源的 getMeta 判断是否相同。
@@ -998,6 +1005,7 @@ export function openStore(file) {
         if (!history.sees(chatKey, source.pos, source.fp) || !dayLive(source.pos, source.day, source.part)) return false;
         const current = currentFps[source.pos];
         if (source.exact && current !== source.fp) return false;
+        if (source.timeBasis && !timeProofLive(chatKey, source.timeBasis)) return false;
         if (source.menuStatus) return q(`select chat_key, pos, fp, story_day, basis_part from menu_log where chat_key in (${history.keys.map(() => '?').join(',')}) and item_id = ? and status = ? and pos = ?`).all(...history.keys, source.menu, source.menuStatus, source.pos)
             .some(row => history.sees(row.chat_key, row.pos, row.fp) && sameMessage(current, row.fp) && dayLive(source.pos, row.story_day, row.basis_part));
         return true;
@@ -1394,7 +1402,7 @@ export function openStore(file) {
         const strict = a => a && Number.isInteger(a.pos) && (a.pos === -1 ? a.fp == null : !!a.fp && messages.some(m => m.pos === a.pos && m.fp === a.fp));
         const logs = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids);
         const proofs = new Map(logs.map(s => [s.id, fromJson(getMeta(`menu_proof:${s.id}`))]));
-        const baseLive = s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && basisLive(chatKey, s.pos, s.story_day, s.basis_part) && replied(s);
+        const baseLive = s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && (proofs.get(s.id)?.timeBasis ? timeProofLive(chatKey, proofs.get(s.id).timeBasis) : basisLive(chatKey, s.pos, s.story_day, s.basis_part)) && replied(s);
         const conditionLive = (s, p) => {
             const item = items.find(m => m.id === s.item_id), source = item?.sourceAt;
             return p?.condition === true && s.status === 'shown' && strict(p.evidence) && p.evidence.pos >= 0
@@ -1404,7 +1412,7 @@ export function openStore(file) {
         const steps = logs.filter(s => {
             if (!baseLive(s)) return false;
             const proof = proofs.get(s.id);
-            if (!proof) return true;
+            if (!proof || (!proof.condition && !proof.conditionStep)) return true;
             if (proof.condition) return conditionLive(s, proof);
             const parent = logs.find(p => p.id === proof.conditionStep && p.item_id === s.item_id && p.id < s.id);
             return !!parent && baseLive(parent) && conditionLive(parent, proofs.get(parent.id));
@@ -1493,6 +1501,7 @@ export function openStore(file) {
                 .run(chatKey, id, patch.status, patch.pocket_day ?? patch.basisDay ?? null, patch.basisPart ?? null, at.pos, at.fp, patch.by ?? null, patch.pending && patch.by ? 1 : 0, patch.why ? String(patch.why).slice(0, 200) : null, now(), Number.isSafeInteger(patch.byPlan) && patch.byPlan > 0 ? patch.byPlan : null).lastInsertRowid;
             if (patch.conditionProof) setMeta(`menu_proof:${stepId}`, JSON.stringify(patch.conditionProof));
             else if (patch.conditionStep) setMeta(`menu_proof:${stepId}`, JSON.stringify({ conditionStep: patch.conditionStep }));
+            if (patch.timeBasis) { const prior = fromJson(getMeta(`menu_proof:${stepId}`)) ?? {}; setMeta(`menu_proof:${stepId}`, JSON.stringify({ ...prior, timeBasis: patch.timeBasis })); }
         };
         // 重排落账已经在事务里；沿用它，避免另开嵌套事务。
         if (db.isTransaction) write(); else tx(write);

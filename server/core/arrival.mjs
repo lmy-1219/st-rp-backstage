@@ -278,5 +278,5 @@ export function validAwayPlan(plan, messages, sourceLive = null) {
     if (plan?.dropped && arrivalLive(plan.dropped, [...messages].sort((a, b) => a.pos - b.pos))) return null;
     if (!plan?.errands) return plan;
     return { ...plan, errands: plan.errands.map(e => e?.settled && (!messages.some(m => m.pos === e.settled.pos && m.fp === e.settled.fp)
-        || (Number.isFinite(e.settled.day) && sourceLive?.(e.settled) === false)) ? (e.text ?? { ...e, done: undefined, note: undefined, settled: undefined }) : e) };
+        || sourceLive?.(e.settled) === false) ? (e.text ?? { ...e, done: undefined, note: undefined, settled: undefined }) : e) };
 }

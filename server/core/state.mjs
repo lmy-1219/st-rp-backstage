@@ -12,6 +12,7 @@ export const ASPECTS = ['穿着', '位置', '带着', '身体', '天气', '周�
 const SCENE_ASPECTS = new Set(['天气', '周围', '地方', '时段']);   // 场面上的：谁写"此地"
 export const HERE = '此地';
 const GONE = /^(没了|没有了|已经没了|无)$/;
+export const stateCleared = text => GONE.test(String(text ?? '').trim());
 
 export const STATE_SYSTEM = [
     '下面是一部长篇角色扮演里刚写下的几条消息（带编号），和到目前为止记下的"此刻的样子"。你只做一件事：记下正文里明确写到的、看得见的当前状态有没有变。',
@@ -136,7 +137,8 @@ export function foldState(notes, same0 = (a, b) => a === b, { lastPos = null } =
         if (!n) continue;
         const i = out.findIndex(o => o.aspect === n.aspect && same(o.who, n.who));
         if (i >= 0) out.splice(i, 1);
-        if (!GONE.test(n.text)) out.push(n);
+        if (!stateCleared(n.text)) out.push(n);
+        else if (n.aspect === '天气') out.push({ ...n, text: '', cleared: true });
     }
     const movedSince = n => out.some(o => o.aspect === '位置' && same(o.who, n.who) && o.pos > n.pos);
     return out.filter(n => !(n.aspect === '带着' && IN_HAND.test(n.text) && !CARRIED.test(n.text) && movedSince(n))
@@ -161,9 +163,9 @@ export function stateLines(board, { people = [], same = (a, b) => a === b, dayOf
     if (!shown.length && !clock?.now && !clock?.weather) return [];
     const lines = [];
     if (clock?.now) lines.push(`· 现在：${clock.now}`);
-    const weather = shown.find(n => n.aspect === '天气');
-    if (weather) lines.push(age(weather) ? `· 前一天：${weather.text}（可能还留着影响）` : `· 天气：${weather.text}`);
-    if ((!weather || age(weather)) && clock?.weather) lines.push(`· 今天的天气：${clock.weather}（正文里写了别的，以正文为准）`);
+    const weather = shown.find(n => n.aspect === '天气') ?? board.find(n => n.aspect === '天气' && n.cleared);
+    if (weather && !weather.cleared) lines.push(age(weather) ? `· 前一天：${weather.text}（可能还留着影响）` : `· 天气：${weather.text}`);
+    if ((!weather || (!weather.cleared && age(weather))) && clock?.weather) lines.push(`· 今天的天气：${clock.weather}（正文里写了别的，以正文为准）`);
     const noted = shown.find(n => n.aspect === '地方');
     const place = selfAway ? null : moved?.place && (!noted || (moved.pos ?? -1) > (noted.pos ?? -1)) ? { text: moved.place, pos: moved.pos } : noted;
     if (place) lines.push(`· 地方：${place.text}${age(place) ? '（前一天写到的）' : ''}`);

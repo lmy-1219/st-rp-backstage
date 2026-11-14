@@ -137,6 +137,7 @@ function cardHash(text) {
     return `${s.length}:${(h >>> 0).toString(36)}`;
 }
 
+const API_TIMEOUT = 30000;
 async function api(route, body, timeout = 30000, { background = false } = {}) {
     const t0 = performance.now();
     let ok = false;
@@ -1820,7 +1821,7 @@ async function syncOnce(force = false, light = false) {
             if (changed || stale) {
                 state.fanAt = Date.now();
                 await refreshDoor();
-                refreshDays();
+                void refreshDays();
                 refreshLore();
                 refreshPlan();
             }
@@ -4702,12 +4703,29 @@ document.addEventListener('click', event => {
     event.stopPropagation();
     undoFresh(id).catch(() => {});
 }, true);
+let timeWatch = null;
+function watchTime(chatKey, epoch, version, status) {
+    if (timeWatch?.chatKey === chatKey && timeWatch?.epoch === epoch) return;
+    const watch = { chatKey, epoch }; timeWatch = watch;
+    const current = () => timeWatch === watch && state.chatKey === chatKey && state.epoch === epoch && settings().enabled;
+    void (async () => {
+        try {
+            while (current()) {
+                const next = await api('time-watch', { chatKey, version, status, budgetMs: API_TIMEOUT }, undefined, { background: true });
+                if (!current()) return;
+                if (version !== next.version || status !== next.status) { version = next.version; status = next.status; await refreshDays(); }
+            }
+        } catch (error) { if (current()) state.note = failureView(error, '时间确认通知').text; }
+        finally { if (timeWatch === watch) timeWatch = null; }
+    })();
+}
 async function refreshDays() {
     if (!settings().enabled || !state.chatKey) { dayLabels = []; boardLabels = []; drawDays(); drawBoards(); return; }
     const chatKey = state.chatKey, epoch = state.epoch;
     const here = () => chatKey === state.chatKey && epoch === state.epoch;
+    let timeRead = false;
     // 日历失败也继续读场面；展示不等待名册，更不等待认卡弹窗。
-    try { const r = await api('timeline', { chatKey }); if (here()) { dayLabels = r.labels ?? []; daySince = r.since ?? ''; dayScale = r.scale ?? null; drawDays(); } } catch(error) { if(here())state.note=failureView(error,'日期读取').text; }
+    try { const r = await api('timeline', { chatKey }); if (here()) { timeRead = true; dayLabels = r.labels ?? []; daySince = r.since ?? ''; dayScale = r.scale ?? null; drawDays(); if (r.time) watchTime(chatKey, epoch, r.time.version, r.time.status); } } catch(error) { if(here())state.note=failureView(error,'日期读取').text; }
     if(!here())return;
     setStage(state, 'boards', '进行中');render();
     try {
@@ -4723,6 +4741,7 @@ async function refreshDays() {
     drawDays();drawBoards();render();
     try { const r = await api('cast', { chatKey }); if(here()) { state.boardCast=r.cast??[];drawBoards();render(); } }
     catch(error) { if(here())state.note=failureView(error,'名册读取').text; }
+    return timeRead && here();
 }
 
 function drawDays() {
@@ -5016,11 +5035,67 @@ document.addEventListener('click', event => {
 const DAY_PARTS = ['早上', '上午', '中午', '下午', '傍晚', '晚上', '深夜', '凌晨'];
 // 改这一条的剧情日期（10/3 用户：每条都显示、能手动改、改了同步到后台）：天（从这条起算新的一天／这里没有跨天／这条是第几天）和时段分开选，
 // 存在这条消息的 extra.rp_day 里（"天@时段"，比如 "d:5@下午"、"@晚上"），跟着聊天文件走，同步时交给后台，盖过系统自己认的。
+// 手标成功必须有 ST 文件和后台的同源回读；保存 Promise 返回本身不作证。
+async function saveDayMark({ c, m, id, mark, picked, chatKey, epoch, fingerprint }) {
+    const ids = chatIds(c), oldMark = m.extra?.rp_day;
+    let stage = '消息来源', persisted = false, applied = false;
+    const guard = () => {
+        const now = ctx();
+        if (state.chatKey !== chatKey || state.epoch !== epoch || now.chat !== c.chat || now.chat?.[id] !== m
+            || JSON.stringify(chatIds(now)) !== JSON.stringify(ids)
+            || fingerprintMessage(m, speakerOf(m, fallbackAvatar(c))) !== fingerprint
+            || (applied && String(m.extra?.rp_day ?? '') !== mark)) throw Error('聊天、楼号或正文已变化');
+    };
+    try {
+        guard();
+        stage = 'ST 保存';
+        m.extra = { ...(m.extra ?? {}) };
+        if (mark) m.extra.rp_day = mark; else delete m.extra.rp_day;
+        applied = true;
+        await c.saveChat(); guard();
+        stage = 'ST 持久化回读';
+        const group = currentGroup(c), avatar = fallbackAvatar(c);
+        const rows = group ? await stJson('/api/chats/group/get', { id: group.chat_id })
+            : await stJson('/api/chats/get', { avatar_url: avatar, file_name: ids.stChatId });
+        guard();
+        if (!Array.isArray(rows)) throw Error('聊天读取格式不正确');
+        const messages = rows[0] && !Object.hasOwn(rows[0], 'mes') ? rows.slice(1) : rows;
+        const disk = messages[id];
+        if (!disk || fingerprintMessage(disk, speakerOf(disk, avatar)) !== fingerprint || String(disk.extra?.rp_day ?? '') !== mark) throw Error('文件中未核到这条标记');
+        persisted = true;
+        stage = '后台同步';
+        if (await syncNow() !== true) throw Error('同步未明确成功');
+        guard();
+        stage = '后台同源回读';
+        const read = await api('timeline', { chatKey }); guard();
+        const row = read.rows?.find(r => r.pos === id && r.fp === fingerprint);
+        if (read.chatKey !== chatKey || !row || String(row.mark ?? '') !== mark) throw Error('后台未核到同一楼的精确标记');
+        stage = '结构化时间核验';
+        if (!Number.isInteger(row.day) || row.ordinal !== row.day + read.baseDay) throw Error('后台日值无效');
+        if (picked.day === 'd' && row.ordinal !== picked.n) throw Error('第几天与输入不一致');
+        if (picked.day === 'day' && row.day !== row.previousDay + 1) throw Error('新一天尚未生效');
+        if (picked.day === 'same' && row.day !== row.previousDay) throw Error('不跨天尚未生效');
+        if (picked.part && row.part !== picked.part) throw Error('时段与输入不一致');
+        stage = '标签刷新';
+        if (await refreshDays() !== true) throw Error('时间标签刷新未完成');
+        guard();
+        globalThis.toastr?.success(mark ? '改好了，从这条往后照它算。' : '这条跟着系统认的了。', 'RP：幕后');
+        return { ok: true };
+    } catch (error) {
+        if (!persisted && state.epoch === epoch && state.chatKey === chatKey && ctx().chat?.[id] === m && fingerprintMessage(m, speakerOf(m, fallbackAvatar(c))) === fingerprint && String(m.extra?.rp_day ?? '') === mark) {
+            if (oldMark == null) delete m.extra.rp_day; else m.extra.rp_day = oldMark;
+        }
+        globalThis.toastr?.error(`${stage}：${error.message}`, 'RP：幕后');
+        return { ok: false, stage };
+    }
+}
 async function pickDay(id) {
     const c = ctx();
     const m = c.chat?.[id];
     if (!m) return;
     if (!state.chatKey || !settings().enabled) { globalThis.toastr?.warning('这个窗口还没接入 RP：幕后。'); return; }
+    const chatKey = state.chatKey, epoch = state.epoch;
+    const fingerprint = fingerprintMessage(m, speakerOf(m, fallbackAvatar(c)));
     const l = dayLabels.find(x => x.pos === id);
     const [myDay = '', myPart = ''] = String(m.extra?.rp_day ?? '').split('@');
     const seen = l ? `系统现在认的：${escapeHtml(l.full ?? l.label)}${l.unsure ? `<br><small>拿不准：${escapeHtml(l.unsure)}</small>` : ''}` : '这条还没同步到后台。';
@@ -5035,6 +5110,7 @@ async function pickDay(id) {
           <b>这一${w}</b>
           ${radio('', '跟着系统认的')}${radio('day', `从这条起算新的一${w}`)}${radio('same', byDay ? '这里没有跨天' : `这里没有跨到下一${w}`)}
           <label style="display:block;margin:.2em 0"><input type="radio" name="rpe-day" value="d"${/^d:/.test(myDay) ? ' checked' : ''}> 这条是${escapeHtml(daySince)}第 <input type="number" min="1" max="9999" data-role="rpe-dayno" class="text_pole" style="width:5em;display:inline-block" value="${dayNo}"> ${ord}</label>
+          <small>跟着系统不指定天数；输入第几天会选中并采用这个数字。</small><br>
           <b>时段</b>
           <select data-role="rpe-part" class="text_pole" style="width:auto;display:inline-block;margin-left:.5em"><option value="">跟着系统认的</option>${parts.map(p => `<option${p === myPart ? ' selected' : ''}>${escapeHtml(p)}</option>`).join('')}</select>
         </div>
@@ -5042,24 +5118,20 @@ async function pickDay(id) {
     let picked = null;
     const ok = await c.callGenericPopup(html, c.POPUP_TYPE.CONFIRM, '', {
         okButton: '保存', cancelButton: '关闭',
+        onOpen: popup => { popup.dlg.querySelector('[data-role="rpe-dayno"]')?.addEventListener('input', () => { const radio = popup.dlg.querySelector('input[name="rpe-day"][value="d"]'); if (radio) radio.checked = true; }); },
         onClosing: popup => {
             const dlg = popup.dlg;
             const day = dlg.querySelector('input[name="rpe-day"]:checked')?.value ?? '';
-            const n = Number.parseInt(dlg.querySelector('[data-role="rpe-dayno"]')?.value ?? '', 10);
+            const n = Number(dlg.querySelector('[data-role="rpe-dayno"]')?.value ?? '');
             picked = { day, n, part: dlg.querySelector('[data-role="rpe-part"]')?.value ?? '' };
             return true;
         },
     });
-    if (!ok || !picked || ctx().chat?.[id] !== m) return;
-    if (picked.day === 'd' && !(picked.n >= 1 && picked.n <= 9999)) { globalThis.toastr?.warning(`填这条是第几${dayScale && dayScale.unit !== '天' ? dayScale.ord : '天'}。`); return; }
+    if (!ok || !picked) return;
+    if (picked.day === 'd' && !(Number.isInteger(picked.n) && picked.n >= 1 && picked.n <= 9999)) { globalThis.toastr?.error(`消息来源：填这条是第几${dayScale && dayScale.unit !== '天' ? dayScale.ord : '天'}。`); return; }
     const day = picked.day === 'd' ? `d:${picked.n}` : picked.day;
     const mark = `${day}${picked.part ? `@${picked.part}` : ''}`;
-    const extra = { ...(m.extra ?? {}) };
-    if (mark) extra.rp_day = mark; else delete extra.rp_day;
-    m.extra = extra;
-    await ctx().saveChat();
-    await syncNow();
-    globalThis.toastr?.success(mark ? '改好了，从这条往后照它算。' : '这条跟着系统认的了。', 'RP：幕后');
+    await saveDayMark({ c, m, id, mark, picked, chatKey, epoch, fingerprint });
 }
 document.addEventListener('click', event => {
     const el = event.target?.closest?.('.rpe_day, .rpe_daylabel');

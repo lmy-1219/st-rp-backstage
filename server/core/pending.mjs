@@ -254,7 +254,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     const rel = store.relationsOf?.(chat.story_id);
     const relation = rel ? normalizeRelations(rel) : null;
     const same = (a, b) => sameName(a, b, rosterNames) || (!!relation && !!personOf(relation, a, rosterNames) && personOf(relation, a, rosterNames) === personOf(relation, b, rosterNames));
-    awayPlans = Object.values(awayPlans).map(p => validAwayPlan(p, messages, source => store.basisLive?.(chatKey, source.pos, source.day) !== false)).filter(Boolean);
+    awayPlans = Object.values(awayPlans).map(p => validAwayPlan(p, messages, source => store.sourceLive?.(chatKey, source) !== false)).filter(Boolean);
     // 结算写下的"要来联系"：按名册认人——以前有用别名记下的（试玩 10/12：等着没人接那条路写成了短名，名册里是全名，
     // 认不出"他后来自己进了场""这条用掉了"，一条早该作废的消息每轮都挂着）；同一个人有几笔，留最新那笔
     const contacts = [];

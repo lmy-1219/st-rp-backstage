@@ -5,7 +5,7 @@ import http from 'node:http';
 import { requestTrace, withTrace, traceView, measure } from './request-timing.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
-import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, menuDays, scaleFor, renderEntry, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
+import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, timeStateFor, menuDays, scaleFor, renderEntry, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
 import { labelsOf, sinceWord, dateIn, dayNumber, timelineLabel } from './timeline.mjs';
 import { validMark, validSwipeEvidence, planFailure } from './store.mjs';
 import { digests } from './digest.mjs';
@@ -120,7 +120,9 @@ export function createRoutes(store, { worker = null, records = null, assembler =
     };
     const setupNames = storyId => [...store.getCast(storyId).filter(e => e.role !== '不用').map(e => e.name), ...(store.playerNames?.(storyId) ?? [])];
     const withPack = chatKey => { const base = settings?.() ?? {}; const p = base.packOf?.(chatKey) ?? null; return { ...base, economy: { table: p?.table ?? null }, world: { seeds: p?.seeds ?? null, anchors: p?.anchors ?? null, facts: p?.facts ?? null }, factions: { net: p?.factions ?? null } }; };
-    worker?.setOnCommitted?.(chatKey => advance(store, records, chatKey, withPack(chatKey)));
+    const timeListeners = new Map();
+    const timeChanged = chatKey => { for (const resolve of [...(timeListeners.get(chatKey) ?? [])]) resolve(); };
+    worker?.setOnCommitted?.(async chatKey => { timeChanged(chatKey); await advance(store, records, chatKey, withPack(chatKey)); });
     const draftRelations = (chat, cards) => {
         const service = settings().relationsDrafts;
         if (service) void service.start({ chatKey: chat.key, cards: Array.isArray(cards) ? cards : [] }).catch(() => {});
@@ -259,6 +261,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             if (result.committed) settings().drift?.run?.({ chatKey: b.chatKey })?.catch?.(() => {});
             // 自动进离场（方案 自动进离场与调度 1b）：候着的那条写出来了没有、每次叩门走到哪一步、谁走了
             if (result.committed) settings().auto?.run?.({ chatKey: b.chatKey })?.catch?.(() => {});
+            if (result.committed) timeChanged(b.chatKey);
             return result;
         },
         'POST /v1/extract-plan': b => needWorker().plan({ chatKey: str(b.chatKey, 'chatKey') }),
@@ -373,7 +376,8 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             let mark = null;
             try { const v = JSON.parse(store.getMeta(`door_lit:${chatKey}`) ?? 'null'); if (v && (last?.pos ?? 0) - v.pos <= 4 && messages.find(m => m.pos === v.pos)?.fp === v.fp) mark = v; } catch {}
             const items = capFresh(store, records, chatKey, { present: strings(b.present, 60, 200), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', timeline: timelineFor(store, records, chatKey, messages), litWho: ['narrator', 'named'].includes(mark?.by) ? mark.who : null });
-            const occasion = occasionOf(messages), holdReason = occasion ? `场合不合适：${OCCASION_WHY[occasion]}` : null;
+            const chat = store.requireChat(chatKey);
+            const occasion = occasionOf(messages, { roster: store.getCast(chat.story_id), relations: store.relationsOf?.(chat.story_id) }), holdReason = occasion ? `场合不合适：${OCCASION_WHY[occasion]}` : null;
             let lit = null;
             if (mark && (!holdReason || mark.by !== 'program') && items.some(i => i.who === mark.who && (mark.by !== 'program' || i.ready))) lit = mark;
             if (!lit && !holdReason) { const first = items.find(i => i.ready && i.known); if (first) lit = { who: first.who, way: first.ways[0] ?? '他过来', by: 'program' }; }
@@ -451,7 +455,8 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             }
             const who = str(b.who, 'who', { max: 80 });
             const avatar = typeof b.avatar === 'string' && b.avatar.trim() ? b.avatar.trim().slice(0, 200) : null;
-            store.setMeta(`arrival_request:${chatKey}`, JSON.stringify({ who, avatar, at: store.currentMessages(chatKey).at(-1)?.pos ?? 0 }));
+            const last = store.currentMessages(chatKey).at(-1);
+            store.setMeta(`arrival_request:${chatKey}`, JSON.stringify({ who, avatar, at: last?.pos ?? 0, fp: last?.fp ?? null }));
             return { ok: true };
         },
         // 进场：玩家点了"进场"，替他理一次怎么来的、为什么来、到场那一刻看得见什么（调一次便宜模型）
@@ -634,11 +639,25 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             return { ok: true };
         },
         // 剧情日期的小标签（N-265）：每条都有——日期、从哪天算的第几天、时段、当天天气；拿不准的、用户点过的另标。只是界面装饰，扩展挂在消息名字旁边。
+        'POST /v1/time-watch': async b => {
+            const chatKey = str(b.chatKey, 'chatKey');
+            const current = () => timeStateFor(store, records, chatKey);
+            if (b.version === current().version && (b.status == null || b.status === current().status)) await new Promise(resolve => {
+                const listeners = timeListeners.get(chatKey) ?? new Set(); timeListeners.set(chatKey, listeners);
+                let timer;
+                const done = () => { clearTimeout(timer); listeners.delete(done); if (!listeners.size) timeListeners.delete(chatKey); resolve(); };
+                listeners.add(done);
+                const configured = Math.max(0, Number(settings().assemblyBudget?.budgetMs || settings().assemblyBudget?.timeoutMs) || 0);
+                const requestBudget = Number(b.budgetMs);
+                timer = setTimeout(done, Number.isFinite(requestBudget) && requestBudget > 0 ? Math.min(configured, requestBudget / 2) : configured);
+            });
+            return current();
+        },
         'POST /v1/timeline': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             const seenTimeline = timelineFor(store, records, chatKey, store.currentMessages(chatKey), { seen: true });
             // 尺度（章程 G2）：扩展改日期的那个小窗按这一局的单位和时段写（"从这条起算新的一年"、时段选春夏秋冬）
-            return { labels: labelsOf(seenTimeline, seenTimeline.start, { seed: seenTimeline.seed, notes: store.stateNotesOf?.(chatKey) ?? [] }), today: seenTimeline.today, hasDate: !!seenTimeline.start?.日期, since: sinceWord(seenTimeline.start),
+            return { chatKey, baseDay: dayNumber(seenTimeline.start, 0), rows: seenTimeline.rows.map(r => ({ ...r, ordinal: dayNumber(seenTimeline.start, r.day), previousDay: seenTimeline.dayOf(r.pos - 1), firmDay: seenTimeline.firmDayOf(r.pos) })), time: timeStateFor(store, records, chatKey), labels: labelsOf(seenTimeline, seenTimeline.start, { seed: seenTimeline.seed, notes: store.stateNotesOf?.(chatKey) ?? [] }), today: seenTimeline.today, hasDate: !!seenTimeline.start?.日期, since: sinceWord(seenTimeline.start),
                 scale: { unit: seenTimeline.scale.unit, word: seenTimeline.scale.word, ord: seenTimeline.scale.ord, parts: [...seenTimeline.scale.parts] } };
         },
         'POST /v1/boards': b => measure('compose', () => {

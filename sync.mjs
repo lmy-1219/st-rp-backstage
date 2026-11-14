@@ -269,13 +269,16 @@ export function namedIn(text, names = []) {
     return parts.some(n => tail.includes(n));
 }
 
-const DOOR_MARK = /[（(]\s*该来\s*[:：]\s*([^()（）\r\n/／]+?)\s*(?:[/／]\s*(去找他|他过来|消息|电话)\s*)?[）)]/g;
+// 和后台 core/door.mjs 的 MARK 是同一份（名字里可以带一层括号，T135），两处一起改
+// 和 core/door.mjs 同步：空白每处至多 3 个，姓名（含内层括号）至多 40 字。
+const DOOR_MARK = /[（(]\s{0,3}该来\s{0,3}[:：]\s{0,3}(?!\s)((?:(?!\s{4})[^()（）\r\n/／]|[（(](?:(?!\s{4})[^()（）\r\n/／]){0,38}[）)]){1,40}?)\s{0,3}(?:[/／]\s{0,3}(去找他|他过来|消息|电话)\s{0,3})?[）)]/g;
 export function doorMark(text) {
     const s = String(text ?? '');
-    const all = [...s.matchAll(DOOR_MARK)];
+    const valid = who => who === who.trim() && who.length > 0 && who.length <= 40 && !/\s{4}/.test(who);
+    const all = [...s.matchAll(DOOR_MARK)].filter(m => valid(m[1]));
     if (!all.length) return { who: null, way: null, text: s };
     const hit = all.at(-1);
-    return { who: hit[1].trim(), way: hit[2] ?? null, text: s.replace(DOOR_MARK, '').replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trimEnd() };
+    return { who: hit[1].trim(), way: hit[2] ?? null, text: s.replace(DOOR_MARK, (mark, who) => valid(who) ? '' : mark).replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trimEnd() };
 }
 
 // 谁看得见（和后台 core/visibility.mjs 一个判法）：发消息、打电话来的那条（extra.rp_vis.way 消息／电话）只有本人、玩家、旁白、发给的那人看得见；

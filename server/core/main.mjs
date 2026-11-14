@@ -34,14 +34,14 @@ import { planRoster, normalizeRelations, personOf, leaderOf } from './relations.
 import { ARRIVAL_SYSTEM, arrivalPrompt, parseArrival, groundedArrivalReason, lastLeave, awaySpan, validAwayPlan, LEAVE_SYSTEM, leavePrompt, parseLeave, isRemote, metInPerson, justLeft, openNow } from './arrival.mjs';
 import { enteredSince, landSent } from './landing.mjs';
 import { intentRecord, closeIntents } from './matters.mjs';
-import { SETTLE_SYSTEM, settlePrompt, parseSettle } from './settle.mjs';
+import { SETTLE_SYSTEM, settlePrompt, parseSettle, settlementTimes } from './settle.mjs';
 import { crewOf, crewEntry, latestNode, crewPushDue, pushedMeta, pushKey, pushText, effectiveNode } from './crew.mjs';
 import { secretCandidates, recordSecretLeaks, activeLeaks, secretLeakLines } from './held.mjs';
 import { bodyGate, holdBodyContact, heldContactText } from './body.mjs';
 import { ASK_SYSTEM, askPrompt, parseAsk, knownFor, exchangeRecords, INFORM_SYSTEM, informPrompt, parseInform } from './offstage.mjs';
 import { lifeSheet, homeChanged } from './life.mjs';
 import { boardFor, sourceVersion } from './board.mjs';
-import { executionFor } from './auto.mjs';
+import { executionFor, unrequestedFollower } from './auto.mjs';
 import { awayPlansOf } from './opening.mjs';
 import { unansweredLine, promisesFor, pullOf, placeNow } from './waiting.mjs';
 import { doorFor } from './door.mjs';
@@ -62,7 +62,7 @@ import { LORE_SYSTEM, lorePrompt, parseLore, LORE_VERSION, loreBatch, loreTried,
 import { createMaterials, createRelationsDrafts, LOOK_SYSTEM, lookPrompt, parseLook, RELATIONS_SYSTEM } from './materials.mjs';
 import { weekOf, rollLong, activeLong, LONG_SYSTEM, longPrompt, parseLong } from './drift.mjs';
 import { briefSection } from './setup.mjs';
-import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stablePlanEdge, stateBlock, timelineFor, confirmedDayFor, settledBy, CAMERA_NAME, scaleFor, pastNodesOf, RECENT_NODES, sofarOf, planSystemOf } from './slot.mjs';
+import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stablePlanEdge, stateBlock, timelineFor, timeStateFor, timeVersionOf, timeBasisFor, timeBasisLive, confirmedDayFor, settledBy, CAMERA_NAME, scaleFor, pastNodesOf, RECENT_NODES, sofarOf, planSystemOf } from './slot.mjs';
 import { withTaste } from './taste.mjs';   // 模型口味层：规划、检查的通用底后面按型号补几句口味（用户 10/15）
 import { extractSystem } from './extract.mjs';
 import { bindPromptEnvironment, promptOptionsFor } from './prompt-slots.mjs';
@@ -114,7 +114,7 @@ const confirmedPoint = (chatKey, pos) => {
     confirmedDays(chatKey);
     if (!pointCache.has(chatKey)) pointCache.set(chatKey, timelineFor(store, { ...records, visible: key => records.visible(key, { rawBasis: true, type: '时间' }) }, chatKey));
     const tl = pointCache.get(chatKey);
-    return { day: tl.firmDayOf(pos + 0.5), part: tl.firmRows.filter(r => r.pos <= pos).at(-1)?.part ?? null, parts: tl.parts };
+    return { day: tl.firmDayOf(pos + 0.5), part: tl.firmRows.filter(r => r.pos <= pos).at(-1)?.part ?? null, parts: tl.parts, version: timeVersionOf(tl, pos) };
 };
 store.setConfirmedDayOf((chatKey, pos) => confirmedDays(chatKey)(pos), confirmedDays, confirmedPoint);
 records.setSourceLive(store.sourceLive, store.sourceReader);
@@ -926,6 +926,7 @@ async function settleAway({ chatKey, who, avatar = null, reason = '换时段', u
         if (enteredSince(unanswered.since.pos, { who, avatar, messages, anchors, arrivals, knockLive: e => store.knockLive?.(chatKey, e) })) return { ok: true, skipped: true, entered: true };
     }
     const tl = timelineFor(store, records, chatKey, messages);
+    if (timeStateFor(store, records, chatKey, messages).status !== 'confirmed') return { ok: false, reason: '时间未确认' };
     const firm = { ...tl, today: tl.firmToday, part: tl.firmPart, rows: tl.firmRows, dayOf: tl.firmDayOf };
     let settled = null;
     try { settled = JSON.parse(store.getMeta(`settled:${chatKey}:${who}`) ?? 'null'); } catch {}
@@ -937,12 +938,16 @@ async function settleAway({ chatKey, who, avatar = null, reason = '换时段', u
     try { return await settleOnce({ chat, chatKey, messages, last, tl: firm, who, avatar, unanswered }); } finally { settling.delete(busyKey); }
 }
 async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unanswered }) {
+    const timeBasis = timeBasisFor(store, records, chatKey, messages);
     // 开局单里开场不在场的那份去向也算（opening.mjs）：结算写回时一起存下，之后就是记下的去向
     const plans = awayPlansOf(store, chatKey, { messages });
     const board = boardFor(store, records, chatKey, { present: [], timeline: tl });
     const rawRel = store.relationsOf?.(chat.story_id), castRows = store.getCast(chat.story_id) ?? [], roster = castRows.map(e => e.name);
     const rel = rawRel ? normalizeRelations(rawRel) : null;
     const sameP = (a, b) => sameName(a, b, roster) || (!!rel && !!personOf(rel, a, roster) && personOf(rel, a, roster) === personOf(rel, b, roster));
+    // 只跟着别人出现的人（关系表"跟着"）：镜头外不单独替他结算——他不单独办事、不单独联系人，跟着的那人结算时他就在旁边（T135：依附的人自己发了消息）。
+    // 没人接的那一回照旧（那是他已经找过来、门上挂着的）
+    if (!unanswered && rel && leaderOf(rel, who, roster)) return { ok: true, skipped: true, follower: true };
     const plan = Object.values(plans).find(p => sameP(p?.who, who) || (!!avatar && p?.avatar === avatar));
     const person = board.people.find(p => sameP(p.name, who) && p.status !== 'never') ?? board.people.find(p => sameP(p.name, who));
     const pending = pendingFor(store, records, chatKey, { present: [], timeline: tl });
@@ -952,11 +957,15 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
     const seenInRecords = records.visible(chatKey).some(r => [r.holder_name, r.holderName, holder(r), ...(r.audience ?? [])].some(n => sameP(n, who)));
     const seenOnBoard = board.people.some(p => sameP(p.name, who) && (p.status !== 'never' || p.since != null));
     const neverHere = !seenOnBoard && !seenInRecords && !plan && person?.status === 'never' && person.since == null;
-    const left = person?.since ?? plan?.at ?? last.pos;
-    const row = tl.rows.find(r => r.pos === left - 1) ?? tl.rows.find(r => r.pos === left) ?? null;
-    const span = awaySpan(row, tl.rows.at(-1) ?? { day: tl.today, part: tl.part }, tl.scale);
+    const left = person?.since ?? plan?.at ?? null;
+    let previous = null;
+    try { previous = JSON.parse(store.getMeta(`settled:${chatKey}:${who}`) ?? 'null'); } catch {}
+    if (previous && !messages.some(m => m.pos === previous.pos && m.fp === previous.fp)) previous = null;
+    const times = settlementTimes(tl, { departure: left, previous });
+    const span = times.away;
+    const worldTime = times.world;
     const clean = stripper(getConfig().strip);
-    const leaving = neverHere ? '' : messages.filter(m => m.pos >= left - 2 && m.pos < left && !m.hidden).map(m => `${m.speaker === 'narrator' ? '旁白' : (m.name ?? m.speaker)}：${clean(m.text).slice(-300)}`).join(' ／ ');
+    const leaving = neverHere || left == null ? '' : messages.filter(m => m.pos >= left - 2 && m.pos < left && !m.hidden).map(m => `${m.speaker === 'narrator' ? '旁白' : (m.name ?? m.speaker)}：${clean(m.text).slice(-300)}`).join(' ／ ');
     // 读卡写的"兴趣和习惯"（不是整张卡的原文）
     const profile = store.profileOf?.(avatar)?.text ?? '';
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? '玩家';
@@ -973,7 +982,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
     const own = ownDue ? { want: String(ownEntry.想干 ?? '').trim(), next: String(ownEntry.下一步 ?? '').trim() } : null;
     const rowAt = pos => tl.rows.find(r => r.pos === pos) ?? tl.rows.filter(r => r.pos <= pos).at(-1) ?? null;
     const unans = unanswered ? [unansweredLine(unanswered, { userName, span: awaySpan(rowAt(unanswered.since?.pos ?? last.pos), tl.rows.at(-1) ?? { day: tl.today, part: tl.part }, tl.scale) + `（隔了 ${last.pos - (unanswered.since?.pos ?? last.pos)} 条消息）` })] : [];
-    const promises = unanswered ? promisesFor(pending.items, { who, userName, same: sameP, plans: Object.values(plans).map(p => validAwayPlan(p, messages, source => store.basisLive(chatKey, source.pos, source.day))).filter(Boolean) }) : [];
+    const promises = unanswered ? promisesFor(pending.items, { who, userName, same: sameP, plans: Object.values(plans).map(p => validAwayPlan(p, messages, source => store.sourceLive(chatKey, source))).filter(Boolean) }) : [];
     const spot = unanswered ? placeNow(store.stateNotesOf?.(chatKey) ?? [], { lastPos: last.pos, sameDay: pos => (tl.rows.filter(r => r.pos <= pos).at(-1)?.day ?? tl.today) === tl.today, fallback: board.camera?.from === 'state' || board.camera?.from === 'mark' ? board.camera.place ?? '' : '' }) : '';
     const here = unanswered ? [spot && `在${spot}`, (p => (p.length ? `身边有${p.join('、')}` : '身边没别人'))(board.people.filter(p => ['present', 'remote'].includes(p.status) && p.name !== CAMERA_NAME).map(p => p.name))].filter(Boolean).join('，') : '';
     const around = unanswered ? board.people.filter(p => p.card && p.name !== who && p.name !== CAMERA_NAME && ['away', 'absent'].includes(p.status) && (p.place || p.plan?.doing || p.plan?.errands?.length))
@@ -982,17 +991,18 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
     if (!s?.baseUrl || !s.apiKey || !s.model || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return { ok: true, skipped: true };
     const started = Date.now();
     try {
-        const r = await createModelClient({ ...s, maxOutputTokens: 1500 }).complete({ system: renderPronouns(SETTLE_SYSTEM, { ...playerContext(store, chatKey), person: who }), user: settlePrompt({ who, userName, span, leaving, errands, waits, profile, tie, place: person?.place ?? '', unanswered: unans, promises: promises.map(p => p.text), here, around, own }) });
+        const r = await createModelClient({ ...s, maxOutputTokens: 1500 }).complete({ system: renderPronouns(SETTLE_SYSTEM, { ...playerContext(store, chatKey), person: who }), user: settlePrompt({ who, userName, span, worldTime, leaving, errands, waits, profile, tie, place: person?.place ?? '', unanswered: unans, promises: promises.map(p => p.text), here, around, own }) });
         const costUsd = ((r.usage?.input ?? 0) * s.priceInPerM + (r.usage?.output ?? 0) * s.priceOutPerM) / 1e6;
         records.logAssemble({ chatKey, speaker: '(结算)', model: s.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
         const got = parseSettle(r.text); if (!got) return { ok: false };
-        const fp = last.fp, source = { pos: last.pos, fp, day: tl.today };
+        if (!timeBasisLive(store, records, chatKey, timeBasis)) return { ok: false, stale: true };
+        const fp = last.fp, source = { pos: last.pos, fp, day: tl.today, timeBasis };
         const addSettle = data => records.addDerived({ ...data, known: [...(data.known ?? []), { basis: source }] });
         // 他按自己的打算办到哪：落成他自己的一条（照去办的落法），下次露面那一格里带着（slot 的主角团那一块）；
         // 这一格时间记一笔推过了——结算没写"打算"也算推过，别再花一回
         if (own) {
             if (got.own) addSettle({ storyId: chat.story_id, fp, type: '做', text: pushText(who, ownEntry, got.own), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
-            store.setMeta(pushKey(chatKey, who), JSON.stringify({ day: tl.today, basisDay: tl.today, pos: last.pos, fp, plan: lastPlan?.id ?? null }));
+            store.setMeta(pushKey(chatKey, who), JSON.stringify({ day: tl.today, basisDay: tl.today, timeBasis, pos: last.pos, fp, plan: lastPlan?.id ?? null }));
         }
         for (const e of got.errands) {
             const item = errands.find(x => x.text === e.text); if (!item) continue;
@@ -1009,7 +1019,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
         store.setMeta(`away_plan:${chatKey}`, JSON.stringify(Object.fromEntries(Object.entries(plans).filter(([, p]) => !p?.seed || p.who === who))));
         // 刚走没多久（同一格里，span 以"同一"开头）、不是没人接那种、他走时说的事还没到办的时候：结算说要联系也先按下——记成他心里的，不挂门上
         // （试玩 10/11：他下午刚道别说明天复查，过了一个时段就又发消息问药劲散没散；两条消息前才分开，不像人）
-        const justLeft = !unanswered && (neverHere || (/^同一/.test(span) && !(got.errands ?? []).some(e => e.result === '办了')));
+        const justLeft = !unanswered && (neverHere || (times.departureDay != null && times.departureDay === tl.today && !(got.errands ?? []).some(e => e.result === '办了')));
         // 不为问身子上门（用户 10/12，方案 叙事节奏与防棘轮 第四节；body.mjs）：要联系的来意是问她身子的，而她最近几条没提身子（或说已经好了）——
         // 照上面"刚分开先按下"的做法记成他心里惦记的，不挂门上；没人接的那一回照旧由下面管
         const gate = bodyGate({ messages, userName });
@@ -1020,7 +1030,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
         const nextContactStep = () => ++contactStep;
         if (got.contact?.way !== '不' && justLeft) addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}想过要${got.contact.way === '上门' ? '过去一趟' : got.contact.way === '电话' ? '打个电话' : '发条消息'}（${String(got.contact.text ?? '').slice(0, 80)}），${neverHere ? '先按下了' : '想想刚分开没多久，先按下了'}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
         else if (bodyHold) addSettle({ storyId: chat.story_id, fp, type: '心里', text: heldContactText({ who, way: got.contact.way, userName, gate }), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
-        else if (got.contact?.way !== '不') store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way: got.contact.way, text: got.contact.text, at: last.pos, fp, basisDay: tl.today, step: nextContactStep(), used: false }));
+        else if (got.contact?.way !== '不') store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way: got.contact.way, text: got.contact.text, at: last.pos, fp, basisDay: tl.today, timeBasis, step: nextContactStep(), used: false }));
         // 没人接的那一回（waiting.mjs）：再找（发消息、打电话、找上门）→ 门上换成这一回的；放下 → 门上那一项收起（挂在这一条上，删回去就回来）
         if (unans.length) {
             const u = unans[0];
@@ -1035,7 +1045,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
                 let earlier = null;
                 if (src?.type === 'pocket') { const m = store.menuOf(chatKey).find(x => x.id === Number(src.id)); if (m) earlier = { way: u.how === '打来电话' ? '电话' : '消息', title: m.title ?? '', surface: m.surface ?? '', respond: m.respond ?? '' }; }
                 if (src?.type === 'contact') { try { earlier = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null')?.earlier ?? null; } catch {} }
-                store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way, text: (got.contact?.way !== '不' && got.contact?.text) || note, at: last.pos, fp, basisDay: tl.today, step: nextContactStep(), used: false, from: 'unanswered', ...(pull ? { pull } : {}), ...(earlier?.surface ? { earlier } : {}) }));
+                store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way, text: (got.contact?.way !== '不' && got.contact?.text) || note, at: last.pos, fp, basisDay: tl.today, timeBasis, step: nextContactStep(), used: false, from: 'unanswered', ...(pull ? { pull } : {}), ...(earlier?.surface ? { earlier } : {}) }));
                 addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}找过${userName}没人接，又${way === '上门' ? '找上门去' : way === '电话' ? '打了电话' : '发了一条'}：${note}`.slice(0, 200), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
             } else if (result === '放下') {
                 const src = unanswered.item?.source;
@@ -1045,7 +1055,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
             }
             log(`settle ${chatKey} ${who} (没人接 #${u.n}): ${result}${got.pull ? `；顺带：${got.pull.promise.slice(0, 30)}` : ''}`);
         }
-        store.setMeta(`settled:${chatKey}:${who}`, JSON.stringify({ day: tl.today, basisDay: tl.today, part: tl.part, pos: last.pos, fp }));
+        store.setMeta(`settled:${chatKey}:${who}`, JSON.stringify({ day: tl.today, basisDay: tl.today, timeBasis, part: tl.part, pos: last.pos, fp }));
         return { ok: true, ...got };
     } catch (error) {
         records.logAssemble({ chatKey, speaker: '(结算)', model: s.model, status: 'failed', ms: Date.now() - started, error: error.message });
@@ -1153,6 +1163,10 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     const msgs = anchor ? all.filter(m => m.pos < Number(anchor.at)) : all;
     const tip = msgs.at(-1);
     if (anchor && (!tip || tip.fp !== anchor.fp)) return { ok: false, why: '叩门挂的那条没了' };
+    const pendingArrival = knock ? pendingKnock(store, chatKey) : null;
+    const playerKnock = pendingArrival?.avatar === avatar ? pendingArrival : knock
+        ? knocksOf(store, chatKey).findLast(k => k.avatar === avatar && k.at === anchor?.at && k.fp === anchor?.fp) : null;
+    if (mode === 'remote' && unrequestedFollower(store, chatKey, { who, avatar, source: playerKnock?.source, playerRequest: playerKnock?.playerRequest }, { through: tip?.pos ?? -1 })) return { ok: true, skipped: 'follower' };
     // 刚移出就原地拉回来（用户 10/14："不小心把人移出群聊，再原地拉回来就接不上戏了"）：他没走开——不理进场那份、不编"这段时间"、不当他从外头来；
     // 跟着别人出现的人（关系表"跟着"），带他的人眼下就在群里，也一样（他只能跟着那人，不会自己上门）
     if (mode === 'come' && rejoined(chat, { avatar, who, len: (tip?.pos ?? -1) + 1 })) return { ok: true, skipped: 'rejoin' };
@@ -1207,7 +1221,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
                 ...store.menuOf(chatKey).filter(m => (m.goer === who || m.who === who) && m.errand && (m.status === 'waiting' || m.status === 'pocket')).map(m => m.errand)].slice(0, 6);
             const home = lifeSheet(visible, { same: (a, b) => sameName(a, b, roster) }).people.find(p => sameName(p.name, who, roster))?.home ?? '';
             let plan = boardPerson?.plan ?? null;
-            if (!boardPerson) try { plan = Object.values(JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {}).map(p => validAwayPlan(p, msgs, source => store.basisLive(chatKey, source.pos, source.day))).find(p => p?.who === who && p.errands) ?? null; } catch {}
+            if (!boardPerson) try { plan = Object.values(JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {}).map(p => validAwayPlan(p, msgs, source => store.sourceLive(chatKey, source))).find(p => p?.who === who && p.errands) ?? null; } catch {}
             // span 是给模型看的一句话（"同一天，早上走的，现在下午"），不是场面表的 stage；stage 另带着
             let contact = null; try { contact = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null'); } catch {}
             // 写下这条以后他已经自己进过场（landing.enteredSince 认隔离区间、进场记录）：过时了，不当"他想说的"给
@@ -1872,7 +1886,7 @@ async function loudSituation({ chatKey, ids, why }) {
     try { prev = JSON.parse(store.getMeta(key) ?? 'null'); } catch {}
     if (prev && row && prev.day === row.day && prev.part === row.part && prev.pos <= (msgs.at(-1)?.pos ?? -1)) return;
     store.setMeta(key, JSON.stringify({ day: row?.day ?? null, part: row?.part ?? null, pos: msgs.at(-1)?.pos ?? 0 }));
-    store.setMeta(`situation_ran:${chatKey}`, String(msgs.at(-1)?.pos ?? 0));
+    store.setMeta(`situation_ran:${chatKey}`, JSON.stringify({ pos: msgs.at(-1)?.pos ?? 0, day: tl.today, timeBasis: timeBasisFor(store, records, chatKey, msgs) }));
     return runSituation({ chatKey, day: tl.today, loud: { ids, why } });
 }
 // 同一局的局势一次只跑一个：换天那次和闹大了那次前后脚时，后一个等前一个跑完再跑（看得到前一个的结果）
@@ -1880,13 +1894,27 @@ const situationRuns = new Map();
 function runSituation(args) {
     const stopped = playStop(store, args.chatKey, getConfig()); if (stopped) return Promise.resolve(stopped);
     const prev = situationRuns.get(args.chatKey) ?? Promise.resolve();
-    const next = prev.then(() => situationOnce(args));
+    const timeBasis = timeBasisFor(store, records, args.chatKey);
+    const next = prev.then(async () => {
+        try {
+            if (timeBasisLive(store, records, args.chatKey, timeBasis)) return await situationOnce({ ...args, timeBasis });
+        } finally {
+            if (!timeBasisLive(store, records, args.chatKey, timeBasis)) {
+                const key = `situation_ran:${args.chatKey}`;
+                let mark = null;
+                try { mark = JSON.parse(store.getMeta(key) ?? 'null'); } catch {}
+                // 只释放这一批的占位，不能清掉后来排上的任务。
+                if (JSON.stringify(mark?.timeBasis) === JSON.stringify(timeBasis)) store.setMeta(key, null);
+            }
+        }
+    });
     situationRuns.set(args.chatKey, next.catch(() => {}));
     return next;
 }
 // skip：玩家交代跳过的一段里补跑的那一次（slot.advanceWorld 排的，skip.mjs）：带上这是空白里第几天、玩家交代了什么
-async function situationOnce({ chatKey, day, loud = null, skip = null }) {
+async function situationOnce({ chatKey, day, loud = null, skip = null, timeBasis = null }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
+    timeBasis ??= timeBasisFor(store, records, chatKey);
     const cfg = getConfig(), a = cfg.stages.situation;
     if (!cfg.situation.enabled) return;
     const { baseUrl, apiKey, model } = a;
@@ -1898,12 +1926,13 @@ async function situationOnce({ chatKey, day, loud = null, skip = null }) {
         const r = await createModelClient({ baseUrl, apiKey, model, maxOutputTokens: 6000, extraBody: a.extraBody }).complete({ system: SITUATION_SYSTEM, user: m.prompt });
         const costUsd = ((r.usage?.input ?? 0) * a.priceInPerM + (r.usage?.output ?? 0) * a.priceOutPerM) / 1e6;
         const v = parseSituation(r.text, { ...m.check, day, seen: m.prompt });
+        if (!timeBasisLive(store, records, chatKey, timeBasis)) { records.logAssemble({ chatKey, speaker: '(局势)', model, status: 'stale', ms: Date.now() - started }); return; }
         const lag = skip && !skip.lumped ? Math.max(0, skip.toDay - day) : 0;
-        const tickId = situation.putTick({ storyId: m.storyId, chatKey, day, anchor: m.anchor, raw: r.text, moves: v.moves, spreads: v.spreads, outcomes: v.outcomes, reviews: v.reviews, lag });
-        const addSituation = data => records.addDerived({ ...data, known: [...(data.known ?? []), { basis: { pos: m.anchor.pos, fp: m.anchor.fp, day: day + lag, exact: true } }] });
+        const tickId = situation.putTick({ storyId: m.storyId, chatKey, day, anchor: m.anchor, raw: r.text, moves: v.moves, spreads: v.spreads, outcomes: v.outcomes, reviews: v.reviews, lag, timeBasis });
+        const addSituation = data => records.addDerived({ ...data, known: [...(data.known ?? []), { basis: { pos: m.anchor.pos, fp: m.anchor.fp, day: day + lag, exact: true, timeBasis } }] });
         recordOutcomes(situation, v.outcomes, { anchor: m.anchor, storyId: m.storyId, addRecord: addSituation, errands: m.errands });
         for (const x of v.reps ?? []) addSituation(repRecord(x, { storyId: m.storyId, anchor: m.anchor }));
-        saveEchoes(store, records, chatKey, v.echoes, { anchor: m.anchor, day, tickId });
+        saveEchoes(store, records, chatKey, v.echoes, { anchor: m.anchor, day, timeBasis, tickId });
         if (v.moves.length || v.spreads.length || v.echoes?.length)
             signalEvaluation(store, chatKey, { kind: 'world', at: m.anchor, tickId });
         records.logAssemble({ chatKey, speaker: '(局势)', model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, lines: v.moves.length + v.spreads.length + v.outcomes.length + v.followups.length, dropped: v.dropped.length, raw: r.text });
@@ -2212,7 +2241,7 @@ async function autoAnswer({ chatKey, who, avatar = null, answer }) {
 const settings = () => {
     const config = loadConfig(home);
     const split = { ...config.extractor, ...config.stages.setup };
-    return { setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, guide: config.guide, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onBeat: addToPlan, onPlace: placeSupplement, onStall: stallSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, seeds: chatKey => packOf(chatKey)?.seeds ?? [], prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation: config.situation.enabled ? situation : null }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null, inform: informAway } };
+    return { assemblyBudget: { budgetMs: config.assembler.budgetMs, timeoutMs: config.assembler.timeoutMs }, setupSplit: { ready: !!(split.baseUrl && split.apiKey && split.model), model: split.model, priceInPerM: split.priceInPerM, priceOutPerM: split.priceOutPerM }, secretCheckReason: !config.planner.judge ? '节点检查没开，暂不检测秘密是否漏了' : !config.stages.judge.baseUrl || !config.stages.judge.apiKey || !config.planner.judgeModel ? '没配节点检查的快速档，暂不检测秘密是否漏了' : null, playModeOf: chatKey => playModeOf(store, chatKey, config), playStop: chatKey => playStop(store, chatKey, config), code: bootHead, refreshPlanPackets, arrive, leave, settle: settleAway, recheckPromises, packsDir, stRoot, backupsDir: path.join(home, 'backups'), auto: { run: autoRun, turn: autoTurn, answer: autoAnswer, predict: autoPredict, acknowledge: ({chatKey,receipts})=>acknowledgeLeaves(store,chatKey,receipts), unjudged: ({ chatKey }) => leaveDoubts(store, records, chatKey, { config }).length }, glance: { run: runGlance }, closeCheck: { run: runCloseCheck }, packOf, listPacks, presets, tuning, release, talk, lore: { run: runLore }, relationsDrafts, materials: { ...materials, look: lookMaterials, relations: materialRelations }, drift: { ...config.drift, run: runLong }, stages: stagesAdmin, profile: { make: makeProfile }, modelTally, scene: { run: runScene }, state: config.state.enabled ? { run: runState } : null, episodes: config.episodes.enabled ? { run: runEpisodes } : null, vectors, contacts: config.contacts, extract: { auto: config.extractor.auto }, slot: config.slot, guide: config.guide, cast: config.cast, absence: { ...config.absence, think: thinkAway, revise: reviseAway }, mood: config.mood, pace: config.pace, fresh: { ...config.fresh, dir: path.join(home, '口吻'), bound: hasBoundVoice, run: freshMessage }, planner: config.planner.provider === 'off' ? null : { ...config.planner, onRequest, repair: repairSavedPlan, resumePersona: wait => onRequest({ ...wait, brief: freshBrief(wait.id), rebrief: () => freshBrief(wait.id) }), checkNode, checkTurn, onBeat: addToPlan, onPlace: placeSupplement, onStall: stallSupplement, factionNet: chatKey => packOf(chatKey)?.factions ?? null, seeds: chatKey => packOf(chatKey)?.seeds ?? [], prices: chatKey => packOf(chatKey)?.table ?? null, facts: chatKey => packOf(chatKey)?.facts ?? null, situation: config.situation.enabled ? situation : null }, situation: config.situation.enabled ? { sit: situation, run: runSituation } : null, offstage: config.offstage?.enabled === false ? null : { ...config.offstage, ask: config.offstage?.ask ? askAway : null, inform: informAway } };
 };
 const server = createServer(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
 server.on('error', error => {

@@ -247,7 +247,7 @@ export function boardAt(input = {}) {
         }
         const waiting = values(input.knocks).filter(k => matches(k, person) && !k.entered && !k.lapsed && !k.forced).at(-1);
         if (waiting && waiting.way === '上门' && (since == null || Number(since) <= Number(waiting.at))) {
-            const state = knockState(waiting, { messages, knocks: values(input.knocks), roster, rowAt: p => rowAt(timeline,p,fallbackRow) });
+            const state = knockState(waiting, { messages, knocks: values(input.knocks), roster, relations: input.relations, rowAt: p => rowAt(timeline,p,fallbackRow) });
             if (state.state === '候着' && state.message) { status = 'remote'; way = '上门'; since = waiting.at; }
         }
         const departure = number(since);
@@ -359,6 +359,7 @@ function cacheVersion(store, chat, chatKey, present, recentUser, marks) {
         group: chat.group_id ?? null,
         members: chat.members ?? null,
         cast: (store.getCast?.(chat.story_id) ?? []).map(p => [p.avatar, p.name, p.role]),
+        relations: store.relationsOf?.(chat.story_id) ?? null,
         anchors: createHash('sha256').update(String(chat.anchors ?? '')).digest('hex'),
         arrived,
         arrivals: store.getMeta?.(`arrivals:${chatKey}`) ?? '',
@@ -399,6 +400,7 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
     const homes = lifeSheet(visible).homes;
     const stateNotes = store.stateNotesOf?.(chatKey) ?? [];
     const roster = store.getCast?.(chat.story_id) ?? [];
+    const relations = store.relationsOf?.(chat.story_id) ?? null;
     const solo = soloMember(chat, roster);
     let identityChoices={};try{identityChoices=JSON.parse(store.getMeta?.(`card_choices:${chatKey}`)??'{}');}catch{}
     const sourceCurrent=e=>factCurrent(e,{messages:all,roster,identityChoices});
@@ -413,7 +415,7 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
         const messages = uptoAnchor(all, anchor);
         const key = `${messages.length}|${messages.at(-1)?.fp ?? ''}`;
         if (done.has(key)) return done.get(key);
-        const value = boardAt({ messages, marks: messageMarks(messages), stateNotes, anchors, roster, solo, identityChoices, group: !!chat.group_id, arrived, arrivals, knocks, knockLive, came, departures, sourceCurrent, awayPlans, sourceLive: source => store.basisLive?.(chatKey, source.pos, source.day) !== false, recentUser, timeline: timeline ?? {}, homes });
+        const value = boardAt({ messages, marks: messageMarks(messages), stateNotes, anchors, roster, relations, solo, identityChoices, group: !!chat.group_id, arrived, arrivals, knocks, knockLive, came, departures, sourceCurrent, awayPlans, sourceLive: source => store.sourceLive?.(chatKey, source) !== false, recentUser, timeline: timeline ?? {}, homes });
         done.set(key, value);
         return value;
     };
@@ -428,8 +430,8 @@ export function boardFor(store, records, chatKey, { anchor = null, present = nul
     const presentList = present ?? [];
     const marks = messages.map(message => message.boardMark);
     // 消息序列（删改稿、左滑换版都变）和时间进版本，但只放一个哈希，键别有几千字
-    const seqHash = createHash('sha1').update(messages.map(m => `${m.pos}:${m.fp}:${!!m.hidden}`).join('|')).digest('hex').slice(0, 16);
-    const allSeqHash = createHash('sha1').update(all.map(m => `${m.pos}:${m.fp}:${!!m.hidden}`).join('|')).digest('hex').slice(0, 16);
+    const seqHash = createHash('sha1').update(messages.map(m => `${m.pos}:${m.fp}:${!!m.hidden}:${m.sent_at ?? ''}:${m.mark ?? ''}`).join('|')).digest('hex').slice(0, 16);
+    const allSeqHash = createHash('sha1').update(all.map(m => `${m.pos}:${m.fp}:${!!m.hidden}:${m.sent_at ?? ''}:${m.mark ?? ''}`).join('|')).digest('hex').slice(0, 16);
     const allMarks = all.map(message => message.boardMark);
     const rowsHash = createHash('sha1').update((timeline?.rows ?? []).map(r => `${r.pos}:${r.day}:${r.part ?? ''}`).join('|')).digest('hex').slice(0, 16);
     const key = `${chatKey}|${seqHash}|${timeline?.timeView ?? 'firm'}:${timeline?.today ?? ''}:${timeline?.part ?? ''}:${rowsHash}|${anchor ?? ''}|${cacheVersion(store, chat, chatKey, presentList, recentUser, marks)}`;

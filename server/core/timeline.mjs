@@ -8,8 +8,9 @@
 // 题材无关：日期、天气、时段都来自开局单和聊天。
 // 时间尺度（章程 G2）：开局单"时间"那一格写了"尺度"（按年、按月、按小时走，一格里分哪几段）的，"第几天"就是第几年／第几个月，
 // 时段是开局单写的那几段；没写就是天＋下面八段，和以前一字不差。
+import { stateCleared } from './state.mjs';
 import { dayIndex, timeSkipIn } from './recall.mjs';
-import { scaleOf, DAY_PARTS, relativeUnit } from './timescale.mjs';
+import { scaleOf, DAY_PARTS, relativeUnit, calendarSerial } from './timescale.mjs';
 
 // 一天里的先后（凌晨排在深夜后面：故事里的"这一天"一般熬到睡下才算完）。默认尺度的那八段；别的尺度用 scaleOf(开局单).parts。
 export const PARTS = DAY_PARTS;
@@ -161,8 +162,8 @@ export function noteTime(text, timeScale = null) {
 
 // "时间"记录写明了过了多久（不是"不明""拿不准"）
 const UNCLEAR = /不明|不清|不详|未知|拿不准|说不准|不确定|看不出/;
-const explicitRec = r => !r.cancel && !r.clock?.unsure && !r.provisional && !r.manual && !r.absence
-    && String(r.elapsed ?? '').trim() !== '' && !UNCLEAR.test(String(r.elapsed));
+const explicitRec = r => !r.cancel && !r.provisional && !r.manual && !r.absence
+    && (Array.isArray(r.clock?.evidence) || (!r.clock?.unsure && String(r.elapsed ?? '').trim() !== '' && !UNCLEAR.test(String(r.elapsed))));
 
 // 此刻的样子报了"跨了几格"的那几条，折成跨天的记号（marks 里的一种，fromNote）。权威排在记账"时间"记录之后、叙述硬词之前：
 //   · 前后三条以内有记账写明了过了多久的，以记账为准（对得上不动，对不上照记账；note 的时段照旧在 timeline 里用）；
@@ -198,7 +199,7 @@ export const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
 const WEEK = WEEKDAYS;
 export function dateOf(start, day = 0, { week = true, month30 = false } = {}) {
     const m = /^(\d{1,5})-(\d{1,2})-(\d{1,2})$/.exec(String(start ?? '').trim());
-    if (!m) return null;
+    if (!m || (!month30 && calendarSerial(start) == null)) return null;
     if (month30) {
         const total = (Number(m[1]) * 12 + Number(m[2]) - 1) * 30 + Math.min(Number(m[3]), 30) - 1 + day;
         if (!Number.isFinite(total)) return null;
@@ -272,20 +273,28 @@ export function weatherOn(kinds, seed, day) {
 // start＝开局单的"时间"那一格；isDone(m)＝这条记过账没有。
 // 返回 dayOf(pos)、today、此刻的时段，和每条的 { pos, fp, day, part, crossed, unsure, mark }。
 // start 里写了尺度的，"天"就是那个单位，时段是那几段（scaleOf(start)）；返回里带上 scale、parts。
-export function timeline({ messages = [], timeRecs = [], marks = [], notes = [], start = null, isDone = () => true, noteDays = true, confirmedParts = false } = {}) {
+export function timeline({ messages = [], timeRecs = [], marks = [], notes = [], start = null, isDone = () => true, noteDays = true, confirmedParts = false, base = null } = {}) {
     const ts = scaleOf(start);
     const PARTS = ts.parts, rank = p => PARTS.indexOf(p);
     const partOf_ = t => partOf(t, ts), canonicalPart_ = t => canonicalPart(t, ts);
     const lastPos = messages.at(-1)?.pos ?? 0;
     const doneAt = new Map(messages.map(m => [m.pos, isDone(m)]));
     const inputs = [...timeRecs, ...(noteDays ? withNoteMarks(marks, notes, timeRecs, ts, pos => doneAt.get(pos) === true) : marks)];
-    const dayOf = dayIndex(inputs, lastPos, ts);
+    const delta = dayIndex(inputs, lastPos, ts, { start });
+    // 暂定视图只折未确认线索；已确认日期和时段直接采用同一次确认折叠。
+    const resets = base?.rows.filter(r => /^(?:d:|day|same)/.test(String(r.mark ?? ''))) ?? [];
+    const dayOf = !base ? delta : pos => {
+        const reset = resets.filter(r => r.pos <= pos).at(-1)?.pos;
+        return base.dayOf(pos) + delta(pos) - (reset == null ? 0 : delta(reset));
+    };
+    if (base) { dayOf.marks = [...(base.dayOf.marks ?? []), ...(delta.marks ?? [])]; dayOf.pending = [...(base.dayOf.pending ?? []), ...(delta.pending ?? [])]; }
     const counted = pos => dayOf(pos + 3) > dayOf(pos - 4);   // 前后三条以内算了跨天
-    let part = canonicalPart_(start?.时段), prev = 0;
+    let part = canonicalPart_(start?.时段), coarsePart = /^(?:大)?白天$/.test(start?.时段 ?? '') ? '白天' : null, prev = 0;
     const rows = [];
     for (const m of messages) {
         const day = dayOf(m.pos);
         const crossed = day !== prev;   // 用户把第几天往回改了也算换了一天
+        if (crossed) coarsePart = null;
         const previousPart = part;
         const recs = timeRecs.filter(r => r.pos === m.pos);
         if (crossed) {
@@ -294,35 +303,49 @@ export function timeline({ messages = [], timeRecs = [], marks = [], notes = [],
                 .map(r => r.clock?.part || r.part || partOf_(r.elapsed) || partOf_(r.text)).find(Boolean);
             part = canonicalPart_(said) ?? (ts.isDay && day - prev === 1 && /一夜|天亮|醒|次日|第二天|翌日|隔天/.test(inputs.filter(r => Math.abs(r.pos - m.pos) <= 3).map(r => `${r.elapsed ?? ''}${r.text ?? ''}`).join('')) ? '早上' : null);
         }
-        let unsure = null;
+        const confirmedRow = base?.rows.find(r => r.pos === m.pos);
+        const priorConfirmed = base?.rows.filter(r => r.pos < m.pos).at(-1);
+        if (confirmedRow && (!crossed || confirmedRow.crossed) && (!priorConfirmed || confirmedRow.crossed
+            || confirmedRow.part !== priorConfirmed.part || confirmedRow.coarsePart !== priorConfirmed.coarsePart)) {
+            part = confirmedRow.part; coarsePart = confirmedRow.coarsePart;
+        }
+        let unsure = dayOf.pending.find(x => x.pos === m.pos)?.reason ?? null;
         // 这条上记账写的时段 → 记账"过了多久"里写到的（"次日上午十点"）→ 此刻的样子报的时段 → 叙述里写到的
         const header = inputs.find(r => r.fromHeader && r.pos === m.pos)?.part;
         const recordPart = canonicalPart_(recs.find(r => r.clock?.part)?.clock.part) ?? recs.map(r => partOf_(r.elapsed)).find(Boolean);
         const firm = recordPart ?? header ?? notePartAt(notes, m.pos, ts);
         const cue = firm ?? clockCue(m.text, ts);
         if (cue) {
-            if ((header && !recordPart) || (confirmedParts && firm) || part == null || rank(cue) >= rank(part)) part = cue;
+            if ((header && !recordPart) || part == null || rank(cue) >= rank(part)) part = cue;
             // 天黑以后又写到了早上、上午，又没算跨天：多半漏了一天
             else if (!crossed && ts.isDay && rank(part) >= rank('晚上') && rank(cue) <= rank('上午') && !m.mark) unsure = '天黑以后又写到了早上';
+            else if (!crossed && ts.isDay && firm) unsure = '同日时段向前冲突，待确认';
             // 别的尺度：写到了更早的那一段（秋天以后又写到了春天），又没算跨过一格
             else if (!crossed && !ts.isDay && !m.mark) unsure = `又写到了${cue}，没算成新的一${ts.word}`;
         }
         // 叙述里不在句首、但比现在靠后的时段词：只往后走。这条上记账、此刻的样子写明了时段的，照它们（权威高过叙述里的词）
         const later = unsure || firm ? null : laterCue(m.text, part, ts);
         if (later) part = later;
+        const coarse = recs.some(r => /^(?:大)?白天$/.test(r.clock?.part ?? ''))
+            || /^(?:大)?白天$/.test((notes.filter(n => n.pos === m.pos && n.aspect === '时段').at(-1)?.text ?? ''))
+            || /(?:^|[（(。！？，,])(?:此刻是|现在是|已是)?大白天/.test(narrationOf(m.text));
+        if (coarse) {
+            if (part && ['晚上', '深夜', '凌晨'].includes(part) && !crossed) unsure = '白天与夜间证据冲突，待确认';
+            part = null; coarsePart = '白天';
+        } else if (cue) coarsePart = null;
         // 用户在这条上手动定的时段（"…@下午"，10/3）：算数，往后照它接着走
         const manual = canonicalPart_(String(m.mark ?? '').split('@')[1] ?? '');
-        if (manual) { part = manual; unsure = null; }
+        if (manual) { part = manual; coarsePart = null; unsure = null; }
         if (!m.mark && recs.some(r => r.clock?.unsure)) unsure = '记账拿不准时间是不是往前走了';
         if (!m.mark && !crossed && !unsure && isDone(m)
             && timeSkipIn(m.text, { previousPart })
             && !counted(m.pos)) unsure = `写着时间往前走了，没算成新的一${ts.word}`;
-        rows.push({ pos: m.pos, fp: m.fp, day, part, crossed, unsure, mark: m.mark ?? null });
+        rows.push({ pos: m.pos, fp: m.fp, ...(m.sent_at != null ? { sentAt: m.sent_at } : {}), day, part, coarsePart, crossed, unsure, provisional: !isDone(m) || inputs.some(r => r.pos === m.pos && r.provisional) || !!(confirmedRow && (day !== confirmedRow.day || part !== confirmedRow.part || coarsePart !== confirmedRow.coarsePart)), mark: m.mark ?? null });
         prev = day;
     }
     const today = dayOf(lastPos + 0.5);
     // 离开以后（记在最后那条之后半格）是新的一天，时段不知道
-    return { dayOf, rows, today, part: today > prev ? null : part, scale: ts, parts: ts.parts };
+    return { dayOf, rows, today, part: today > prev ? null : part, coarsePart, scale: ts, parts: ts.parts };
 }
 
 // 第 n 格（从开场算 0）那一刻的日期怎么写：天尺度＝年月日＋星期；年尺度只写年份（时段＝季另写）；月尺度写年月；
@@ -381,13 +404,13 @@ export function labelsOf(tl, start = null, { seed = '', notes = [] } = {}) {
         const day = `${since}${ts.ordinal(dayNumber(start, r.day))}`;
         const wrote = said.filter(n => n.pos <= r.pos && tl.dayOf?.(n.pos) === r.day).at(-1)?.text;
         const wd = weatherDay(ts, r.day);
-        const weather = wrote ?? (wd == null ? null : weatherOn(start?.天气, seed, wd));
-        const join = (d, w) => [d, day, r.part, w].filter(Boolean).join(' · ');
+        const weather = wrote != null ? (stateCleared(wrote) ? '' : wrote) : (said.filter(n => n.pos <= r.pos).at(-1) && stateCleared(said.filter(n => n.pos <= r.pos).at(-1).text)) ? '' : (wd == null ? null : weatherOn(start?.天气, seed, wd));
+        const join = (d, w) => [d, day, (r.part ?? r.coarsePart), w].filter(Boolean).join(' · ');
         const ymd = date?.ymd, week = date?.week, brief = weather && shortWeather(weather);
         const full = join(week, weather), short = join(ymd, brief);
-        if (first || r.crossed) out.push({ pos: r.pos, fp: r.fp, label: join(week, brief), kind: 'day', mark: r.mark, unsure: r.unsure, full });
+        if (first || r.crossed) out.push({ pos: r.pos, fp: r.fp, label: `${join(week, brief)}${r.provisional ? '（暂定）' : ''}`, kind: 'day', mark: r.mark, unsure: r.unsure, full });
         else if (r.unsure) out.push({ pos: r.pos, fp: r.fp, label: `${short} ？`, kind: 'unsure', mark: r.mark, unsure: r.unsure, full });
-        else out.push({ pos: r.pos, fp: r.fp, label: short, kind: r.mark ? 'mark' : r.part && r.part !== lastPart ? 'part' : 'plain', mark: r.mark, full });
+        else out.push({ pos: r.pos, fp: r.fp, label: `${short}${r.provisional ? '（暂定）' : ''}`, kind: r.mark ? 'mark' : r.part && r.part !== lastPart ? 'part' : 'plain', mark: r.mark, full });
         lastPart = r.part;
     });
     return out;

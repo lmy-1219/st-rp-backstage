@@ -15,8 +15,11 @@ const TRANSIENT_RETRY_MS = 10 * 60 * 1000;
 // extractor.provider = 'window' 时一律交给窗口（测试期不走中转）。交回的回答和模型的走同一套核对。
 export function createWorker({ store, records, getConfig, clientFactory = createModelClient, log = () => {}, intervalMs = 20000, handoffs = null }) {
     let busy = false, runningChatKey = null, timer = null;
+    const finalized = new Map(), changed = new Set();
+    const signal = () => { for (const f of [...changed]) f(); };
+    const throughOf = chatKey => { const source = finalized.get(chatKey); return source && store.currentMessages(chatKey).some(m => m.pos === source.pos && m.fp === source.fp) ? source.pos : null; };
     let onCommitted = null;
-    const afterCommit = async chatKey => { try { await onCommitted?.(chatKey); } catch (error) { log(`advance after extract ${chatKey}: ${error.message}`); } };
+    const afterCommit = async chatKey => { try { await onCommitted?.(chatKey); signal(); } catch (error) { log(`advance after extract ${chatKey}: ${error.message}`); } };
     const lastError = new Map();   // 记账出错提示按窗口记（N-441/D-260）：A 出错不影响 B 的 plan().lastError
     const startedAt = new Date().toISOString();   // 失败次数只算这次启动以后的：改了代码重启后给坏段落一次新机会
 
@@ -82,7 +85,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
         const config = getConfig();
         const messages = messagesFor(chatKey);
         const done = fp => records.isDone(chat.story_id, fp);
-        const windows = planWindows(messages, done, { from: fromOf(chat) });
+        const windows = planWindows(messages, done, { from: fromOf(chat), through: throughOf(chatKey) });
         const older = fromOf(chat) > 0 ? planWindows(messages.filter(m => m.pos < fromOf(chat)).concat(messages.at(-1) ?? []), done) : [];
         const pending = windows.flat();
         const skipped = (records.skipped?.(chat.story_id) ?? []).map(fp => messages.find(m => m.fp === fp)?.pos).filter(Number.isFinite);
@@ -179,7 +182,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                 const over = !byWindow && overBudget(config);
                 if (over && (ownClient || !windowOnBudget(config))) { results.push({ stopped: 'budget' }); break; }
                 const messages = messagesFor(chatKey);
-                let [window] = planWindows(messages, fp => records.isDone(chat.story_id, fp), { from: fromOf(chat) });
+                let [window] = planWindows(messages, fp => records.isDone(chat.story_id, fp), { from: fromOf(chat), through: throughOf(chatKey) });
                 if (!window) break;
                 // 一段失败两次就对半切（整段送进去会触发中转/模型整段放弃，切小了往往就过了）；
                 // 切到单条还失败 MAX_FAILURES 次才跳过并留痕，不无限重试。
@@ -216,7 +219,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
             results.push({ error: error.message });
         } finally {
             busy = false;
-            runningChatKey = null;
+            runningChatKey = null; signal();
         }
         return { ran: results.filter(r => r.jobId).length, results };
     }
@@ -252,8 +255,24 @@ export function createWorker({ store, records, getConfig, clientFactory = create
         if (count) kick();
         return { ok: true, count };
     }
+    async function timeReady({ chatKey, source, timeoutMs = getConfig().assembler?.budgetMs }) {
+        if (!source) return { status: 'uncertain', reason: '没有时间来源' };
+        const chat = store.requireChat(chatKey), deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+        finalized.set(chatKey, source);
+        while (true) {
+            if (!store.currentMessages(chatKey).some(m => m.pos === source.pos && m.fp === source.fp)) return { status: 'uncertain', reason: '时间来源已变化' };
+            if (records.isDone(chat.story_id, source.fp)) return { status: 'complete', source };
+            if (!chat.extract || !ready(getConfig()) || waiting(chatKey) || lastError.has(chatKey) || Date.now() >= deadline) return { status: 'uncertain', source, reason: lastError.has(chatKey) ? '记账失败，时间未确认' : '时间尚未确认' };
+            const notice = new Promise(resolve => {
+                let timer;
+                const done = () => { clearTimeout(timer); changed.delete(done); resolve(); };
+                changed.add(done); timer = setTimeout(done, Math.max(0, deadline - Date.now()));
+            });
+            kick(); await notice;
+        }
+    }
     function start() { timer = setInterval(() => tick().catch(e => log(`tick: ${e.message}`)), intervalMs); }
     function stop() { clearInterval(timer); }
 
-    return { plan, setEnabled, run, retrySkipped, tick, kick, start, stop, setOnCommitted: callback => { onCommitted = callback; } };
+    return { timeReady, plan, setEnabled, run, retrySkipped, tick, kick, start, stop, setOnCommitted: callback => { onCommitted = callback; } };
 }

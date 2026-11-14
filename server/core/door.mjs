@@ -33,13 +33,16 @@ export function awaitingPockets(menu = [], { messages = [], isDone = null, recor
     return menu.map(m => typeof m.awaiting === 'boolean' || m.status !== 'pocket' ? m : awaitingExtract(m, { messages, isDone, record, same }) ? { ...m, awaiting: true } : { ...m, awaiting: false });
 }
 
-// 旁白留的记号"（该来：名字／方式）"：方式可缺；不一定在最末（模型常在后面又补一句），几处都有就认最后一个、全剥掉
-const MARK = /[（(]\s*该来\s*[:：]\s*([^()（）\r\n/／]+?)\s*(?:[/／]\s*(去找他|他过来|消息|电话)\s*)?[）)]/g;
+// 旁白留的记号"（该来：名字／方式）"：方式可缺；不一定在最末（模型常在后面又补一句），几处都有就认最后一个、全剥掉。
+// 名字里可以带一层括号（卡名"某某（来访）"，T135：带括号的名字认不出，记号漏到正文里、也没叫人）。扩展 sync.mjs 有同一份，两处一起改（测试核两边一致）
+// 空白每处至多 3 个、姓名至多 40 字；括号内也封顶，缺闭括号时不能反复分配成千空白。
+const MARK = /[（(]\s{0,3}该来\s{0,3}[:：]\s{0,3}(?!\s)((?:(?!\s{4})[^()（）\r\n/／]|[（(](?:(?!\s{4})[^()（）\r\n/／]){0,38}[）)]){1,40}?)\s{0,3}(?:[/／]\s{0,3}(去找他|他过来|消息|电话)\s{0,3})?[）)]/g;
 export function doorMark(text) {
     const s = String(text ?? '');
-    const all = [...s.matchAll(MARK)];
+    const valid = who => who === who.trim() && who.length > 0 && who.length <= 40 && !/\s{4}/.test(who);
+    const all = [...s.matchAll(MARK)].filter(m => valid(m[1]));
     if (!all.length) return { who: null, way: null, text: s };
-    return { who: all.at(-1)[1].trim(), way: all.at(-1)[2] ?? null, text: s.replace(MARK, '').replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trimEnd() };
+    return { who: all.at(-1)[1].trim(), way: all.at(-1)[2] ?? null, text: s.replace(MARK, (mark, who) => valid(who) ? '' : mark).replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trimEnd() };
 }
 
 const list = value => Array.isArray(value) ? value : Object.values(value ?? {});
@@ -95,7 +98,13 @@ export function doorAt(input = {}) {
             && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivalHistory ?? input.arrivals ?? [], knockLive: input.knockLive }));
         const reached = !memory && reach && ownIdentity({...reach,who:reach.person ?? reach.who});
         const called = uniqueName(who) && callsFor(narrationOf(recentUser), [who, ...(rel ? personOf(rel, who, names)?.又名 ?? [] : [])]);
-        const requested = request && ownIdentity(request) && last >= request.at && last - request.at <= 8;
+        const requestMessage = request && messages.find(m => m.pos === request.at);
+        const follower = rel && leaderOf(rel, who, names);
+        // 依附者的按钮请求须能核实原指纹；其他人的旧请求行为保留。
+        const requestLive = requestMessage && (Object.hasOwn(request, 'fp') ? !!request.fp && requestMessage.fp === request.fp : !follower && !!requestMessage.is_user);
+        const requested = request && ownIdentity(request) && requestLive && last >= request.at && last - request.at <= 8;
+        // 只跟着别人出现的人（关系表"跟着"）：门上不单独挂他——他不单独上门、发消息、打电话，跟着的那人来了他才在（T135）。玩家点名叫他的照旧
+        if (follower && !called && !requested) continue;
         const promises = list(pending.items).filter(p => p.kind === '约定' && ['到了', '排着'].includes(p.status)
             && (person.since == null || p.since >= person.since - 3)
             && [...(p.who ?? []), ...(p.with ?? [])].some(uniqueName)

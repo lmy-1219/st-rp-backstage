@@ -1,4 +1,6 @@
 import { freshChain } from './store.mjs';
+import { sameIdentity } from './cast.mjs';
+import { emptySegment } from './landing.mjs';
 
 // 记录（证据账）：每条都挂在一条消息（局＋指纹）上，带原文片段、谁的说法、当时谁在场。
 // 一个窗口能看到哪些记录，只看它当前序列里还有没有那条消息——改稿删稿后旧记录自动不可见。
@@ -252,6 +254,30 @@ export function openRecords(db) {
                   from assemble_calls where chat_key = ? order by id desc limit ?`).all(chatKey, limit);
     }
 
+    // 只纠正旧抽取账把“尚无任何区间的人”当成在场的错误，不重判离场后的空档。
+    // 首次非空区间或首次联系之后不再纠正；派生账有自己的知情途径，不走这里。
+    function absentMembers(chatKey) {
+        const chat = q('select members, anchors from chats where key = ?').get(chatKey);
+        let members = [], anchors = null, arrivals = [];
+        try {
+            members = JSON.parse(chat?.members ?? '[]') ?? [];
+            anchors = JSON.parse(chat?.anchors ?? 'null') ?? {};
+            arrivals = JSON.parse(q('select value from meta where key = ?').get(`arrivals:${chatKey}`)?.value ?? '[]') ?? [];
+        } catch { return null; }
+        if (!Array.isArray(members) || !members.length) return null;
+        const fps = new Map(q('select pos, fp from chat_seq where chat_key = ?').all(chatKey).map(r => [r.pos, r.fp]));
+        const firstIn = new Map();
+        for (const m of members) {
+            if (!m?.name) continue;
+            const froms = (anchors[m.avatar]?.segments ?? []).filter(s => !emptySegment(s)).map(s => s?.from).filter(Number.isFinite);
+            const contacts = arrivals.filter(e => sameIdentity(e, m, members) && Number.isFinite(e.at) && fps.get(e.at - 1) === e.fp).map(e => e.at);
+            const cutoff = Math.min(...froms, ...contacts);
+            // 无区间且未静音仍兼容开场就在；同名多头像须全部尚未到场才删这个名字。
+            const first = cutoff === Infinity && !m.disabled ? -Infinity : cutoff;
+            firstIn.set(m.name, Math.min(firstIn.get(m.name) ?? Infinity, first));
+        }
+        return firstIn.size ? (name, pos) => firstIn.has(name) && pos < firstIn.get(name) : null;
+    }
     // 窗口当前看得见的记录（消息还在序列里的）。带上出处位置。
     // 对账以后每条还带：closed_by（被看得见的"了结"或"回答"关上了：{id, pos}）、superseded_by（被看得见的"改掉"换掉了，以后不算数）。
     // 被改掉的默认不给（那一格、规划、账本都只拿活着的）；all=true 时连它们一起给（面板上划线显示）。
@@ -264,6 +290,8 @@ export function openRecords(db) {
                         group by r.id order by pos, r.id`).all(...[chatKey, status, ...(type ? [type] : []), ...(through == null ? [] : [through])]);
         const check = !rawBasis && sourceReader ? memo('sourceReader', chatKey, () => sourceReader(chatKey)) : null;
         const out = rows.map(r => ({ ...r, quotes: JSON.parse(r.quotes), audience: JSON.parse(r.audience), keys: r.keys ? JSON.parse(r.keys) : [], money: r.money ? JSON.parse(r.money) : null, relation: r.relation ? JSON.parse(r.relation) : null, clock: r.clock ? JSON.parse(r.clock) : null, wide: r.wide ? JSON.parse(r.wide) : [], faction: r.faction ? JSON.parse(r.faction) : null, promise: r.promise ? JSON.parse(r.promise) : null, known: r.known ? JSON.parse(r.known) : [], lesson: r.lesson ? JSON.parse(r.lesson) : null, life: r.life ? JSON.parse(r.life) : null, rep: r.rep ? JSON.parse(r.rep) : null, matter: r.matter ? JSON.parse(r.matter) : null })).filter(r => rawBasis || liveSource(r.known, chatKey, check));
+        const notThere = absentMembers(chatKey);
+        if (notThere) for (const r of out) if (r.job_id != null) r.audience = r.audience.filter(n => n === r.holder_name || !notThere(n, r.pos));
         if (status !== 'ok') return out;
         const { closed, answered, superseded, outgoing } = linksOf(chatKey, rawBasis, through);
         const byId = new Map(out.map(r => [r.id, r]));

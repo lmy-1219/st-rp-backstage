@@ -1,3 +1,4 @@
+import { timeTag } from './timeline.mjs';
 import { personWord, renderPronouns } from './pronoun.mjs';
 // 时间结算只理材料和结果；落账由 main 挂到消息指纹上。
 export const SETTLE_SYSTEM = [
@@ -14,12 +15,23 @@ export const SETTLE_SYSTEM = [
 // unanswered：〔当事人〕找过玩家、玩家一直没接的（waiting.mjs），也算进等回音；promises：〔当事人〕和别人约好、还没办的；here：玩家此刻在哪、身边有谁；around：别的有卡的人此刻在哪
 // own：〔当事人〕是主角团的人，最新一份规划里写的〔当事人〕自己的打算 { want: 想干, next: 下一步 }（用户 10/12，N-363：角色没有自己的驱动，和没后台时一样——
 // 不在场时按〔当事人〕的打算往前推一步，〔当事人〕下次露面带着结果来）
-export function settlePrompt({ who, userName = '玩家', span = '', leaving = '', errands = [], waits = [], profile = '', tie = '', place = '', unanswered = [], promises = [], here = '', around = [], own = null }) {
+export function settlementTimes(tl, { departure = null, previous = null } = {}) {
+    const end = tl.today;
+    const crossed = tl.rows.filter(r => r.crossed).at(-1);
+    const from = Number.isFinite(previous?.day) ? previous.day : crossed ? tl.dayOf(crossed.pos - 1) : tl.rows[0]?.day;
+    const tag = day => timeTag(day, { start: tl.start, today: end, timeScale: tl.scale });
+    const world = Number.isFinite(from) ? { from, to: end, span: end - from,
+        text: `${tag(from)}至${tag(end)}，共${tl.scale.span(Math.max(0, end - from))}（已确认）` } : null;
+    const row = departure == null ? null : tl.rows.filter(r => r.pos < departure).at(-1) ?? tl.rows.find(r => r.pos === departure);
+    return { world, departureDay: row?.day ?? null, away: row ? `从${tag(row.day)}至${tag(end)}，共${tl.scale.span(Math.max(0, end - row.day))}` : '离开起点不明，离开多久未确认' };
+}
+export function settlePrompt({ who, userName = '玩家', span = '', worldTime = null, leaving = '', errands = [], waits = [], profile = '', tie = '', place = '', unanswered = [], promises = [], here = '', around = [], own = null }) {
     const mine = own && (own.want || own.next) ? [renderPronouns("【〔当事人〕自己惦记的事】（这阵子〔当事人〕自己想办成的、下一步要去做的；这段时间〔当事人〕会照着去办，写进\"打算\"）", { person: who }), ...(own.want ? [`· 想办成：${own.want}`] : []), ...(own.next ? [`· 下一步：${own.next}`] : [])] : [];
     return [
         `【在外头的人】${who}`,
         `【玩家角色】${userName}`,
         `【过了多久】${span || '不清楚过了多久'}`,
+        `【已确认世界时间区间】${worldTime?.text ?? '区间未确认'}`,
         leaving ? `【${personWord(who)}走前那两条】${leaving}` : '',
         profile ? `【${personWord(who)}的兴趣和习惯】${profile}` : '',
         tie ? `【${personWord(who)}和${userName}】${tie}` : '',

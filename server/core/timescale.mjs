@@ -131,7 +131,13 @@ function parseNumber(s) {
 export function legacyDays(text) {
     const t = String(text ?? '');
     let m;
-    if ((m = /([0-9一二两三四五六七八九十半]+)\s*个?月/.exec(t))) return Math.round(parseNumber(m[1]) * 30);
+    // 月：有“个”、半/两，或前有过了/又/再/整整，才明确是时长。
+    // 时长前缀也须排除明确日历：翻过了某月、某月就是/便是/的日历/某日（号）。
+    // 裸数字月份＋之后/以后/过去按日历处理；例外保留“三月后”（后不接来）及“有余/多/之久”的时长口气。
+    // 日号的识别不在这里处理（T135）。
+    if ((m = /([0-9一二两三四五六七八九十半]+)\s*个月/.exec(t) ?? /(半|两)\s*月(?![0-9零〇一二三四五六七八九十]+\s*[日号])/.exec(t)
+        ?? /(?<!翻\s*)(?:过了|又|再|整整)\s*([0-9一二两三四五六七八九十]+)\s*月(?!\s*(?:就是|便是|的日历|[0-9零〇一二三四五六七八九十]+\s*[日号]))/.exec(t)
+        ?? /([0-9一二两三四五六七八九十]+)\s*月(?=后(?!来)|有余|多|之久)/.exec(t))) return Math.round(parseNumber(m[1]) * 30);
     if ((m = /([0-9一二两三四五六七八九十半]+)\s*(周|星期|礼拜)/.exec(t))) return Math.round(parseNumber(m[1]) * 7);
     // "半天""半夜"不到一天（半夜是时段），不算跨天
     if ((m = /(?<!第)([0-9一二两三四五六七八九十半]+)\s*(天|日|晚|夜)(?!黑|亮)/.exec(t)) && m[1] !== '半') return Math.max(1, Math.round(parseNumber(m[1])));
@@ -163,6 +169,8 @@ function nightDays(t) {
 export function elapsedUnits(text, timeScale = DAY, { exact = false } = {}) {
     const s = scaleOf(timeScale);
     const t = String(text ?? '');
+    // 日历值绝不是时长；旧记录也必须经过这个边界。
+    if (/\d{1,5}[-/]\d{1,2}[-/]\d{1,2}|[0-9零〇一二三四五六七八九十]+月\s*[0-9零〇一二三四五六七八九十]+[日号]/.test(t)) return 0;
     if (s.unit === '天') {
         const big = bigDays(t);
         return big != null ? Math.round(big) : legacyDays(t);
@@ -170,6 +178,64 @@ export function elapsedUnits(text, timeScale = DAY, { exact = false } = {}) {
     const days = bigDays(t) ?? spanDays(t, SMALL) ?? nightDays(t);
     const units = days / s.days;
     return exact ? units : Math.round(units);
+}
+
+// clock JSON 的统一入口。模型判语义，程序核出处、数值和日历；不从摘要正文补时长。
+const TIME_DAYS = { 小时: 1 / 24, 天: 1, 周: 7, 月: 365 / 12, 年: 365 };
+export function calendarSerial(value, { month30 = false } = {}) {
+    const m = /^(\d{1,5})-(\d{1,2})-(\d{1,2})$/.exec(String(value ?? ''));
+    if (!m) return null;
+    const [y, month, day] = m.slice(1).map(Number);
+    if (month < 1 || month > 12 || day < 1) return null;
+    if (month30) return day <= 30 ? (y * 12 + month - 1) * 30 + day - 1 : null;
+    const d = new Date(0);
+    d.setUTCHours(0, 0, 0, 0); d.setUTCFullYear(y, month - 1, day);
+    return d.getUTCFullYear() === y && d.getUTCMonth() === month - 1 && d.getUTCDate() === day ? d.getTime() / 86400000 : null;
+}
+
+export function timeEvidence(record, timeScale = DAY, { start = null } = {}) {
+    const ts = scaleOf(timeScale), r = record;
+    const pending = reason => ({ status: 'uncertain', reason, units: 0 });
+    if (r.clock?.unsure) return pending('时间证据待确认');
+    if (Number.isInteger(r.setDay)) return { status: 'confirmed', setDay: r.setDay, units: 0 };
+    if (Number.isFinite(r.units)) return { status: 'confirmed', units: r.units };
+    const facts = r.clock?.evidence;
+    if (Array.isArray(facts)) {
+        if (!facts.length) return pending('没有时间证据');
+        let setDay = null, units = null;
+        for (const f of facts) {
+            if (!f || f.type === 'uncertain' || f.now !== true) return pending('时间是否属于当下尚未确认');
+            if (typeof f.quote !== 'string' || !f.quote.trim() || !(r.quotes ?? []).some(q => String(q).includes(f.quote))) return pending('时间引文未核实');
+            if (f.type === 'absolute') {
+                const opts = { month30: !!start?.纪年?.length };
+                const base = calendarSerial(start?.日期, opts), date = calendarSerial(f.date, opts);
+                if (base == null || date == null) return pending('日期或开局基准不完整');
+                const [y, month, day] = f.date.split('-').map(Number);
+                if (!f.quote.includes(f.date) && !f.quote.includes(`${y}年${month}月${day}日`)) return pending('完整日期没有原文支持');
+                const delta = ts.unit === '月' ? (() => { const a = String(start.日期).split('-').map(Number), b = f.date.split('-').map(Number); return (b[0] - a[0]) * 12 + b[1] - a[1]; })()
+                    : ts.unit === '年' ? Number(f.date.split('-')[0]) - Number(start.日期.split('-')[0]) : (date - base) / ts.days;
+                if (setDay != null && setDay !== delta) return pending('日期证据矛盾');
+                setDay = delta;
+            } else if (f.type === 'elapsed') {
+                if (!(Number.isFinite(f.value) && f.value >= 0 && TIME_DAYS[f.unit])) return pending('时长值无效');
+                const quoted = elapsedUnits(f.quote, scaleOf({ 单位: f.unit === '周' ? '天' : f.unit }), { exact: true });
+                if (Math.abs(quoted - f.value * (f.unit === '周' ? 7 : 1)) > 1e-8) return pending('时长数值没有原文支持');
+                const amount = f.value * TIME_DAYS[f.unit] / ts.days;
+                if (units != null && units !== amount) return pending('时长证据矛盾');
+                units = amount;
+            } else return pending('时间类型未知');
+        }
+        return { status: 'confirmed', units: units ?? 0, setDay, hasElapsed: units != null, typed: true };
+    }
+    const elapsed = String(r.elapsed ?? '').trim();
+    if (!elapsed && r.clock?.part && !r.clock?.evidence) return { status: 'confirmed', units: 0 };
+    if (!elapsed || /不明|不清|不详|未知|拿不准|不确定|几|数|来|多|约/.test(elapsed)) return pending('旧时间证据无法安全升级');
+    if (/^(?:[0-9]{1,2}|[一二三四五六七八九十]{1,3})月(?:份|的.*)?$/.test(elapsed)) return pending('月份不能升级为时长');
+    const legacyUnits = elapsedUnits(elapsed, ts, { exact: true });
+    if (Array.isArray(r.quotes) && !r.manual && !r.absence && !r.provisional && !r.fromNote && !r.fromHeader
+        && !r.quotes.some(q => String(q).includes(elapsed) || (legacyUnits > 0 && elapsedUnits(q, ts, { exact: true }) === legacyUnits))) return pending('旧时长缺少引文支持');
+    const units = elapsedUnits(elapsed, ts, { exact: true });
+    return units > 0 ? { status: 'confirmed', units } : pending('旧时间不是明确时长');
 }
 
 // 往回说多久以前（天尺度和以前的 relativeDay 一字不差）。

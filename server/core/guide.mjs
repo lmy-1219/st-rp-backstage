@@ -60,17 +60,17 @@ export function stuckAt({ messages = [], events = [], shown = null, quiet = GUID
 // 路标卡的亲密口径：强信号 ≥1，或弱信号 ≥3 且散在至少 CLOSE_SOFT_MSGS 条不同消息里。
 // 与叩门的单条弱信号口径各自保留；occasionOf 的旧口径也保留。
 export const CLOSE_SOFT_MSGS = 2;
-export function closeStrict(messages = []) {
-    const rows = closeCountsByMessage(messages);
+export function closeStrict(messages = [], people = {}) {
+    const rows = closeCountsByMessage(messages, people);
     const strong = rows.reduce((n, r) => n + r.strong, 0), soft = rows.reduce((n, r) => n + r.soft, 0);
     return strong >= 1 || (soft >= 3 && rows.filter(r => r.soft > 0).length >= CLOSE_SOFT_MSGS);
 }
 // 紧张只认强信号；弱信号凑数（日常的撞、退后、拔出）不算。
 export { tenseStrict };
-export function immersive(messages) {
-    const occ = occasionOf(messages);
+export function immersive(messages, people = {}) {
+    const occ = occasionOf(messages, people);
     if (occ === '紧张' && !tenseStrict(messages)) return heartToHeart(messages) ? '交心' : null;
-    if (occ === '亲密' && !closeStrict(messages)) return heartToHeart(messages) ? '交心' : null;
+    if (occ === '亲密' && !closeStrict(messages, people)) return heartToHeart(messages) ? '交心' : null;
     return occ ?? (heartToHeart(messages) ? '交心' : null);
 }
 
@@ -136,7 +136,7 @@ export function guideAt(input = {}) {
     const st = stuckAt({ messages, events: input.events ?? [], shown: input.shown ?? null, quiet: cfg.quiet, scene: cfg.scene, same: input.same });
     const items = signposts({ menu: input.menu, today: input.today, node: input.node, players: input.players, present: input.present, names: input.names, visible: input.visible, messages, max: cfg.max, nearPlace: input.nearPlace, render: input.render });
     const skip = skipLine({ menu: input.menu, today: input.today, timeScale: input.timeScale });
-    const scene = immersive(messages);
+    const scene = immersive(messages, { names: [...(input.names ?? []), ...(input.present ?? []), ...(input.players ?? [])], roster: input.roster, relations: input.relations });
     const hasChoice = items.length > 0 || !!skip;
     // 停得够久（没新事的条数到 quiet 的 stall 倍，T077）：后台补货（不看沉浸、不看弹过没有）；被沉浸挡着时弹轻卡（只有 skip，没有 skip 不弹）
     const long = cfg.enabled && st.quietCount >= cfg.quiet * cfg.stall;
@@ -167,7 +167,7 @@ export function guideFor(store, records, chatKey, { present = [], config = null,
     const events = eventsOf({ messages, menu, arrivals: read(store, `arrivals:${chatKey}`, []), plans: store.readyPlans?.(chatKey) ?? [], same });
     const visible = (records.visible?.(chatKey) ?? []).filter(r => r.pos <= (messages.at(-1)?.pos ?? -1));
     const render = (text, m, part, today) => renderEntry(text, m, { sourceDay: part.pos != null ? timeline.dayOf(part.pos) : part.day ?? m.said_day, today, timeScale: scaleFor(store, chatKey), roster, messages });
-    const out = guideAt({ cfg: config, messages, events, shown: read(store, SHOWN_KEY(chatKey), null), same, menu, today: timeline.today, node, players, present, names, visible, timeScale: scaleFor(store, chatKey), nearPlace, render });
+    const out = guideAt({ cfg: config, messages, events, shown: read(store, SHOWN_KEY(chatKey), null), same, menu, today: timeline.today, node, players, present, names, roster, relations: store.relationsOf?.(chat.story_id), visible, timeScale: scaleFor(store, chatKey), nearPlace, render });
     return { ...out, last, lastMessage: messages.at(-1) ?? null };
 }
 

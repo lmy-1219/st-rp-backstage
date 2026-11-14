@@ -13,14 +13,15 @@ import { turnDetail } from './director.mjs';
 import { knockState, knockTiming, wayOf as knockWayOf } from './knock.mjs';
 import { leftAt, completedDeparture, qualifiedAt } from './leaving.mjs';
 import { callsOf } from './camera-turn.mjs';
-import { normalizeRelations } from './relations.mjs';
+import { normalizeRelations, leaderOf, personOf } from './relations.mjs';
 import { boardFor, sourceVersion, factBasis, factCurrent, factInput } from './board.mjs';
 import { capFresh } from './door.mjs';
 import { pendingFor } from './pending.mjs';
 import { timelineFor, paceFor, playModeOf } from './slot.mjs';
 import { isOpenMatter, INTENT, closeIntents } from './matters.mjs';
 import { sameName } from './setup.mjs';
-import { hasCard } from './arrival.mjs';
+import { hasCard, callsFor } from './arrival.mjs';
+import { narrationOf } from './timeline.mjs';
 import { resolveIdentity, sameIdentity, messageIsPerson } from './cast.mjs';
 import { isPrivate } from './visibility.mjs';
 
@@ -231,6 +232,41 @@ export function executionResult(store, chatKey, receipt, { records = null, confi
 
 export const knocksOf = (store, chatKey) => read(store, KNOCKS(chatKey), []).filter(k => k && k.who && num(k.at) != null);
 const blockedKnock = (store, chatKey, k) => playModeOf(store, chatKey) === 'memory' && ['pocket','contact','reach'].includes(k?.source?.type);
+// 请求证据绑定请求本身，不能借普通来源的 sameMessage 改稿兼容续命。
+function playerRequestFor(store, chatKey, person, { through = Infinity } = {}) {
+    const chat = store.requireChat(chatKey), roster = store.getCast(chat.story_id) ?? [];
+    const raw = store.relationsOf?.(chat.story_id), rel = raw ? normalizeRelations(raw) : null;
+    const names = roster.map(p => p.name);
+    const messages = store.currentMessages(chatKey).filter(m => m.pos <= through);
+    const last = messages.at(-1)?.pos ?? -1;
+    const unique = resolveIdentity(roster.filter(hasCard), person.who).person?.avatar === person.avatar;
+    const called = m => m?.is_user && unique && callsFor(narrationOf(m.text), [person.who, ...(rel ? personOf(rel, person.who, names)?.又名 ?? [] : [])]);
+    const valid = proof => {
+        if (!proof || !sameIdentity(proof, person, roster)) return false;
+        const message = messages.find(m => m.pos === proof.at);
+        if (!message) return false;
+        if (proof.type === 'message') return !!proof.fp && message.fp === proof.fp && !!called(message);
+        if (proof.type !== 'button') return false;
+        // 无指纹不能证明请求未改稿，不单独豁免依附者；需当前点名或重新点按钮。
+        return !!proof.fp && message.fp === proof.fp;
+    };
+    // 本次请求已撤回就作废，不用别的当前请求替换这次证据。
+    if (person.playerRequest) return valid(person.playerRequest) ? person.playerRequest : null;
+    const request = read(store, `arrival_request:${chatKey}`, null);
+    const button = request && { ...request, type: 'button' };
+    if (button && last >= button.at && last - button.at <= 8 && valid(button)) return { ...button, who: person.who, avatar: person.avatar };
+    const recent = [...messages].reverse().find(m => m.is_user);
+    return called(recent) ? { type: 'message', who: person.who, avatar: person.avatar, at: recent.pos, fp: recent.fp } : null;
+}
+// 旧 pending 和直接远程进场也要守门；只有可辨认的玩家点名/请求能让依附者单独来。
+export function unrequestedFollower(store, chatKey, person, { through = Infinity } = {}) {
+    const chat = store.requireChat(chatKey), roster = store.getCast(chat.story_id) ?? [];
+    const raw = store.relationsOf?.(chat.story_id), rel = raw ? normalizeRelations(raw) : null;
+    const names = roster.map(p => p.name);
+    if (!rel || !leaderOf(rel, person.who, names)) return false;
+    if (person.source?.type === 'named') return false;
+    return !playerRequestFor(store, chatKey, person, { through });
+}
 export const pendingKnock = (store, chatKey) => {
     const k=read(store,PENDING(chatKey),null);
     let valid=!k||currentSource(store,chatKey,k,false);
@@ -241,7 +277,8 @@ export const pendingKnock = (store, chatKey) => {
             const b=k.sourceBasis.rows[i];return m.pos===b.pos&&!!m.hidden===b.hidden&&(m.boardMark??null)===b.mark&&(m.fp===b.fp||store.sameMessage?.(m.fp,b.fp));
         });
     }
-    if(k&&!valid){store.logEvent?.(chatKey,'auto_stale_result',{avatar:k.avatar,reason:'叩门来源版本已改变'});write(store,PENDING(chatKey),null);dropKnockArrival(store,chatKey,k);return null;}
+    const follower = k && unrequestedFollower(store, chatKey, k);
+    if(k&&(!valid||follower)){store.logEvent?.(chatKey,'auto_stale_result',{avatar:k.avatar,reason:follower?'依附角色没有玩家请求，旧叩门失效':'叩门来源版本已改变'});write(store,PENDING(chatKey),null);dropKnockArrival(store,chatKey,k);return null;}
     return blockedKnock(store,chatKey,k) ? null : k;
 };
 export const writeKnocks = (store, chatKey, knocks) => {
@@ -390,6 +427,13 @@ export function recentLapsed(store, chatKey) {
 export function beginKnock(store, chatKey, k) {
     const basisDay = k.basisDay ?? store.confirmedDayAt?.(chatKey, k.at - 1) ?? timelineFor(store, null, chatKey).firmToday;
     const pending = { who: k.who, avatar: k.avatar ?? null, way: k.way, mode: k.mode ?? modeOf(k.way), at: k.at, fp: k.fp, through:k.at-1, sourceVersion:sourceVersion(store,chatKey,k.at-1), basisDay, source: k.source ?? null, sourceStep: sourceStep(store, chatKey, k), label: k.label ?? '', since: Date.now() };
+    const chat = store.requireChat(chatKey), raw = store.relationsOf?.(chat.story_id);
+    const names = (store.getCast(chat.story_id) ?? []).map(p => p.name);
+    // 联系候选可能排在 named 前面；进场会消费 arrival_request，先把可核实的请求随这次叩门留下。
+    if (raw && leaderOf(normalizeRelations(raw), k.who, names)) {
+        const request = playerRequestFor(store, chatKey, k, { through: k.at - 1 });
+        if (request) pending.playerRequest = request;
+    }
     if(['contact','pocket'].includes(k.source?.type))pending.sourceBasis={version:sourceVersion(store,chatKey,-1),rows:store.currentMessages(chatKey).filter(m=>m.pos<k.at).map(m=>({pos:m.pos,fp:m.fp,hidden:!!m.hidden,mark:m.boardMark??null}))};
     write(store, PENDING(chatKey), pending);
     return pending;
@@ -458,7 +502,7 @@ export async function knockAdvance(store, records, chatKey, { arrive = null, jud
         const his = isHis(messages.find(m => m.pos === pending.at), pending);
         if (!anchored || (messages.some(m => m.pos >= pending.at) && !his)) { write(store, PENDING(chatKey), null); dropKnockArrival(store, chatKey, pending); }
         else if (his) {
-            const k = { who: pending.who, avatar: pending.avatar ?? null, way: pending.way, at: pending.at, fp: pending.fp, basisDay: pending.basisDay, source: pending.source ?? null, sourceStep: pending.sourceStep ?? null, verdicts: {} };
+            const k = { who: pending.who, avatar: pending.avatar ?? null, way: pending.way, at: pending.at, fp: pending.fp, basisDay: pending.basisDay, source: pending.source ?? null, sourceStep: pending.sourceStep ?? null, ...(pending.playerRequest ? { playerRequest: pending.playerRequest } : {}), verdicts: {} };
             knocks = [...knocks, k];
             writeKnocks(store, chatKey, knocks);
             write(store, PENDING(chatKey), null);

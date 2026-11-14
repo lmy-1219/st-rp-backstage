@@ -5,7 +5,7 @@ import { personWord, renderPronouns } from './pronoun.mjs';
 // 开了叙事组装时再给一批更宽的候选（pool），由 assemble.mjs 请模型串成回忆线。相对时间只认记账里的"时间"记录（§5.6）。
 // repeatedPhrases 留着备用，不再放进格子（否定式提醒对前台无效）。
 
-import { elapsedUnits, relativeUnit, scaleOf, DAY } from './timescale.mjs';
+import { elapsedUnits, relativeUnit, scaleOf, DAY, timeEvidence } from './timescale.mjs';
 import { similar } from './records.mjs';
 
 const RECENT_WINDOW = 30;      // 最近这么多条消息里的事前台自己看得见，不再重复
@@ -62,7 +62,7 @@ export function timeSkipIn(text, { previousPart = null } = {}) {
 }
 
 // 每条消息位置 → 第几天（从 0 起）。只看看得见的"时间"记录；
-// 相隔三条以内的几条"时间"多半说的是同一次（"度过了一夜"＋"第二天早上"），只算一次、取大的。
+// 同来源的同一时间点只算一次；独立的近邻跳转分别计算。
 // 用户离开的那段（absence.mjs 记的，absence: true）之后不远，有人说起"昏了十一天""已经过了十一天"，是在交代那段空白，
 // 记账偶尔会记成"时间"（实测一连三条）：天数和离开的差不多的，算那一次，不再加。
 // 隔远了也一样（质量窗 9/29：醒来二十多条后他说"你躺的那十一天里"，又被记成过了十一天，剧情日从 20 跳到 31）：
@@ -74,35 +74,63 @@ const recalls = m => m.quotes.length > 0 && !FORWARD.test(m.quotes.join(' '));
 // "第六天一早"这种只说第几天的，程序算不出隔了几天）；cancel＝"这里没有跨天"——那条和它后面三条以内
 // 系统认的跨天都不算（系统认的跨天落在一组的第一条上，标签也挂在那里）。记账标了"拿不准"（clock.unsure）的不推进，等用户点。
 // timeScale：这一局的尺度（timescale.scaleOf；不给就是天）。按单位数；年、月这类尺度下"三个月"记成 0.25 年累加，最后四舍五入。
-export function dayIndex(timeRecords, lastPos, timeScale = DAY) {
+export function dayIndex(timeRecords, lastPos, timeScale = DAY, { start = null } = {}) {
     const ts = scaleOf(timeScale);
-    const took = t => elapsedUnits(t, ts, { exact: true });
     const cancels = timeRecords.filter(r => r.cancel).map(r => r.pos);
     const cancelled = r => !r.manual && !r.absence && cancels.some(p => r.pos >= p && r.pos <= p + 3);
-    // 时长那一格没写明、那句话里写了"过了一夜"的也算（试玩 10/6）
+    // 只采用已规范化的时间证据；摘要正文不补时长。
     // units：已经折成这一局格数的（此刻的样子报的"第二天·早上"，timeline.noteMarks）
-    const raw = timeRecords.filter(r => !r.cancel && !r.clock?.unsure && !cancelled(r))
-        .map(r => ({ pos: r.pos, add: Number.isInteger(r.setDay) ? 0 : Number.isFinite(r.units) ? r.units : Math.max(took(r.elapsed ?? r.text), r.elapsed && r.text ? took(r.text) : 0), setDay: Number.isInteger(r.setDay) ? r.setDay : null, absence: !!r.absence, manual: !!r.manual, quotes: Array.isArray(r.quotes) ? r.quotes.map(String) : [] }))
-        .filter(m => m.add > 0 || m.setDay != null).sort((a, b) => a.pos - b.pos);
+    const pending = [];
+    const raw = timeRecords.filter(r => !r.cancel && !cancelled(r)).flatMap(r => {
+        const e = timeEvidence(r, ts, { start });
+        if (e.status !== 'confirmed') { pending.push({ pos: r.pos, ...e }); return []; }
+        return [{ pos: r.pos, add: e.units, setDay: e.setDay ?? null, typed: !!e.typed,
+            hasElapsed: e.hasElapsed, source: r.clock?.source ?? r.fp ?? null, point: r.clock?.point ?? null,
+            legacyNight: !e.typed && !r.clock?.source && r.clock?.point == null && /一[夜宿晚]/.test(r.elapsed ?? '') && !/又|再|另/.test([r.elapsed, ...(r.quotes ?? [])].join(' ')),
+            absence: !!r.absence, manual: !!r.manual, quotes: Array.isArray(r.quotes) ? r.quotes.map(String) : [] }];
+    }).filter(m => m.add > 0 || m.setDay != null).sort((a, b) => a.pos - b.pos || Number(a.manual) - Number(b.manual));
     const marks = [];
     let away = null;
     for (const m of raw) {
         const prev = marks[marks.length - 1];
         // 离开三天以上时差一天也算同一次（"昏了十一天"对上离开十二天）；离开没几天时要一样才算
         // （质量窗 9/28：离开一天后说"两天后的深夜"，被当成交代那一天吞掉了）。
-        if (!m.absence && !m.manual && away && Math.abs(m.add - away.add) <= (away.add >= 3 ? 1 : 0) && (m.pos - away.pos <= ABSENCE_ECHO || recalls(m))) continue;
+        if (!m.typed && !m.absence && !m.manual && away && Math.abs(m.add - away.add) <= (away.add >= 3 ? 1 : 0) && (m.pos - away.pos <= ABSENCE_ECHO || recalls(m))) continue;
         if (m.absence) away = m;
-        // 挨得近的算同一次（用户自己点的两处各算各的）；用户点的那条说了从哪起算，就从那条起
-        if (prev && m.pos - prev.pos <= 3 && !(m.manual && prev.manual)) {
+        // 无出处字段的旧相邻同夜复述只确认一夜；不把任意近邻跳时合成一次。
+        if (prev?.legacyNight && m.legacyNight && !prev.manual && !m.manual && !prev.absence && !m.absence
+            && m.pos === prev.pos + 1 && m.add === 1 && prev.add === 1) continue;
+        // 同楼／同来源时间点合并；旧手标的邻楼纠正保持兼容。
+        if (prev && !(m.manual && prev.manual) && (
+            m.pos === prev.pos || (m.point != null && m.point === prev.point && m.source === prev.source)
+            || ((m.manual || prev.manual) && !m.typed && !prev.typed && m.pos - prev.pos <= 3))) {
+            if (!m.manual && (prev.conflict || (prev.typed && m.typed && prev.hasElapsed && m.hasElapsed && prev.add !== m.add))) {
+                prev.conflict = true; prev.add = 0; prev.setDay = null;
+                pending.push({ pos: prev.pos, reason: '同来源时长证据矛盾' }); continue;
+            }
             prev.add = Math.max(prev.add, m.add);
-            if (m.manual && !prev.manual) Object.assign(prev, { pos: m.pos, manual: true, setDay: m.setDay });
+            if (!prev.manual && m.setDay != null) {
+                if (prev.setDay != null && prev.setDay !== m.setDay) { pending.push({ pos: m.pos, reason: '同楼日期证据矛盾' }); prev.conflict = true; prev.add = 0; prev.setDay = null; }
+                else prev.setDay = m.setDay;
+            }
+            prev.hasElapsed ||= m.hasElapsed;
+            if (m.manual && !prev.manual) Object.assign(prev, m, { conflict: false });
         } else marks.push({ ...m });
     }
     // 定了第几天的：这一处加多少按前面已经算到第几天倒推（系统多算了的也能往回改）
     let running = 0;
-    for (const m of marks) { if (m.setDay != null) m.add = m.setDay - running; running += m.add; }
+    for (const m of marks) {
+        if (m.conflict) { m.add = 0; continue; }
+        if (m.setDay != null) {
+            if (m.hasElapsed && Math.abs(m.setDay - running - m.add) > 1e-8) { pending.push({ pos: m.pos, reason: '日期与时长矛盾' }); m.add = 0; continue; }
+            m.add = m.setDay - running;
+        }
+        running += m.add;
+    }
     const sum = pos => marks.reduce((d, m) => (m.pos <= pos ? d + m.add : d), 0);
-    return ts.unit === '天' ? sum : pos => Math.round(sum(pos));
+    const result = pos => Math.round(sum(pos));
+    result.marks = marks; result.pending = pending.filter(p => !timeRecords.some(r => r.pos === p.pos && (r.manual || r.cancel)));
+    return result;
 }
 
 // 交代、要办的事过没过期（质量窗：联系机会里列着几天前"今晚把车倒进巷子"这种当天的交代）。age＝记下它以来过了几个剧情日。
@@ -263,14 +291,27 @@ const isOffstageDerived = (r, ctx) => isRemoteRecord(r, ctx)
     || r?.type === '听说'
     || r?.matter?.entry === '镜头外'
     || (Array.isArray(r?.links) && r.links.some(l => l?.kind === '交代'));
+export function lastPhysicalPresence(segs = [], current = null, { boardAt = null, avatar = null, messages = [] } = {}) {
+    if (!avatar || typeof boardAt !== 'function') return null;
+    const ends = segs.filter(s => s !== current && Number.isFinite(s.from) && Number.isFinite(s.to) && s.to > s.from
+        && (!current || s.to <= current.from)).sort((a, b) => b.to - a.to);
+    for (const s of ends) {
+        const pos = s.to - 1;
+        if (!messages.some(m => m.pos === pos && !m.hidden)) continue;
+        try {
+            const people = boardAt(pos)?.people ?? [];
+            if (people.some(p => p.avatar === avatar && p.status === 'present')) return pos;
+        } catch {}
+    }
+    return null;
+}
 function checkEntry(mine, segs, current, lastPos, ctx = {}) {
     if (!current || !(lastPos - current.from <= 3)) return { show: false, lastSeen: null };
-    const closedSegs = (segs ?? []).filter(s => s !== current && s.to != null && s.to <= current.from && s.to > (s.from ?? 0));
-    // 此前当面在场的记录才算"上次在场"；静音旁听过（没有区间、也不是隔空）的算当面，只隔空联系过的不算。分不清的当没对上（多报一句刚到场，不冒串知的险）
-    const inPersonBefore = [...mine].reverse().find(r => r.pos < current.from && !isOffstageDerived(r, ctx)) ?? null;
-    if (closedSegs.length > 0) return { show: true, lastSeen: inPersonBefore };
-    if (inPersonBefore) return { show: false, lastSeen: null };
-    return { show: true, lastSeen: null };
+    // 首次开段前已有明确当面旁听记录时，保留原有不报刚到场的行为。
+    const hasEarlierSegment = segs.some(s => s !== current && s.to != null && s.to > s.from && s.to <= current.from);
+    if (!hasEarlierSegment && mine.some(r => r.pos < current.from && !isOffstageDerived(r, ctx))) return { show: false, lastSeen: null };
+    const lastPosInPerson = lastPhysicalPresence(segs, current, ctx);
+    return { show: true, lastSeen: lastPosInPerson == null ? null : { pos: lastPosInPerson } };
 }
 const parsePromiseField = p => {
     if (!p) return null;
@@ -408,17 +449,16 @@ function clusters(positions) {
 const clashes = r => (Array.isArray(r?.known) ? r.known : []).filter(k => k?.clash);
 export const withClash = r => (clashes(r).length ? { ...r, text: `${String(r.text).replace(/[。．.]+$/, '')}（这是当时的说法，和「${clashes(r).map(k => k.title).join('」「')}」对不上，以那条为准）` } : r);
 
-export function selectMaterial({ name, present = [], messages, records: given, openIdeaIds, recent = [], recentUser = '', queryKeys = [], queryWide = [], sense = null, recalled = new Map(), timeMarks = [], timeRecs = null, anchors = null, avatar = null, pool: wantPool = false, skipOpen = null, more = false, scale = 1, timeScale = DAY, tag = null, boardAt = null }) {
+export function selectMaterial({ name, present = [], messages, records: given, openIdeaIds, recent = [], recentUser = '', queryKeys = [], queryWide = [], sense = null, recalled = new Map(), timeMarks = [], timeRecs = null, anchors = null, avatar = null, pool: wantPool = false, skipOpen = null, more = false, scale = 1, timeScale = DAY, tag = null, boardAt = null, timeStart = null, dayOf = null }) {
+    if (!Array.isArray(recent)) recent = recent ? [String(recent)] : [];
     // scale：跟着 ST 的上下文大小（slot.roomFit，N-288）：旧事给几条照它放宽、收窄，至少一条
     const n = k => Math.max(1, Math.round(k * (Number(scale) > 0 ? scale : 1)));
-    const empty = { name, entry: null, hits: [], state: [], open: [], pool: [], stale: new Set(), when: () => '', who: () => '', more };
     const records = given.map(withClash);
-    if (!records.length) return empty;
     const lastPos = messages.length ? messages[messages.length - 1].pos : 0;
     const recentFrom = lastPos - RECENT_WINDOW;
     // 算日子用全部的"时间"记录（timeRecs）：给他看的那份筛过（伤病那道闸拿掉了写着推药的"睡了一夜"），拿它算会少跨几天，
     // 旧事全往近里说（试玩 10/12：第 8 天的场记里第 5、6 天的事成了"昨天""今天早些时候"）
-    const toDay = dayIndex([...(timeRecs ?? records.filter(r => r.type === '时间')), ...timeMarks], lastPos, timeScale);
+    const toDay = dayOf ?? dayIndex([...(timeRecs ?? records.filter(r => r.type === '时间')), ...timeMarks], lastPos, timeScale, { start: timeStart });
     const today = toDay(lastPos + 0.5);   // 最后一条之后刚离开过（离开记在那条之后半格）：回来先开口的这一轮，今天已经是离开之后
     // tag(第几格, 今天)：场记里说"哪天"的同一种写法（timeline.timeTag）；没给照旧说离今天多远
     const when = r => (tag ? tag(toDay(r.pos), today) : relativeDay(today - toDay(r.pos), timeScale));
@@ -438,7 +478,7 @@ export function selectMaterial({ name, present = [], messages, records: given, o
     let entry = null;
     const segs = avatar && anchors?.[avatar]?.segments;
     const current = segs?.find(s => s.to == null);
-    const entryInfo = checkEntry(mine, segs, current, lastPos, { boardAt, name });
+    const entryInfo = checkEntry(mine, segs, current, lastPos, { boardAt, name, avatar, messages });
     if (entryInfo.show) {
         const lastSeen = entryInfo.lastSeen;
         entry = lastSeen

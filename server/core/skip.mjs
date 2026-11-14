@@ -8,7 +8,6 @@
 //   - "这段时间"那一块：空白过后头一个开口的人多一块，纯程序拼——在外头的人办到哪儿、谁找过玩家没人应、外面看得到的动静、
 //     到日子没办的约定；至多八行；旁白拿全部，有卡的人只拿他知道的。
 // 题材无关：日子、地方、人都来自聊天、记账和规划。
-import { elapsedDays, timeSkipIn } from './recall.mjs';
 import { entryOf, ttlOf, SCENE_TTL, nearPlace } from './planner.mjs';
 import { datedEvent, mainEvent } from './eventlead.mjs';
 
@@ -19,14 +18,12 @@ const SAID_MAX = 300;
 const clip = (s, n) => { const t = String(s ?? '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n)}…` : t; };
 const tidy = t => String(t ?? '').trim().replace(/[。；;，,]+$/, '');
 
-// 这条玩家的话是不是在交代时间往前走了：叙述里明写了（timeSkipIn）；记账在这条上记了"时间"、过了一天以上；
+// 玩家交代跳时的来源：只用统一折算后实际推进的证据与手标；
 // 记在附近几条上的"时间"引的是这条里的原话；用户在这条上点过"从这条起算新的一天／第几天"。
-function toldSkip(m, timeRecs) {
-    if (timeSkipIn(m.text)) return true;
+function toldSkip(m, dayOf) {
     if (/^(?:day|d:\d)/.test(String(m.mark ?? ''))) return true;
-    const days = r => Math.max(elapsedDays(r.elapsed ?? ''), elapsedDays(r.text ?? ''));
-    return timeRecs.some(r => !r.cancel && days(r) >= 1 && (r.pos === m.pos
-        || (r.pos > m.pos && r.pos - m.pos <= 3 && (r.quotes ?? []).some(q => String(q).length >= 2 && String(m.text ?? '').includes(q)))));
+    return (dayOf.marks ?? []).some(r => r.add > 0 && (r.pos === m.pos || (r.pos > m.pos && r.pos - m.pos <= 3
+        && (r.quotes ?? []).some(q => String(q).length >= 2 && String(m.text ?? '').includes(q)))));
 }
 
 // 最近一次跨天是不是玩家交代的一段空白。messages＝[{pos, fp, is_user, text, mark}]；dayOf＝记下的日子（不算还没记账的临时认的）；
@@ -42,14 +39,15 @@ export function findSkip({ messages = [], timeRecs = [], marks = [], dayOf = nul
     // 玩家离开（absence）那段：另有离开的推演，不算这一种
     if (marks.some(x => x.absence && x.pos > prev.pos - 1 && x.pos <= cross.pos)) return null;
     const from = dayOf(prev.pos), to = dayOf(cross.pos);
-    const user = messages.filter(m => m.is_user && m.pos <= cross.pos && cross.pos - m.pos <= 3 && m.pos > prev.pos - 3).reverse().find(m => toldSkip(m, timeRecs));
+    const user = messages.filter(m => m.is_user && m.pos <= cross.pos && cross.pos - m.pos <= 3 && m.pos > prev.pos - 3).reverse().find(m => toldSkip(m, dayOf));
     if (!user) return null;
     return { pos: user.pos, fp: user.fp, crossPos: cross.pos, fromPos: Math.min(prev.pos, user.pos - 1), fromDay: from, toDay: to, span: to - from, said: String(user.text ?? '').trim().slice(0, SAID_MAX) };
 }
 
 // 记下的几段里还作数的（挂的那条还在）
-export function liveSkips(list, messages = []) {
-    return (Array.isArray(list) ? list : []).filter(s => s && messages.some(m => m.pos === s.pos && m.fp === s.fp));
+export function liveSkips(list, messages = [], dayOf = null) {
+    return (Array.isArray(list) ? list : []).filter(s => s && messages.some(m => m.pos === s.pos && m.fp === s.fp)
+        && (!dayOf || (dayOf(s.fromPos) === s.fromDay && dayOf(s.crossPos) === s.toDay && s.span === s.toDay - s.fromDay)));
 }
 
 // 这件在不在空白里：空白里得有整天（走了两天以上）；口袋里放着的（空白之前放进去的）、到日子落在空白里的（还排着的，

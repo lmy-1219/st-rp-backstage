@@ -29,7 +29,7 @@ export const SYSTEM_PROMPT = `你在给一部长篇角色扮演做"记账"。这
   "做"——他做了一件会有后续的事；他看见别人做的、会有后续的事也算（有人在找什么、谁在盯着谁、谁动了什么），"关于谁"填那个人或势力。披衣服、捡起东西、看了一眼没吱声这类小动作不记，原文里查得到；
   "想法"——有人提出的想法、提议、打算、约好要一起做的事，哪怕是随口一句；
   "改变"——这条消息让某人、某物、某地的状态发生了会持续下去的改变（身上的、处境上的、心里长久的都算：受了伤、搬了家、从此落下了心病；心里一阵子的劲记"余波"）。要有这条消息里发生的事做依据（受了伤、砸了、搬了、定了、弄清了）；说话人对别人身体、处境的揣测、形容、夸张不是改变，记成"心里"或"说"；眼前一时的（眼花一下、头晕一阵）不算，当场就完的不记，事本身记"做"；
-  "时间"——这条消息的叙述里，故事当下明确往前走了一段时间（睡了一夜醒来、写明第二天、几天后、具体钟点）；劝人去睡、打算、回忆、假设、交代过去隔了多久都不算——醒来时说起、问起已经过去了多久（"你睡了三天""已经过了一周"），是在交代，不是这条消息里时间往前走了；
+  "时间"——叙述中属于故事当下的日期或已发生时长；证据不完整就保留未确认线索。区分当下变化与人物对往事、意图的描述；
   "了结"——这条消息把"还开着的想法和约定"里的某一条做成了、明说不做了、改了日子或做法、或者去办了没成（标着"没讲完"的那几条，这条消息把它接着讲完了也算，结果写"做了"）；"做成了"只算那件事本身办完：出发了、在路上、来接人了、准备去，都还不算；标着"碰上的事""他牵头的事"的那几条，这条消息让它有了着落才了结——解决了、弄清了是怎么回事写"做了"，明说放下不管了写"不做了"；只是提起、问起、还在想办法、试了没成，都不了结（那件事照常记）；标着"来意"的那几条，他这条消息把来意说出来了、或者那件事办了，就了结，结果写"做了"，只是来了、开了口说别的不算；标着"规矩"的那几条里只管那一回的（"检查完了把原话发过来""这次进去把脸板着"），这条消息把那一回办了、过了，也了结，结果写"做了"；一直算数的规矩不了结；
   "钱"——谁给谁钱、多少、到了哪一步（没写明数目的也记，"金额"填"不明"）；泛泛说的行情、价位（"这种活一般两三千""那一带月租一千多"）不是谁和谁之间的钱，不记成"钱"；
   "关系"——说话人和另一个人之间的关系有了实质变化，或者这条消息说清了两人眼下是什么关系：表白、确定关系、第一次亲密、闹翻、和好、结仇、认了家人、从此信任或不再信任；两人之间头一回的也算：吵了一架后头一回服软、一向嘴硬的人头一回开口关心（"外头下雨，开慢点"）、头一回把对方推开、头一回当面说"谢谢"——"内容"写这是头一回怎样，"现在"写从这一刻起说话人这一边对那个人是什么关系（见下）；
@@ -62,7 +62,7 @@ export const SYSTEM_PROMPT = `你在给一部长篇角色扮演做"记账"。这
 - 说话人是"旁白"的消息：旁白是镜头，不是哪个人，不记旁白说了什么；里面谁做了什么、说了什么，"内容"以那个人开头，并加"谁"（做这件事、说这句话的那个人）。
 - 不管是谁的消息，当时在场、看见听见这件事的没卡的人（旁白演的路人、店里的人、来搭话的生人、上门的人），加"旁听"：称呼的数组，照正文里的叫法（"修门的人""酒保"）；正文里没写他在场就不填。
 - 型为"改变"时加"持续"："当场"/"几天"/"几周"/"直到被改变"/"永久"，拿不准填"直到被改变"。身体上一时的状况（吐了、疼、晕、发烧、药劲上来、吃不下东西）没说会一直这样的，填"几天"，不填"直到被改变"。
-- 型为"时间"时加"过了多久"，照原文说；叙述里写明了这时是一天里的什么时候（早上、中午、傍晚、深夜、几点），加"时段"，照原文写；昏过去又醒来、睡了一觉这类，看不出到底过没过夜、过了多久的，加"拿不准": true。
+- 型为"时间"：目标是辨认故事当下的时间事实，区分当前日期、已经发生的时长与未确认线索。加"时间证据"数组，每项 {"type":"absolute|elapsed|uncertain", "now":true或false, "quote":"本楼逐字原文", "date":"完整YYYY-MM-DD，无法确定年份则留空", "value":时长数值, "unit":"小时|天|周|月|年"}；日期与时长分别填写，可核的原文放在"引"里。同一时间点的补述可加"时间点"（提供依据的消息号）；独立跳转各用自己的来源。时段照原文加"时段"；只有白天信息时写"白天"，不推成某个精确时段。拿不准保留 uncertain。
 - 型为"了结"时加"对应"（仍开着的事项编号，本段新记的写"本段N"）和"结果"："做了"／"不做了"（明说放弃）／"改了"（新安排另记）／"没办成"。结果说的是实际办事；答应、出发或改约的记录保留各自含义。
 - 型为"关系"时加"对谁"（另一个人）和"现在"（一句话：从这条消息起，说话人这一边对那个人是什么关系、怎么对待，只照这条消息里说话人自己说的、做的写；平实，不写过程）。一方表白、示好、亲近、提出什么，只是这一方的心意和举动，两人的关系没有因此就变了：对方还没回应就写"对方还没回应"，别写成"两人互相……""两人关系进入……"；只有说话人在这条消息里接受、确认了对方的心意，才写两人一起的关系。
 - 型为"协议"时加"双方"（数组，两方的名字：人名或势力名，只写名字）、"经手"（数组，当面谈、答应这笔约定的人；双方写的就是人时不用写）、"名目"（2～8 个字，这笔约定叫什么；同一笔后来再提，用【进行中的约定】里的名目）、"阶段"：谈着（还没答应）/说定（答应了，还没开始兑现）/在办（正在兑现）/了了（两边都兑现完了）/违约（有一方没兑现）/破裂（谈崩了或撕毁了）。
@@ -110,7 +110,10 @@ export function presentAt(pos, { members = [], anchors = null, userName = null, 
     for (const m of members) {
         const anchor = anchors?.[m.avatar];
         // to 是他离开后看不到的第一条（隔离扩展离开时记 chat.length）：那一条他不在
-        const inside = !anchor || (anchor.segments ?? []).some(s => s.from <= pos && (s.to == null || pos < s.to));
+        // 没有区间的：静音挂在群里的不算在场（拉进群时静音着的只是放进群、不算进场，T070；T135：他曾被当成全程旁听，别人的经历全成了他的亲历）；
+        // 没静音的照旧算在场（开场就在、隔离扩展没给他开过区间的那位）
+        const segments = (anchor?.segments ?? []).filter(s => s.to == null || s.from < s.to);
+        const inside = segments.length ? segments.some(s => s.from <= pos && (s.to == null || pos < s.to)) : !m.disabled;
         const hears = !far.has(m.name) || (type === '说' && (far.get(m.name) === '电话' || (!!holderName && (holderName === m.name || holderName === userName))));
         if (inside && m.name && hears) names.add(m.name);
     }
@@ -119,9 +122,9 @@ export function presentAt(pos, { members = [], anchors = null, userName = null, 
 }
 
 // 待记账的消息：定稿的（后面已经有消息了）、还没记过的、非空的，按连续位置切成小窗。
-export function planWindows(messages, isDone, { maxMessages = 8, maxChars = 5000, from = 0 } = {}) {
+export function planWindows(messages, isDone, { maxMessages = 8, maxChars = 5000, from = 0, through = null } = {}) {
     const lastPos = messages.length ? messages[messages.length - 1].pos : -1;
-    const pending = messages.filter(m => m.pos >= from && m.pos < lastPos && m.text.trim() && !isDone(m.fp));
+    const pending = messages.filter(m => m.pos >= from && m.pos <= (through ?? lastPos - 1) && m.text.trim() && !isDone(m.fp));
     const windows = [];
     let current = [], chars = 0;
     for (const m of pending) {
@@ -348,6 +351,15 @@ export function verify(items, { window, clean, presenceOf, remoteOf = () => [], 
         if (record.quotes.length && !holds(m)) {
             const home = window.filter(x => x !== m && holds(x));
             if (home.length === 1) { m = home[0]; Object.assign(record, { fp: m.fp, holder: m.speaker, holderName: m.displayName }); record.audience = presenceOf(m, record); }
+        }
+        if (record.type === '时间' && item?.['时间证据'] != null && !Array.isArray(item['时间证据'])) record.clock = { ...record.clock, unsure: true };
+        if (record.type === '时间' && Array.isArray(item?.['时间证据'])) {
+            const ref = item['时间点'] == null ? m : window.find(x => x.pos === item['时间点'] && x.pos <= m.pos);
+            record.clock = { ...record.clock, source: ref?.fp, point: ref?.pos,
+                evidence: item['时间证据'].map(f => ({ type: f?.type, now: f?.now === true,
+                    quote: typeof f?.quote === 'string' ? f.quote.trim() : '', date: f?.date,
+                    value: f?.value, unit: f?.unit })) };
+            if (!ref || record.clock.evidence.some(f => !f.quote || !m?.text?.includes(f.quote))) record.clock.unsure = true;
         }
         // 旁白不是人，不算知道的人；旁白那条里做事、说话的那个人算（D-170，试玩 10/6：V 当面跟修门的人报了名号，"知道的人"只记了她自己，
         // 局势就不知道消息能从修门的人那儿传出去）。当时在场的没卡的人（"旁听"）也算听见了。

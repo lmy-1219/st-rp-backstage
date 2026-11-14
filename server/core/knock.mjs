@@ -107,7 +107,7 @@ export function knockState(knock, { messages = [], knocks = [], userName = null,
     const asks = [];
     const done = (state, why, m) => ({ ...base, state, why, message, decided: { pos: m.pos, fp: m.fp }, unanswered, asks, held });
     const sorted = [...messages].sort((a, b) => a.pos - b.pos);
-    const busy = m => occasion !== false && !!occasionStrict(sorted.filter(x => x.pos <= m.pos && x.pos > msg.pos), { except: knock.who });
+    const busy = m => occasion !== false && !!occasionStrict(sorted.filter(x => x.pos <= m.pos && x.pos > msg.pos), { except: knock.who, roster, relations, userName: user });
     for (const m of sorted.filter(x => x.pos > msg.pos)) {
         if (m.is_user) {
             const key = `${m.pos}:${m.fp}`;
@@ -139,7 +139,7 @@ export function knockTiming({ messages = [], knocks = [], pace = null, present =
     const last = messages.at(-1);
     if (!last) return { ok: false, why: '还没有消息' };
     // 场合（occasion.mjs）：正写着亲密戏、正打着——外头的人先别来
-    const now = occasion !== false ? occasionStrict(messages) : null;
+    const now = occasion !== false ? occasionStrict(messages, { roster: rest.roster, relations: rest.relations, userName: rest.userName, names: present ?? [] }) : null;
     if (now) return { ok: false, why: `场合不合适：${OCCASION_WHY[now]}` };
     const p = paceName(pace && typeof pace === 'object' ? pace.name : pace) ?? MID;
     const opts = { messages, knocks, ...rest };

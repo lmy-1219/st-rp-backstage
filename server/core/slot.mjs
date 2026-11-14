@@ -42,7 +42,7 @@ import { verificationSnapshot, deliveryVerified, retryKnob, evaluationState, sav
 import { picksOf } from './guide.mjs';
 import { SIGN_PICKS_MAX, NOW_MOTIF, placesIn, buildBrief, needsPlan, stepPocket, stackedHere, reachedFor, awaitingExtract, AWAIT_SPAN, pocketLines, respondLines, shownLines, sinkLines, storyDigest, WORLD, OFFSCREEN_FIT, entryOf, nearPlace, timePassed, offscreenLines, errandLines, entryProjection, ifTakenOf, ifSunkOf, takenOf, expiredPocket, premiseGone, storyLayers, layerNote, briefBlocks, BRIEF_CHARS, BRIEF_SHARES, UNSQUEEZED, categoryCounts, draggingLines, overdueAhead, LOOKBACK_PLANS } from './planner.mjs';
 import { foldState, stateLines, herOwnOnly } from './state.mjs';
-import { timeline, clockNow, dateIn, dayNumber, weekdayIndex, PARTS, withNoteMarks, timeTag, sceneHeading } from './timeline.mjs';
+import { timeline, clockNow, dateIn, dayNumber, weekdayIndex, PARTS, withNoteMarks, timeTag, sceneHeading, noteTime } from './timeline.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
 import { paceOf, paceNote } from './tempo.mjs';
 import { promiseOf, stageOf, promiseLines, relatedTo, retime, partyOf, LAPSED, settledTwins, settledByDoing, dueOf } from './promises.mjs';
@@ -203,15 +203,86 @@ function testContent({ speakerName, total }) {
 const ahead = new Map();
 const AHEAD_TTL_MS = 15 * 60 * 1000;
 // 用户那句去掉首尾空白再比（打字时预跑用的草稿和发出去的那条，ST 会修掉首尾空白）。
-const aheadKey = (store, chatKey, speaker, recentUser, rev = correctionRev(store, chatKey)) => `${chatKey}\u0001${speaker}\u0001${String(recentUser ?? '').trim()}\u0001fix:${rev}`;
+const aheadKey = (store, chatKey, speaker, recentUser, rev = correctionRev(store, chatKey), timeKey = '') => `${chatKey}\u0001${speaker}\u0001${String(recentUser ?? '').trim()}\u0001fix:${rev}\u0001time:${timeKey}`;
+// 显式传递请求内缓存，避免全局缓存漏掉供料变化。store 的消息数组是浅拷贝，
+// 因此同一 total_changes 快照只取一次；记账、手标、撤回等任一落库写入都换快照。
+// 版本戳只管计算复用，不进入 ahead 键；前缀数组在 WeakMap 中独立计算，不能借全历史依据。
+function recallSnapshot(store, chatKey, cache) {
+    // 无落库版本戳的内存供料保持实时计算，不猜它是否仍是同一快照。
+    if (!store.db?.prepare) return { messages: store.currentMessages(chatKey), bases: null };
+    const changes = store.db.prepare('select total_changes() n').get().n;
+    if (!cache.messages || cache.changes !== changes) {
+        cache.changes = changes;
+        cache.messages = store.currentMessages(chatKey);
+        cache.bases = new WeakMap();
+    }
+    return cache;
+}
+// 召回只按时间供料变化失效；确认状态由 stateBlock / refreshPinned 现贴，不进入组装缓存。
+function recallBasisFor(store, records, chatKey, messages = store.currentMessages(chatKey), bases = null) {
+    if (bases?.has(messages)) return bases.get(messages);
+    const last = messages.at(-1);
+    if (!last) return null;
+    // seen 计算本来就先折确认视图；直接读取它保留的 firm 投影，两个视图都参与依据。
+    const tl = timelineFor(store, records, chatKey, messages, { seen: true });
+    const supply = (rows, today, part, coarsePart) => {
+        const changes = [];
+        let previous = null;
+        for (const r of rows) {
+            const value = [r.day, r.part, r.coarsePart, r.mark];
+            const key = JSON.stringify(value);
+            if (key !== previous || r.mark) changes.push([r.pos, r.fp, r.sentAt, ...value]);
+            previous = key;
+        }
+        return [tl.start, changes, today, part, coarsePart];
+    };
+    const basis = { pos: last.pos, fp: last.fp, sentAt: last.sent_at ?? null,
+        version: createHash('sha1').update(JSON.stringify([
+            supply(tl.firmRows, tl.firmToday, tl.firmPart, tl.firmRows.at(-1).coarsePart),
+            supply(tl.rows, tl.today, tl.part, tl.coarsePart),
+        ])).digest('hex') };
+    bases?.set(messages, basis);
+    return basis;
+}
+// 时间供料和消息实例随预跑一起捕获，迟到结果只进入原来的键。
+const recallTimeKey = (store, records, chatKey, cache = {}) => {
+    const { messages, bases } = recallSnapshot(store, chatKey, cache);
+    const basis = recallBasisFor(store, records, chatKey, messages, bases);
+    return JSON.stringify([basis?.version, basis?.pos, basis?.fp, basis?.sentAt]);
+};
+// 草稿只承接紧接原历史的同句用户发送；首次承接后绑定该发送实例。
+function recallKeyFor(store, records, chatKey, speaker, recentUser, rev, timeKey, cache = {}) {
+    const key = aheadKey(store, chatKey, speaker, recentUser, rev, timeKey);
+    if (ahead.has(key)) return key;
+    const { messages, bases } = recallSnapshot(store, chatKey, cache), last = messages.at(-1);
+    const basis = recallBasisFor(store, records, chatKey, messages, bases);
+    for (const entry of ahead.values()) {
+        const d = entry.draft;
+        if (!d || d.store !== store || d.chatKey !== chatKey || d.speaker !== speaker || d.rev !== rev
+            || d.text !== String(recentUser ?? '').trim() || Date.now() - entry.at > AHEAD_TTL_MS
+            || messages.length !== d.messages.length + 1 || !last?.is_user || !last.sent_at
+            || String(last.text ?? '').trim() !== d.text || basis?.version !== d.basis?.version
+            || !d.basis?.sentAt || messages[d.basis.pos]?.fp !== d.basis.fp || messages[d.basis.pos]?.sent_at !== d.basis.sentAt
+            || recallBasisFor(store, records, chatKey, messages.slice(0, d.messages.length), bases)?.version !== d.basis.version
+            || !d.messages.every((m, i) => m.fp === messages[i]?.fp && m.sent_at === messages[i]?.sent_at)) continue;
+        const instance = JSON.stringify([last.pos, last.fp, last.sent_at]);
+        if (d.sent && d.sent !== instance) continue;
+        d.sent = instance;
+        ahead.set(key, entry);
+        break;
+    }
+    return key;
+}
 const KEYS = '\u0002keys';
 function once(key, start) {
     const now = Date.now();
     for (const [k, v] of ahead) if (now - v.at > AHEAD_TTL_MS) ahead.delete(k);
     if (!ahead.has(key)) {
         const promise = Promise.resolve().then(start);
-        ahead.set(key, { at: now, promise });
-        promise.catch(() => ahead.delete(key));   // 失败了下次重试
+        const entry = { at: now, promise };
+        ahead.set(key, entry);
+        // 正式发送可给预跑挂别名；失败时只清仍指向本 entry 的键，让同实例下次能重试。
+        promise.catch(() => { for (const [k, v] of ahead) if (v === entry) ahead.delete(k); });
     }
     return ahead.get(key).promise;
 }
@@ -283,7 +354,7 @@ function materialFor(store, records, { chatKey, speaker, name, anchor = null, re
         openIdeaIds: new Set(records.openIdeas(chatKey).map(r => r.id)), recent, recentUser, queryKeys, queryWide: queryKeys.wide ?? [], sense,
         recalled: store.recentSlotIds?.({ chatKey, speaker, anchor }) ?? new Map(),
         timeMarks: timeMarksFor(store, records, chatKey), timeRecs: records.visible(chatKey).filter(r => r.type === '时间'),
-        anchors: chat.anchors ? JSON.parse(chat.anchors) : null, pool, skipOpen, more: asksPast(recentUser, scaleFor(store, chatKey)), scale, timeScale: scaleFor(store, chatKey), boardAt,
+        anchors: chat.anchors ? JSON.parse(chat.anchors) : null, pool, skipOpen, more: asksPast(recentUser, scaleFor(store, chatKey)), scale, timeScale: scaleFor(store, chatKey), boardAt, timeStart: store.setupOf?.(chat.story_id)?.data?.时间, dayOf: timelineFor(store, records, chatKey).dayOf,
         tag: (n, today) => timeTag(n, { start: store.setupOf?.(chat.story_id)?.data?.时间 ?? null, today, timeScale: scaleFor(store, chatKey) }),
     });
     const byPos = new Map(messages.map(m => [m.pos, m.text]));
@@ -402,7 +473,7 @@ export const intimateDetail = m => {
     return [x.名目 && `${m.who}此刻出手，是因为${x.名目}`, x.玩法 ? `这一件玩的是${x.玩法}` : x.新在哪, x.怎么带 && `怎么带：${x.怎么带}`,
         x.加入?.length && `${x.加入.join('、')}会加进来`, x.走到哪 && `这一件${x.走到哪}`].filter(Boolean).join('；');
 };
-const intimateSlotVersion = (store, chatKey) => {
+const intimateSlotVersion = (store, chatKey, timeVersion = '') => {
     const data = store.setupOf?.(store.requireChat(chatKey).story_id)?.data?.亲密线;
     const stop = store.getMeta?.(`intimate_stop:${chatKey}`);
     const prompt = promptOptionsFor(store, chatKey);
@@ -410,7 +481,8 @@ const intimateSlotVersion = (store, chatKey) => {
     const base = prompt.tier === DEFAULT_TIER && prompt.pack === DEFAULT_PACK
         ? (data?.length || stop ? `${SLOT_CODE}:${createHash('sha256').update(JSON.stringify([data, stop])).digest('hex').slice(0, 16)}` : SLOT_CODE)
         : `${SLOT_CODE}:${createHash('sha256').update(JSON.stringify([data, stop, prompt.version])).digest('hex').slice(0, 16)}`;
-    return revision ? `${base}:plan-${revision}` : base;
+    const timed = `${base}${timeVersion}`;
+    return revision ? `${timed}:plan-${revision}` : timed;
 };
 
 // 总闸只读配置，不改各功能开关；暂停总结时下游一律停。
@@ -782,10 +854,10 @@ export function cameraKnowledgeLines({ roster, board, visible = [], rel = null, 
 // 叙事组装限时（D-100：前台速度是用户的硬要求；实测配检索词＋组装一般 16 秒、慢时近 30 秒）：从这里起至多等 assembler.budgetMs，
 // 到点先给纯程序那一格、不钉住；配词和组装照旧在后台跑完，结果留在 ahead 里，左滑重来时直接用上。
 // 后开口的人多半已经提前组装好（prefetchOthers），不用等。
-async function memorySlot(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { assembler = null, keyMaker = null, vectors = null, skipOpen = null, pendingLedger = null, scale = 1, episodes = [], guard = null }) {
+async function memorySlot(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { assembler = null, keyMaker = null, vectors = null, skipOpen = null, pendingLedger = null, scale = 1, episodes = [], guard = null, recallCache = {} }) {
     const name = speakerName || speaker;
     // 异步配词、组装期间玩家可能纠正；迟到的结果只留在开始时的版本里。
-    const recallKey = aheadKey(store, chatKey, speaker, recentUser);
+    const recallKey = recallKeyFor(store, records, chatKey, speaker, recentUser, correctionRev(store, chatKey), recallTimeKey(store, records, chatKey, recallCache), recallCache);
     if (camera) {
         // 旁白的旧事按地方和眼前没卡的人来，不走玩家的关键词召回（召回来的是她的衣服鞋子）
         const messages = store.currentMessages(chatKey);
@@ -1009,7 +1081,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 物价按周小幅波动（drift.mjs）：给的价码按这一周的行情改
     if (prices.items.length && drift?.prices !== false) {
         const msgs = store.currentMessages(chatKey), lp = msgs.at(-1)?.pos ?? 0;
-        const day = dayView(store, chatKey, lp, visible.filter(r => r.type === '时间'), timeMarksFor(store, records, chatKey, msgs))(lp + 0.5);
+        const day = confirmedDayFor(store, { ...records, visible: () => visible.filter(r => r.type === '时间') }, chatKey, msgs)(lp + 0.5);
         prices = { ...prices, items: driftItems(prices.items, { seed: storyId, day, timeScale: ts }) };
     }
     // 真在聊钱才给：用户这句提到钱或活儿；或者上一条提到钱、又对得上某个价码。只是字面碰上某个价目的检索词（"急救"）不算。
@@ -1049,10 +1121,10 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     const lastPos = messages.at(-1)?.pos ?? 0;
     const absences = store.absences?.(chatKey) ?? [];
     const timeRecs = visible.filter(r => r.type === '时间'), marks = timeMarksFor(store, records, chatKey, messages);
-    const seenDayOf = dayView(store, chatKey, lastPos, timeRecs, marks, { seen: true });
+    const seenDayOf = timelineFor(store, records, chatKey, messages, { seen: true }).dayOf;
     // 玩家回来后按玩家说的重推离开期间：在折那一步（advanceWorld）
     // 记下的日子（不算还没记账的那几条里临时认的跳转）：回不来的事——口袋沉底、节点检查——只按它来（9/27 审计：临时认错了一天，那件沉了就回不来）。
-    const dayOf = dayView(store, chatKey, lastPos, timeRecs, marks);
+    const dayOf = confirmedDayFor(store, records, chatKey, messages);
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? null;
     const openIdeaIds = new Set(records.openIdeas(chatKey).map(r => r.id));
     const closenessOf = (person, entry = roleOf(roster, person)) => closeness({ name: person, userName, entry, records: visible, dayOf, lastPos, openIdeaIds });
@@ -1469,7 +1541,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 旁白拿全部；有卡的人只拿他知道的：他自己办到哪儿、他找过没人应的、"世界"那边的、外面看得到的、他有份的约定
     try {
         let skips = [];
-        try { skips = liveSkips(JSON.parse(store.getMeta?.(`skips:${chatKey}`) ?? '[]'), messages); } catch {}
+        try { skips = liveSkips(JSON.parse(store.getMeta?.(`skips:${chatKey}`) ?? '[]'), messages, dayOf).filter(s => !s.timeBasis || timeBasisLive(store, records, chatKey, s.timeBasis)); } catch {}
         const skip = skips.at(-1);
         const upto = anchor ? uptoAnchor(messages, anchor) : messages;
         if (skip && firstAfterSkip(skip, upto)) {
@@ -1539,7 +1611,9 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     if (front.seeds && world?.seeds?.length && !contact && !menuLines.length && store.getMeta) {
         const storyId = store.requireChat(chatKey).story_id;
         const dayKey = `world_day:${chatKey}`;
-        if (store.getMeta(dayKey) !== String(today)) {
+        let worldDay = null;
+        try { worldDay = JSON.parse(store.getMeta(dayKey)); } catch {}
+        if (!worldDay?.timeBasis || !timeBasisLive(store, records, chatKey, worldDay.timeBasis) || worldDay.day !== today) {
             // 用过的世界种子记成 { i, pos, fp }，挂在写它的那条消息上：那条还在本窗口才算用过（分叉前共有所以继承、分叉后各算各的、删回去也撤得掉）。旧格式纯数字照旧算用过。
             const raw = JSON.parse(store.getMeta(`world_used:${storyId}`) ?? '[]');
             const same = (a, b) => !!store.sameMessage?.(a, b);
@@ -1549,7 +1623,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             const now = current ?? (year == null ? null : { y: year, m: null, d: null });
             const seed = pickSeed(world.seeds, { key: `${storyId}:${today}`, used, now, elapsed: { today, timeScale: ts } });
             if (world.record !== false) {
-                store.setMeta(dayKey, String(today));
+                store.setMeta(dayKey, JSON.stringify({ day: today, timeBasis: timeBasisFor(store, records, chatKey) }));
                 if (seed) store.setMeta(`world_used:${storyId}`, JSON.stringify([...raw, { i: seed.i, pos: lastPos, fp: messages.at(-1)?.fp }]));
             }
             if (seed) add(3, seedLines(seed, { year, start: setup?.时间 }), 'world', 'scene');
@@ -1562,7 +1636,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 局势（situation.mjs，Q-8②）：到日子的传开已经在折那一步补成了记录；这里只读——今天传到主角这边的放"眼下"，别的放背景
     if (situation?.sit) {
         try {
-            const now = situationNow(situation.sit, { storyId, messages, visibleIds: new Set(visible.map(r => r.id)), dayOf, live: moveLiveCtx(store, chatKey, { records: visible, principal: userName }) });
+            const now = situationNow(situation.sit, { proofLive: proof => timeBasisLive(store, records, chatKey, proof), storyId, messages, visibleIds: new Set(visible.map(r => r.id)), dayOf, live: moveLiveCtx(store, chatKey, { records: visible, principal: userName }) });
             const posOf = id => visible.find(r => r.id === id)?.pos;
             const fresh = now.delivered.some(s => userName && s.target === userName && posOf(s.record_id) != null && dayOf(posOf(s.record_id)) >= today);
             const context = { name, today, records: visible, dayOf, notices: [], principal: userName, lastPos, camera };
@@ -1606,7 +1680,12 @@ export async function advance(store, records, chatKey, deps = {}, { present = []
     if (playModeOf(store, chatKey) === 'full') try { advanceWorld(store, records, chatKey, deps, { present }); } catch {}
     else try { const messages=store.currentMessages(chatKey), chat=store.requireChat(chatKey), tl=timelineFor(store,records,chatKey,messages); promisesNow(store,records,chatKey,{visible:records.visible(chatKey),messages,dayOf:tl.dayOf,today:tl.today,present,rosterNames:(store.getCast?.(chat.story_id)??[]).map(x=>x.name),setup:store.setupOf?.(chat.story_id)?.data??null}); } catch {}
     const time = timelineFor(store, records, chatKey);
-    const advanced = { pos: last.pos, fp: last.fp };
+    for (const key of ['world_day', 'situation_ran']) {
+        let cached = null;
+        try { cached = JSON.parse(store.getMeta?.(`${key}:${chatKey}`) ?? 'null'); } catch {}
+        if (cached != null && (!cached.timeBasis || !timeBasisLive(store, records, chatKey, cached.timeBasis))) store.setMeta?.(`${key}:${chatKey}`, null);
+    }
+    const advanced = { pos: last.pos, fp: last.fp, timeBasis: timeBasisFor(store, records, chatKey) };
     if (time.firmPart != null || time.firmToday > 0) { advanced.day = time.firmToday; advanced.part = time.firmPart; }
     store.setMeta?.(`advanced:${chatKey}`, JSON.stringify(advanced));
     return { advanced: true, pos: last.pos, fp: last.fp };
@@ -1624,7 +1703,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
     const visible = records.visible(chatKey);
     const absences = store.absences?.(chatKey) ?? [];
     const timeRecs = visible.filter(r => r.type === '时间'), marks = timeMarksFor(store, records, chatKey, messages);
-    const dayOf = dayView(store, chatKey, lastPos, timeRecs, marks);
+    const dayOf = confirmedDayFor(store, records, chatKey, messages);
     const today = dayOf(lastPos + 0.5);
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? null;
     const roster = store.getCast?.(storyId) ?? [], rosterNames = roster.map(e => e.name);
@@ -1665,7 +1744,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             // 区间是在最后一条上关的，场面表在这一条上还把他算在场：只按扩展带来的名单挡（名单里有他就是还在）；
             // 挡下的这回先不记成"见过"，同步那次（没名单）再看一遍
             if (present.some(n => sameName(n, card.name, rosterNames))) { next[card.avatar] = old; continue; }
-            const hasPlan = Object.values(plans).some(p => (p?.who === card.name || (card.avatar && p?.avatar === card.avatar)) && !!validAwayPlan(p, messages, source => store.basisLive?.(chatKey, source.pos, source.day) !== false));
+            const hasPlan = Object.values(plans).some(p => (p?.who === card.name || (card.avatar && p?.avatar === card.avatar)) && !!validAwayPlan(p, messages, source => store.sourceLive?.(chatKey, source) !== false));
             // 自动离场来源是 to - 1；人工纠正来源是裁决所在楼，均由 departureSource 核实。
             // 不能把补记挂在后来的新句上，否则删离场原文撤不掉。
             if (!hasPlan && leave) leave({ chatKey, who: card.name, avatar: card.avatar, anchor: { at: source.at, fp: source.fp }, how:source.how, manual:source.manual })?.catch?.(() => {});
@@ -1687,10 +1766,10 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
     let skipNew = null;
     try {
         let kept = [];
-        try { kept = liveSkips(JSON.parse(store.getMeta?.(`skips:${chatKey}`) ?? '[]'), messages); } catch {}
+        try { kept = liveSkips(JSON.parse(store.getMeta?.(`skips:${chatKey}`) ?? '[]'), messages, dayOf).filter(s => !s.timeBasis || timeBasisLive(store, records, chatKey, s.timeBasis)); } catch {}
         const found = findSkip({ messages, timeRecs, marks, dayOf });
-        if (found && !kept.some(s => s.pos === found.pos && s.fp === found.fp)) {
-            skipNew = { ...found, seen: { pos: lastPos, fp: last.fp } };
+        if (found && !kept.some(s => s.pos === found.pos && s.fp === found.fp && s.fromDay === found.fromDay && s.toDay === found.toDay)) {
+            skipNew = { ...found, timeBasis: timeBasisFor(store, records, chatKey, messages.filter(m => m.pos <= found.crossPos)), seen: { pos: lastPos, fp: last.fp } };
             if (store.menuOf && planner?.record !== false) {
                 const menu = menuDays(store, store.menuOf(chatKey), dayOf);
                 const settled = new Set(['used', 'shown', 'sunk', 'sunk_told', 'void', 'expired']);
@@ -1705,14 +1784,15 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
                 markEchoed(store, chatKey, dated.off.map(m => m.id), at, skipNew.toDay);
                 const spare = new Set([...dated.move, ...dated.off].map(m => m.id));
                 for (const c of settleSkip(menu, skipNew, { keep: promised?.keeps ?? (() => false), blocked, isPlayer, spare: m => spare.has(m.id) })) {
-                    store.updateMenu(chatKey, c.id, { status: c.status, why: c.why, by: '空白', basisDay: skipNew.toDay, at });
+                    store.updateMenu(chatKey, c.id, { status: c.status, why: c.why, by: '空白', basisDay: skipNew.toDay, timeBasis: skipNew.timeBasis, at });
                     // 沉底那句进"这段时间"那一块，不再单给一回
-                    if (c.status === 'sunk') store.updateMenu(chatKey, c.id, { status: 'sunk_told', why: c.why, by: '空白', basisDay: skipNew.toDay, at });
+                    if (c.status === 'sunk') store.updateMenu(chatKey, c.id, { status: 'sunk_told', why: c.why, by: '空白', basisDay: skipNew.toDay, timeBasis: skipNew.timeBasis, at });
                     store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : 'menu_skip', { id: c.id, why: c.why });
                 }
             }
-            store.setMeta?.(`skips:${chatKey}`, JSON.stringify([...kept, skipNew].slice(-6)));
+            kept = [...kept, skipNew].slice(-6);
         }
+        store.setMeta?.(`skips:${chatKey}`, JSON.stringify(kept));
     } catch {}
     // ③ 口袋：到日子的进口袋（容量、类别、让路），放久了沉底
     if (store.menuOf && planner?.record !== false) {
@@ -1856,13 +1936,15 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
     // ⑤ 局势（situation.mjs，Q-8②）：到日子的传开替他补成"听说／消息"（挂在最后一条上）；新的剧情日第一次推一次局势（后台跑，不等）
     if (situation?.sit && situation.record !== false) {
         try {
-            const now = situationNow(situation.sit, { storyId, messages, visibleIds: new Set(visible.map(r => r.id)), dayOf: dayOf });
-            deliverDue(situation.sit, now, { today: today, anchor: last, storyId, addRecord: records.addDerived, principal: userName, withBasis: true });
+            const now = situationNow(situation.sit, { proofLive: proof => timeBasisLive(store, records, chatKey, proof), storyId, messages, visibleIds: new Set(visible.map(r => r.id)), dayOf: dayOf });
+            deliverDue(situation.sit, now, { today: today, anchor: last, timeBasis: timeBasisFor(store, records, chatKey, messages), storyId, addRecord: records.addDerived, principal: userName, withBasis: true });
             // 认上次跑的那条消息、按现在的天数算（D-170，试玩 10/6：原来记的是"跑过第几天"，天数算法改正过以后它以为第 2 天跑过了，四天没再跑）
-            const ran = Number(store.getMeta?.(`situation_ran:${chatKey}`) ?? -1);
+            let runMark = null;
+            try { runMark = JSON.parse(store.getMeta?.(`situation_ran:${chatKey}`) ?? 'null'); } catch {}
+            const ran = runMark?.timeBasis && timeBasisLive(store, records, chatKey, runMark.timeBasis) ? runMark.pos : -1;
             const since = Math.max(now.lastTick?.anchor_pos ?? -1, ran <= lastPos ? ran : -1);
             if (situation.run && today > (since >= 0 ? dayOf(since + 0.5) : -1)) {
-                store.setMeta(`situation_ran:${chatKey}`, String(lastPos));
+                store.setMeta(`situation_ran:${chatKey}`, JSON.stringify({ pos: lastPos, day: today, timeBasis: timeBasisFor(store, records, chatKey) }));
                 // 玩家交代跳过的一段：空白几天补几次换天（至多三次，再多就一次），每次带上这是第几天、玩家交代了什么；排队，一次只跑一个
                 const runs = skipNew && skipNew.toDay === today ? skipDays(skipNew) : [];
                 if (runs.length) for (const r of runs) situation.run({ chatKey, day: r.day, skip: { ...r, said: skipNew.said, fromDay: skipNew.fromDay, toDay: skipNew.toDay, span: skipNew.span } })?.catch?.(() => {});
@@ -1876,7 +1958,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
         const time = timelineFor(store, records, chatKey, messages);
         let previous = null;
         try { previous = JSON.parse(store.getMeta?.(`advanced:${chatKey}`) ?? 'null'); } catch {}
-        const valid = previous && messages.some(m => m.pos === previous.pos && m.fp === previous.fp);
+        const valid = previous?.timeBasis && timeBasisLive(store, records, chatKey, previous.timeBasis);
         const earlier = valid ? time.firmRows.find(r => r.pos === previous.pos) : null;
         const before = valid ? { day: previous.day ?? earlier?.day ?? time.firmToday, part: previous.part ?? earlier?.part ?? time.firmPart } : time.firmRows.at(-2);
         const changed = before && (before.day !== time.firmToday || before.part !== time.firmPart);
@@ -1925,7 +2007,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
 function planningWorld(store, chatKey, context) {
     if (!store.db?.prepare("select 1 from sqlite_master where name = 'situation_ticks'").get()) return [];
     const { messages, visible, dayOf, chat } = context;
-    const now = situationNow(situationReader(store.db), { storyId: chat.story_id, messages, visibleIds: new Set(visible.map(r => r.id)), dayOf,
+    const now = situationNow(situationReader(store.db), { proofLive: proof => store.sourceLive(chatKey, { pos: proof.pos, fp: proof.fp, timeBasis: proof }), storyId: chat.story_id, messages, visibleIds: new Set(visible.map(r => r.id)), dayOf,
         live: moveLiveCtx(store, chatKey, { records: visible, principal: context.userName }) });
     const ticks = new Map(now.ticks.map(t => [t.id, t]));
     const rows = [...now.moves.map(m => ({ kind: '动向', row: m, ids: m.why, text: `${m.who}：${m.what}${m.seen ? `；外面看得到：${m.seen}` : ''}` })),
@@ -2119,7 +2201,7 @@ function moveLiveCtx(store, chatKey, { records, principal }) {
 // 到日子没办的约定按这一天算（一次推好几天的，空白里到日子的都算）
 export function situationMaterial(store, records, sit, chatKey, { day, net = null, loud = null, skip = null }) {
     const s = storyContext(store, records, chatKey);
-    const now = situationNow(sit, { storyId: s.chat.story_id, messages: s.messages, visibleIds: new Set(s.visible.map(r => r.id)), dayOf: s.dayOf, live: moveLiveCtx(store, chatKey, { records: s.visible, principal: s.userName }) });
+    const now = situationNow(sit, { proofLive: proof => timeBasisLive(store, records, chatKey, proof), storyId: s.chat.story_id, messages: s.messages, visibleIds: new Set(s.visible.map(r => r.id)), dayOf: s.dayOf, live: moveLiveCtx(store, chatKey, { records: s.visible, principal: s.userName }) });
     const firstOfYesterday = s.messages.find(m => s.dayOf(m.pos) >= day - 1)?.pos ?? 0;
     const from = now.lastTick ? now.lastTick.anchor_pos : firstOfYesterday - 1;
     const DERIVED = new Set(['时间', '听说', '消息', '结果']);
@@ -2247,7 +2329,7 @@ export function stateBlock(store, { chatKey, name, present = [], userName = null
         user ??= [...messages].reverse().find(m => m.is_user)?.name ?? null;
         if (!day || now == null) {
             const visible = records?.visible?.(chatKey) ?? [];
-            day = dayView(store, chatKey, lastPos, visible.filter(r => r.type === '时间'), timeMarksFor(store, records, chatKey, messages));
+            day = confirmedDayFor(store, records, chatKey, messages);
             now = day(lastPos + 0.5);
         }
     }
@@ -2366,24 +2448,30 @@ export function planSystemOf(store, chatKey, model, config, { mode = 'full' } = 
     return renderPronouns(withIntimate(withTaste(system, { ...options, kind: 'plan', model }), intimateSetup(store, chatKey), options), playerContext(store, chatKey));
 }
 
-export function timeMarksFor(store, records, chatKey, messages = store.currentMessages(chatKey)) {
+export function timeMarksFor(store, records, chatKey, messages = store.currentMessages(chatKey), { provisional: includeProvisional = true, context: givenContext = null } = {}) {
     const storyId = store.requireChat(chatKey).story_id;
-    const pending = messages.slice(-8).filter(m => !(records?.isDone?.(storyId, m.fp)));
+    const pending = includeProvisional ? messages.slice(-8).filter(m => !(records?.isDone?.(storyId, m.fp))) : [];
     const ts = scaleFor(store, chatKey);
     const timeRecs = (records?.visible?.(chatKey) ?? []).filter(r => r.type === '时间');
     const notes = store.stateNotesOf?.(chatKey) ?? [];
     const start = store.setupOf?.(storyId)?.data?.时间 ?? null;
     const headings = pending.map(m => ({ m, head: sceneHeading(m.text, ts) }))
-        .filter(x => x.head).map(x => ({ pos: x.m.pos, ...x.head, fromHeader: true, provisional: true }));
-    const context = timeline({ messages, timeRecs, marks: headings, notes, start,
-        isDone: m => !!records?.isDone?.(storyId, m.fp) }).rows;
+        .filter(x => x.head).map(x => {
+            const ambiguous = x.head.units > 0 && notes.some(n => n.aspect === '时段' && n.pos < x.m.pos && x.m.pos - n.pos <= 3
+                && messages.some(m => m.pos === n.pos && records?.isDone?.(storyId, m.fp)) && noteTime(n.text, ts).word === x.head.elapsed);
+            return { pos: x.m.pos, ...x.head, ...(ambiguous ? { units: 0, clock: { unsure: true } } : {}), fromHeader: true, provisional: true };
+        });
+    const isDone = m => !!records?.isDone?.(storyId, m.fp);
+    const context = !pending.length ? [] : givenContext
+        ? timeline({ messages, timeRecs: [], marks: headings, notes: [], start, isDone, noteDays: false, base: givenContext }).rows
+        : timeline({ messages, timeRecs, marks: headings, notes, start, isDone }).rows;
     const provisional = pending.flatMap(m => {
         const i = messages.indexOf(m), head = headings.find(h => h.pos === m.pos);
         const previousPart = context[i - 1]?.part ?? null;
         const phrase = timeSkipIn(m.text, { previousPart });
         return [
             ...(head ? [head] : []),
-            ...(phrase && !head?.units ? [{ pos: m.pos, elapsed: phrase, provisional: true }] : []),
+            ...(phrase && !head?.units && !head?.clock?.unsure ? [{ pos: m.pos, elapsed: phrase, provisional: true }] : []),
         ];
     });
     // 用户在消息"…"菜单里点的（最高权威，N-265）：从这条起算新的一天／这条是第几天（d:N，N 是标签上的天数）／这里没有跨天
@@ -2400,15 +2488,10 @@ export function timeMarksFor(store, records, chatKey, messages = store.currentMe
     return withNoteMarks([...absenceMarks(store.absences?.(chatKey) ?? []), ...provisional, ...user], notes, timeRecs, ts, pos => doneAt.get(pos) === true);
 }
 
-// 写入路径只认确认的跨天：时间记录、离开和用户手标。note 的时段仍在 timeline 里单独确认。
-function dayView(store, chatKey, lastPos, timeRecs, marks, { seen = false } = {}) {
-    return dayIndex([...timeRecs, ...(seen ? marks : marks.filter(m => !m.provisional))], lastPos, scaleFor(store, chatKey));
-}
-
 export function confirmedDayFor(store, records, chatKey, messages = store.currentMessages(chatKey)) {
-    const timeRecs = (records.visible?.(chatKey) ?? []).filter(r => r.type === '时间');
+    const timeRecs = (records?.visible?.(chatKey) ?? []).filter(r => r.type === '时间');
     const marks = timeMarksFor(store, { ...records, visible: () => timeRecs }, chatKey, messages);
-    return dayIndex([...timeRecs, ...firmTimeMarks(store, records, chatKey, messages, timeRecs, marks)], messages.at(-1)?.pos ?? 0, scaleFor(store, chatKey));
+    return dayIndex([...timeRecs, ...firmTimeMarks(store, records, chatKey, messages, timeRecs, marks)], messages.at(-1)?.pos ?? 0, scaleFor(store, chatKey), { start: store.setupOf?.(store.requireChat(chatKey).story_id)?.data?.时间 });
 }
 
 function firmTimeMarks(store, records, chatKey, messages, timeRecs, marks) {
@@ -2423,15 +2506,52 @@ export function timelineFor(store, records, chatKey, messages = store.currentMes
     const chat = store.requireChat(chatKey);
     const start = store.setupOf?.(chat.story_id)?.data?.时间 ?? null;
     const timeRecs = (records?.visible?.(chatKey) ?? []).filter(r => r.type === '时间');
-    const notes = store.stateNotesOf?.(chatKey) ?? [], marks = timeMarksFor(store, records, chatKey, messages);
+    const notes = store.stateNotesOf?.(chatKey) ?? [], baseMarks = timeMarksFor(store, records, chatKey, messages, { provisional: false });
     const isDone = m => !!records?.isDone?.(chat.story_id, m.fp);
-    const seenTimeline = seen ? timeline({ messages, timeRecs, marks, notes, start, isDone }) : null;
     // 暂定头只在 seen 中压过邻近 note；确认视图从已记账 note 独立重建日期记号。
-    const firmMarks = firmTimeMarks(store, records, chatKey, messages, timeRecs, marks);
+    const firmMarks = firmTimeMarks(store, records, chatKey, messages, timeRecs, baseMarks);
     // 确认视图保留已记账消息的叙述时段，以及记账、手标和已落库的时段 note；未记账叙述只供暂定显示。
     const firm = timeline({ messages: messages.map(m => isDone(m) ? m : { ...m, text: '' }), timeRecs,
         marks: firmMarks, notes, start, isDone, noteDays: false, confirmedParts: true });
-    return { start, seed: chat.story_id, ...(seenTimeline ?? firm), timeView: seen ? 'seen' : 'firm', firmDayOf: firm.dayOf, firmToday: firm.today, firmPart: firm.part, firmRows: firm.rows };
+    const pending = messages.some(m => !isDone(m)) || baseMarks.some(m => m.provisional);
+    const marks = seen && pending ? timeMarksFor(store, records, chatKey, messages, { context: firm }) : baseMarks;
+    const seenTimeline = seen && pending ? timeline({ messages, timeRecs: [], marks: marks.filter(m => m.provisional), notes: [], start, isDone, noteDays: false, base: firm }) : firm;
+    return { start, seed: chat.story_id, ...(seen ? seenTimeline : firm), timeView: seen ? 'seen' : 'firm', firmDayOf: firm.dayOf, firmToday: firm.today, firmPart: firm.part, firmRows: firm.rows };
+}
+// 版本包含来源、手标、确认状态和折算结果，同锚点的日期供料随确认变化重组。
+function timeStatusOf(tl, pos = Infinity) {
+    const reset = (tl.dayOf.marks ?? []).filter(m => m.pos <= pos && m.setDay != null && !m.conflict
+        && !(tl.dayOf.pending ?? []).some(p => p.pos === m.pos)).at(-1)?.pos ?? -Infinity;
+    return tl.rows.some(r => r.pos >= reset && r.pos <= pos && (r.unsure || (r.provisional && !r.mark))) ? 'uncertain' : 'confirmed';
+}
+export function timeVersionOf(tl, pos = Infinity) {
+    const changes = [];
+    let previous = null;
+    for (const r of tl.rows.filter(r => r.pos <= pos)) {
+        const value = [r.day, r.part, r.coarsePart, r.mark, r.unsure];
+        const key = JSON.stringify(value);
+        if (key !== previous) { changes.push([r.pos, ...value, ...(r.sentAt != null ? [r.sentAt] : [])]); previous = key; }
+    }
+    if ((!tl.start || !Object.keys(tl.start).length) && changes.every(c => c[1] === 0 && c.slice(2).every(v => v == null))) return '';
+    return createHash('sha1').update(JSON.stringify([tl.start, changes, timeStatusOf(tl, pos)])).digest('hex');
+}
+
+export function timeBasisFor(store, records, chatKey, messages = store.currentMessages(chatKey)) {
+    const tl = timelineFor(store, records, chatKey, messages), last = messages.at(-1);
+    return last ? { pos: last.pos, fp: last.fp, sentAt: last.sent_at ?? null, day: tl.today, version: timeVersionOf(tl) } : null;
+}
+export function timeBasisLive(store, records, chatKey, basis) {
+    const messages = store.currentMessages(chatKey);
+    if (!basis?.sentAt || !messages.some(m => m.pos === basis.pos && m.fp === basis.fp && m.sent_at === basis.sentAt)) return false;
+    const current = timeBasisFor(store, records, chatKey, messages.filter(m => m.pos <= basis.pos));
+    return current?.day === basis.day && current?.version === basis.version;
+}
+export function timeStateFor(store, records, chatKey, messages = store.currentMessages(chatKey)) {
+    const tl = timelineFor(store, records, chatKey, messages);
+    const source = messages.at(-1) ? { pos: messages.at(-1).pos, fp: messages.at(-1).fp } : null;
+    const status = timeStatusOf(tl);
+    const version = timeVersionOf(tl);
+    return { status, source, version, today: tl.today };
 }
 // 规划简报里的【说好的事】（N-268）：还开着的走到哪一步；最近三天有了结果的，结果是什么（规划者按结果排后续）。
 // ts：这一局的时间尺度（"明天"在年尺度下是"明年"）
@@ -2464,7 +2584,7 @@ function promisesFor(store, records, { chatKey, speaker, speakerName, present = 
     if (!visible.some(r => r.promise)) return null;
     const messages = store.currentMessages(chatKey);
     const lastPos = messages.at(-1)?.pos ?? 0;
-    const dayOf = dayView(store, chatKey, lastPos, visible.filter(r => r.type === '时间'), timeMarksFor(store, records, chatKey, messages));
+    const dayOf = confirmedDayFor(store, records, chatKey, messages);
     const storyId = store.requireChat(chatKey).story_id;
     const rawRel = store.relationsOf?.(storyId);
     const now = promisesNow(store, records, chatKey, { visible, messages, dayOf, today: dayOf(lastPos + 0.5), present, rosterNames: (store.getCast?.(storyId) ?? []).map(e => e.name),
@@ -2545,7 +2665,14 @@ export function promisesNow(store, records, chatKey, { visible, messages, dayOf,
 
 export function clockFor(store, records, chatKey, messages) {
     const seenTimeline = timelineFor(store, records, chatKey, messages, { seen: true });
-    return clockNow(seenTimeline.start, { today: seenTimeline.today, part: seenTimeline.part, seed: seenTimeline.seed });
+    if (timeStateFor(store, records, chatKey, messages).status !== 'confirmed' && (seenTimeline.start || seenTimeline.part || seenTimeline.coarsePart)) {
+        if (seenTimeline.today !== seenTimeline.firmToday || seenTimeline.part !== seenTimeline.firmPart) {
+            const provisional = clockNow(seenTimeline.start, { today: seenTimeline.today, part: seenTimeline.part ?? seenTimeline.coarsePart, seed: seenTimeline.seed });
+            return { now: `${provisional?.now ?? ''}（暂定，时间未确认）`, weather: '' };
+        }
+        return { now: '时间未确认', weather: '' };
+    }
+    return clockNow(seenTimeline.start, { today: seenTimeline.today, part: seenTimeline.part ?? seenTimeline.coarsePart, seed: seenTimeline.seed });
 }
 
 // 场面停住了（B 段实测：用户只说"嗯""好"的 30 轮里，剧情一直停在同一个晚上，规划里后面几天的事一件都出不来）：
@@ -2877,7 +3004,7 @@ export function storyContext(store, records, chatKey, { present = null, through 
     const visible = records.visible(chatKey);
     const messages = store.currentMessages(chatKey);
     const lastPos = messages.at(-1)?.pos ?? 0;
-    const dayOf = dayView(store, chatKey, lastPos, visible.filter(r => r.type === '时间'), timeMarksFor(store, records, chatKey, messages));
+    const dayOf = confirmedDayFor(store, records, chatKey, messages);
     const today = dayOf(lastPos + 0.5);   // 离开记在最后那条之后半格：回来由角色先开口时，今天已经是离开之后
     const time = timelineFor(store, records, chatKey, messages);
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? null;
@@ -3067,7 +3194,7 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
         dice: rollDice(`${chatKey}:${s.lastPos}:${(store.readyPlans?.(chatKey) ?? []).length}`, 3),   // 同一处再要一份（比如弄断后接着要）也换一组骰子
         motifs: motifLedger((store.menuOf?.(chatKey) ?? []).filter(m => !unseen(m) && (m.plan_id === last?.id || m.status !== 'waiting'))),
         // 第几天和消息上的日期标签同一套数法（开局单的"开场是第几天"、日期）；时段单给
-        day: s.today, ...(() => { try { const tl = timelineFor(store, records, chatKey, s.messages); return { start: tl.start, part: tl.part ?? null, clock: clockNow(tl.start, { today: tl.today, part: tl.part, seed: tl.seed }) }; } catch { return { clock: null }; } })(),
+        day: s.today, ...(() => { try { const tl = timelineFor(store, records, chatKey, s.messages); return { start: tl.start, part: tl.part ?? null, clock: clockNow(tl.start, { today: tl.today, part: tl.part ?? tl.coarsePart, seed: tl.seed }) }; } catch { return { clock: null }; } })(),
         prep: prep.filter(Boolean), userName: s.userName, present: [s.userName, ...cast.filter(e => e.status === 'present').map(e => e.name)].filter(Boolean), notes: notes.filter(n => n.kind !== '聊' || n.used_in_plan == null),
         cast,
         // 想法和办事请求一直保留到真正了结；只等答复的待办仍限最近 120 条。
@@ -3090,7 +3217,7 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
         signPicks: (() => { try { return picksOf(store, chatKey, s.messages, SIGN_PICKS_MAX); } catch { return []; } })(),
         // 势力账（Q-8）：各方之间、人的明面／实际归属、约定，全给并写明谁知道实情；外加素材包势力网里沾边的原作底子。
         factions: [...factionBrief(factionLedger(s.visible, { resolve: nameResolver(factionNet), dayOf: s.dayOf }), { net: factionNet, today: s.today, relDay: d => relativeDay(d, s.ts) }),
-            ...(sit ? situationBrief(situationNow(sit, { storyId: s.chat.story_id, messages: s.messages, visibleIds: new Set(s.visible.map(r => r.id)), dayOf: s.dayOf, live: moveLiveCtx(store, chatKey, { records: s.visible, principal: s.userName }) }), { today: s.today, relDay: d => relativeDay(d, s.ts), timeScale: s.ts }) : []),
+            ...(sit ? situationBrief(situationNow(sit, { proofLive: proof => timeBasisLive(store, records, chatKey, proof), storyId: s.chat.story_id, messages: s.messages, visibleIds: new Set(s.visible.map(r => r.id)), dayOf: s.dayOf, live: moveLiveCtx(store, chatKey, { records: s.visible, principal: s.userName }) }), { today: s.today, relDay: d => relativeDay(d, s.ts), timeScale: s.ts }) : []),
             ...(() => { try { return activeLong(JSON.parse(store.getMeta?.(`long_events:${s.chat.story_id}`) ?? '[]'), s.today, { lastPos: s.messages.at(-1)?.pos ?? null }); } catch { return []; } })()
                 .map(e => `持续的事（${relativeDay(s.today - e.起, s.ts)}起，约 ${s.ts.span(e.天数)}；${e.谁会知道.length ? `${e.谁会知道.join('、')}知道` : '所有人都听说了'}）：${e.名}——${e.一句话}；眼下${e.阶段[e.第几阶段]}${e.阶段.length > e.第几阶段 + 1 ? `；之后：${e.阶段.slice(e.第几阶段 + 1).join(' → ')}` : ''}`)],
         currentRelations: rel ? current : null,
@@ -3315,7 +3442,7 @@ export function driveMaterial(store, records, chatKey, { seeds = [], prices = nu
     for (const r of [...ledger.deals, ...ledger.allegiances, ...ledger.stances])
         add('环境', `record:${r.id}`, [...r.knownBy], r.text, { pos: r.pos });
     if (sit) {
-        const now = situationNow(sit, { storyId: s.chat.story_id, messages: s.messages, visibleIds: new Set(s.visible.map(r => r.id)), dayOf: s.dayOf });
+        const now = situationNow(sit, { proofLive: proof => timeBasisLive(store, records, chatKey, proof), storyId: s.chat.story_id, messages: s.messages, visibleIds: new Set(s.visible.map(r => r.id)), dayOf: s.dayOf });
         for (const o of now.outcomes) {
             const r = live.find(r => r.id === o.record_id);
             if (r) add('环境', `record:${r.id}`, owner(r), r.text, { pos: r.pos, links: linksOf(r) });
@@ -3445,7 +3572,7 @@ export function closenessTable(store, records, chatKey) {
     const visible = records.visible(chatKey);
     const messages = store.currentMessages(chatKey);
     const lastPos = messages.at(-1)?.pos ?? 0;
-    const dayOf = dayView(store, chatKey, lastPos, visible.filter(r => r.type === '时间'), timeMarksFor(store, records, chatKey, messages));
+    const dayOf = confirmedDayFor(store, records, chatKey, messages);
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? null;
     const openIdeaIds = new Set(records.openIdeas(chatKey).map(r => r.id));
     return new Map(store.getCast(chat.story_id).map(e => [e.avatar, closeness({ name: e.name, userName, entry: e, records: visible, dayOf, lastPos, openIdeaIds })]));
@@ -3461,13 +3588,16 @@ export function prefetchDraft(store, records, deps, { chatKey, draft, recent = [
     if (!store.requireChat(chatKey).enabled) return { ok: true, skipped: 'off' };
     // 只承接的一句（"嗯""好"）也预跑：组装主要靠上文，一轮至多两份草稿兜着花费。
     if (!deps.assembler || !records || !text) return { ok: true, skipped: 'empty' };
-    const base = store.currentMessages(chatKey).at(-1)?.fp ?? 'start';
+    const recallCache = {};
+    const base = `${store.currentMessages(chatKey).at(-1)?.fp ?? 'start'}:${recallTimeKey(store, records, chatKey, recallCache)}`;
     const seen = drafts.get(chatKey);
     const round = seen?.base === base ? seen : { base, count: 0, last: null };
     if (round.last === text) return { ok: true, skipped: 'same' };
     if (round.count >= 2) return { ok: true, skipped: 'limit' };
     drafts.set(chatKey, { base, count: round.count + 1, last: text });
-    prefetchOthers(store, records, deps, { chatKey, speaker: null, recent, recentUser: text, present, only }).catch(() => {});
+    const { messages, bases } = recallSnapshot(store, chatKey, recallCache);
+    const draftBasis = { messages, basis: recallBasisFor(store, records, chatKey, messages, bases) };
+    prefetchOthers(store, records, deps, { chatKey, speaker: null, recent, recentUser: text, present, only, draftBasis, recallCache }).catch(() => {});
     return { ok: true, started: true, ...(Array.isArray(only) ? { only: only.length } : {}) };
 }
 
@@ -3478,10 +3608,11 @@ export function prefetchFor(store, records, deps, { chatKey, recentUser, present
     prefetchOthers(store, records, deps, { chatKey, speaker: null, recent, recentUser, present, only }).catch(() => {});
 }
 
-async function prefetchOthers(store, records, { assembler, keyMaker }, { chatKey, speaker, recent, recentUser, present, only = null }) {
+async function prefetchOthers(store, records, { assembler, keyMaker }, { chatKey, speaker, recent, recentUser, present, only = null, draftBasis = null, recallCache = {} }) {
     if (!assembler || !records || !recentUser) return;
     const rev = correctionRev(store, chatKey);
-    const keyFor = avatar => aheadKey(store, chatKey, avatar, recentUser, rev);
+    const timeKey = recallTimeKey(store, records, chatKey, recallCache);
+    const keyFor = avatar => recallKeyFor(store, records, chatKey, avatar, recentUser, rev, timeKey, recallCache);
     const picked = Array.isArray(only) ? new Set(only.filter(Boolean)) : null;
     const others = memberList(store, chatKey).filter(m => !m.disabled && m.avatar !== speaker && !ahead.has(keyFor(m.avatar))
         && (!picked || picked.has(m.avatar) || picked.has(m.name)));
@@ -3493,8 +3624,10 @@ async function prefetchOthers(store, records, { assembler, keyMaker }, { chatKey
         const name = m.name || m.avatar;
         const { material, messageText } = materialFor(store, records, { chatKey, speaker: m.avatar, name, recent, recentUser, present, queryKeys, pool: true, boardAt });
         if (!material.hits.length || !material.pool.length) continue;
-        once(keyFor(m.avatar),
+        const key = keyFor(m.avatar);
+        once(key,
             () => assembler({ chatKey, speaker: m.avatar, anchor: 'ahead', name, present, recent, recentUser, material, messageText })).catch(() => {});
+        if (draftBasis) ahead.get(key).draft = { ...draftBasis, store, chatKey, speaker: m.avatar, rev, text: String(recentUser).trim() };
     }
 }
 
@@ -3533,7 +3666,8 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
         const correction = correctionRev(store, chatKey);
         const plan = store.lastReadyPlan?.(chatKey);
         const mindVersion = plan ? ':mind:' + createHash('sha1').update(nodeProjection(effectivePlanNode(store, chatKey, plan))).digest('hex').slice(0, 16) : '';
-        return intimateSlotVersion(store, chatKey) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion + causalVersion + mindVersion + conditionVersion + checkVersion + (repair ? `:swipe:${repair}` : '') + (correction ? `:fix:${correction}` : '');
+        const instance = uptoAnchor(store.currentMessages(chatKey), anchor).at(-1)?.sent_at;
+        return (instance ? ':instance:' + createHash('sha1').update(String(instance)).digest('hex').slice(0, 16) : '') + intimateSlotVersion(store, chatKey, (v => v ? ':time:' + v : '')(timeStateFor(store, records, chatKey, uptoAnchor(store.currentMessages(chatKey), anchor)).version)) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion + causalVersion + mindVersion + conditionVersion + checkVersion + (repair ? `:swipe:${repair}` : '') + (correction ? `:fix:${correction}` : '');
     };
     const version = versionNow();
     const pinned = store.getSlot({ chatKey, speaker, anchor, ver: version });
@@ -3545,7 +3679,8 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     }
     const key = `${chatKey}\u0001${speaker}\u0001${anchor}\u0001${version}`;
     if (!inflight.has(key)) {
-        inflight.set(key, measure('compose', () => composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift }))
+        const recallCache = {};
+        inflight.set(key, measure('compose', () => composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift, recallCache }))
             .then(result => {
                 if (versionNow() !== version) return result;
                 if (result.final) store.putSlot({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.parts ?? null, ver: version });
@@ -3556,7 +3691,7 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
                 return result;
             })
             .finally(() => inflight.delete(key)));
-        prefetchOthers(store, records, { assembler, keyMaker }, { chatKey, speaker, recent, recentUser, present }).catch(() => {});
+        prefetchOthers(store, records, { assembler, keyMaker }, { chatKey, speaker, recent, recentUser, present, recallCache }).catch(() => {});
     }
     const { text, mode, contact = null, parts = null } = await inflight.get(key);
     // 正在等组装时喊停：旧版本不返回给前台，重新取暂停后的那一格。
