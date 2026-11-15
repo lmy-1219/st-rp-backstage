@@ -11,7 +11,7 @@ import { absentPeople, pickContact } from './contacts.mjs';
 import { sharedMatter } from './matters.mjs';
 import { narrationOf, canonicalPart, PARTS } from './timeline.mjs';
 // slot.mjs 也 import 这里（旁白那一格读名单）：两边都只在调用时用对方，循环引用没事
-import { timelineFor, playModeOf, menuDays, paceFor } from './slot.mjs';
+import { timelineFor, playModeOf, menuDays, paceFor, supplyEligibility } from './slot.mjs';
 import { enteredSince, emptySegment, arrivalLive } from './landing.mjs';
 import { leadReady } from './eventlead.mjs';
 import { PER_PART } from './knock.mjs';
@@ -151,7 +151,7 @@ export function doorAt(input = {}) {
         // 他牵头、已经拿出来了、后半截还等他自己说的（status shown）也在门上：别人不替他交后半截（slot.menuFor）
         // 拿出来那条以后他自己进了场（landing.enteredSince）：这件门上不再挂——他来过了，后半截他在场时自己说（slot.menuFor 照旧给他）
         const pocketAt = m => (m.status === 'shown' ? m.settled_pos ?? m.pocket_pos : m.pocket_pos);
-        const pockets = (memory ? [] : menu).filter(m => ownIdentity(m) && (m.status === 'pocket' || m.status === 'shown') && (m.status === 'shown' || !afterBlocked(m, menu, x => x.status, { visible: input.visible, messages })) && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
+        const pockets = (memory ? [] : menu).filter(m => ownIdentity(m) && !m.exhausted && (m.status === 'pocket' || m.status === 'shown') && (m.status === 'shown' || !afterBlocked(m, menu, x => x.status, { visible: input.visible, messages })) && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
             && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivalHistory ?? input.arrivals ?? [], knockLive: input.knockLive }));
         const reached = !memory && reach && ownIdentity({...reach,who:reach.person ?? reach.who});
         const called = uniqueName(who) && callsFor(narrationOf(recentUser), [who, ...(rel ? personOf(rel, who, names)?.又名 ?? [] : [])]);
@@ -268,7 +268,7 @@ export function capFresh(store, records, chatKey, { present = [], recentUser = '
 }
 
 const caches = new WeakMap();
-export function doorFor(store, records, chatKey, { present = [], recentUser = '', timeline = null, anchor = null, contacts = null, planner = null } = {}) {
+export function doorFor(store, records, chatKey, { present = [], recentUser = '', timeline = null, anchor = null, contacts = null, planner = null, exhausted = null } = {}) {
     const chat = store.requireChat(chatKey);
     const all = store.currentMessages(chatKey);
     const match = /^(\d+):(.+)$/.exec(anchor ?? '');
@@ -285,7 +285,10 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const sameWho = (a, b) => sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names));
     const isDone = typeof records?.isDone === 'function' ? fp => records.isDone(chat.story_id, fp) : null;
     const visible = records.visible(chatKey).filter(r => r.pos <= messages.at(-1)?.pos);
-    const menu = awaitingPockets(earlyLeads(store, store.menuOf?.(chatKey) ?? [], timeline, { visible, messages }), { messages, isDone, record: planner?.record !== false, same: sameWho });
+    // 核验耗尽的口袋件（T140b 第三项）：由调用方传入同一份派生资格，门上不再把它当候选；只做标记、不滤出目录（后件依赖照旧按全目录判）
+    const out = exhausted ?? supplyEligibility(store, records, chatKey, planner);
+    const menu = awaitingPockets(earlyLeads(store, store.menuOf?.(chatKey) ?? [], timeline, { visible, messages }), { messages, isDone, record: planner?.record !== false, same: sameWho })
+        .map(m => out(m) ? { ...m, exhausted: true } : m);
     const holds = read(store, `arrival_hold:${chatKey}`, []);
     const arrivals = read(store, `arrivals:${chatKey}`, []), arrivalHistory = read({ getMeta: store.getRawMeta ?? store.getMeta }, `arrivals:${chatKey}`, []);
     const knocks = read(store, `knocks:${chatKey}`, []);

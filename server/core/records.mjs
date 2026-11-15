@@ -1,6 +1,7 @@
 import { freshChain } from './store.mjs';
 import { sameIdentity } from './cast.mjs';
 import { emptySegment } from './landing.mjs';
+import { menuMatterNeedsResult } from './menu-evidence.mjs';
 
 // 记录（证据账）：每条都挂在一条消息（局＋指纹）上，带原文片段、谁的说法、当时谁在场。
 // 一个窗口能看到哪些记录，只看它当前序列里还有没有那条消息——改稿删稿后旧记录自动不可见。
@@ -75,6 +76,76 @@ export function similar(a, b) {
     let n = 0;
     for (const g of x) if (y.has(g)) n++;
     return n / Math.min(x.size, y.size);
+}
+
+// 旧版"菜单命中就照抄计划"补记的那两种（T140b）：正文没发生的计划文本被记成了"碰上了「题」：露面"和"某某那时知道的（「题」…）：知情"。
+// 读口屏蔽，不删库：只认程序记的（job_id 为空）、没引文、文字和那件菜单的模板逐字对上、并且那件在同一条消息上有露面/用上日志的；
+// 认不准的一律不动。返回要屏蔽的记录号集合。
+const tidyEnd = t => String(t ?? '').trim().replace(/[。．.]+$/, '');
+export function legacyMenuCopies(db, chatKey) {
+    const q = sql => db.prepare(sql);
+    let rows, menus, logs;
+    try {
+        rows = q(`select r.id, r.fp, r.text, r.matter, r.holder_name from records r join chats c on c.key = ? and c.story_id = r.story_id
+                  where r.job_id is null and r.status = 'ok' and r.quotes = '[]' and (r.text like '碰上了「%' or r.text like '%那时知道的（「%' or r.text like '%牵头的「%')`).all(chatKey);
+        if (!rows.length) return new Set();
+        menus = new Map(q('select id, who, title, surface, respond, know from menu where chat_key = ?').all(chatKey).map(m => [m.id, m]));
+        logs = q("select item_id, fp from menu_log where chat_key = ? and status in ('shown', 'used')").all(chatKey);
+    } catch { return new Set(); }
+    const shownAt = (id, fp) => logs.some(l => l.item_id === id && l.fp === fp);
+    const out = new Set();
+    for (const r of rows) {
+        let matter = null; try { matter = r.matter ? JSON.parse(r.matter) : null; } catch { continue; }
+        if (matter && matter.menu != null && !matter.kind && !matter.evidence) {
+            const m = menus.get(matter.menu);
+            if (m && shownAt(m.id, r.fp) && r.text === `碰上了「${m.title}」：${m.surface ?? ''}`.slice(0, 240)) out.add(r.id);
+            continue;
+        }
+        // 牵头那份旧模板：露面——应答（那时知道：知情）（这是在某处那会儿），整条截在 440 字
+        if (matter && matter.menu != null && matter.kind === '牵头') {
+            const m = menus.get(matter.menu), know = tidyEnd(m?.know);
+            if (!m || r.holder_name !== m.who || !shownAt(m.id, r.fp)) continue;
+            const body = `${m.who}牵头的「${m.title}」：${m.surface ?? ''}${m.respond ? `——${m.respond}` : ''}${know ? `（那时${m.who}知道：${know}）` : ''}`;
+            const place = r.text.startsWith(body) ? r.text.slice(body.length) : null;
+            if (r.text === body.slice(0, 440) || (place != null && r.text.length <= 440
+                && (/^（这是在[^）]*那会儿）$/.test(place) || (r.text.length === 440 && /^(?:（|（这|（这是|（这是在[^）]*)$/.test(place))))) out.add(r.id);
+            continue;
+        }
+        if (matter) continue;
+        for (const m of menus.values()) {
+            const know = tidyEnd(m.know), head = `${m.who}那时知道的（「${m.title}」`;
+            if (!know || r.holder_name !== m.who || !shownAt(m.id, r.fp) || !r.text.startsWith(head)) continue;
+            // 旧模板：头＋（可有可无的"，在某处那会儿"）＋"）："＋知情，整条截在 300 字
+            const tail = /^(?:，在[^）]*那会儿)?）：/.exec(r.text.slice(head.length));
+            if (tail && r.text === `${head}${tail[0]}${know}`.slice(0, 300)) { out.add(r.id); break; }
+        }
+    }
+    return out;
+}
+
+// 证据投影与普通记账共用现有身份/在场口径，不另认一套受众。
+export function absentRecordMembers(db, chatKey) {
+    const q = sql => db.prepare(sql);
+    const chat = q('select members, anchors from chats where key = ?').get(chatKey);
+    let members = [], anchors = null, arrivals = [];
+    try {
+        members = JSON.parse(chat?.members ?? '[]') ?? [];
+        anchors = JSON.parse(chat?.anchors ?? 'null') ?? {};
+        arrivals = JSON.parse(q('select value from meta where key = ?').get(`arrivals:${chatKey}`)?.value ?? '[]') ?? [];
+    } catch { return null; }
+    if (!Array.isArray(members) || !members.length) return null;
+    const fps = new Map(q('select pos, fp from chat_seq where chat_key = ?').all(chatKey).map(r => [r.pos, r.fp]));
+    const firstIn = new Map();
+    for (const m of members) {
+        if (!m?.name) continue;
+        const froms = (anchors[m.avatar]?.segments ?? []).filter(s => !emptySegment(s)).map(s => s?.from).filter(Number.isFinite);
+        const contacts = arrivals.filter(e => sameIdentity(e, m, members) && Number.isFinite(e.at) && fps.get(e.at - 1) === e.fp).map(e => e.at);
+        const cutoff = Math.min(...froms, ...contacts);
+        // 无区间且未静音仍兼容开场就在；同名多头像须全部尚未到场才删这个名字。
+        const first = cutoff === Infinity && !m.disabled ? -Infinity : cutoff;
+        firstIn.set(m.name, Math.min(firstIn.get(m.name) ?? Infinity, first));
+    }
+    return firstIn.size ? (name, pos) => firstIn.has(name) && pos < firstIn.get(name) : null;
 }
 
 export function openRecords(db) {
@@ -256,28 +327,7 @@ export function openRecords(db) {
 
     // 只纠正旧抽取账把“尚无任何区间的人”当成在场的错误，不重判离场后的空档。
     // 首次非空区间或首次联系之后不再纠正；派生账有自己的知情途径，不走这里。
-    function absentMembers(chatKey) {
-        const chat = q('select members, anchors from chats where key = ?').get(chatKey);
-        let members = [], anchors = null, arrivals = [];
-        try {
-            members = JSON.parse(chat?.members ?? '[]') ?? [];
-            anchors = JSON.parse(chat?.anchors ?? 'null') ?? {};
-            arrivals = JSON.parse(q('select value from meta where key = ?').get(`arrivals:${chatKey}`)?.value ?? '[]') ?? [];
-        } catch { return null; }
-        if (!Array.isArray(members) || !members.length) return null;
-        const fps = new Map(q('select pos, fp from chat_seq where chat_key = ?').all(chatKey).map(r => [r.pos, r.fp]));
-        const firstIn = new Map();
-        for (const m of members) {
-            if (!m?.name) continue;
-            const froms = (anchors[m.avatar]?.segments ?? []).filter(s => !emptySegment(s)).map(s => s?.from).filter(Number.isFinite);
-            const contacts = arrivals.filter(e => sameIdentity(e, m, members) && Number.isFinite(e.at) && fps.get(e.at - 1) === e.fp).map(e => e.at);
-            const cutoff = Math.min(...froms, ...contacts);
-            // 无区间且未静音仍兼容开场就在；同名多头像须全部尚未到场才删这个名字。
-            const first = cutoff === Infinity && !m.disabled ? -Infinity : cutoff;
-            firstIn.set(m.name, Math.min(firstIn.get(m.name) ?? Infinity, first));
-        }
-        return firstIn.size ? (name, pos) => firstIn.has(name) && pos < firstIn.get(name) : null;
-    }
+    const absentMembers = chatKey => absentRecordMembers(db, chatKey);
     // 窗口当前看得见的记录（消息还在序列里的）。带上出处位置。
     // 对账以后每条还带：closed_by（被看得见的"了结"或"回答"关上了：{id, pos}）、superseded_by（被看得见的"改掉"换掉了，以后不算数）。
     // 被改掉的默认不给（那一格、规划、账本都只拿活着的）；all=true 时连它们一起给（面板上划线显示）。
@@ -289,7 +339,8 @@ export function openRecords(db) {
                         where r.status = ?${type ? ' and r.type = ?' : ''}${through == null ? '' : ' and s.pos <= ?'}
                         group by r.id order by pos, r.id`).all(...[chatKey, status, ...(type ? [type] : []), ...(through == null ? [] : [through])]);
         const check = !rawBasis && sourceReader ? memo('sourceReader', chatKey, () => sourceReader(chatKey)) : null;
-        const out = rows.map(r => ({ ...r, quotes: JSON.parse(r.quotes), audience: JSON.parse(r.audience), keys: r.keys ? JSON.parse(r.keys) : [], money: r.money ? JSON.parse(r.money) : null, relation: r.relation ? JSON.parse(r.relation) : null, clock: r.clock ? JSON.parse(r.clock) : null, wide: r.wide ? JSON.parse(r.wide) : [], faction: r.faction ? JSON.parse(r.faction) : null, promise: r.promise ? JSON.parse(r.promise) : null, known: r.known ? JSON.parse(r.known) : [], lesson: r.lesson ? JSON.parse(r.lesson) : null, life: r.life ? JSON.parse(r.life) : null, rep: r.rep ? JSON.parse(r.rep) : null, matter: r.matter ? JSON.parse(r.matter) : null })).filter(r => rawBasis || liveSource(r.known, chatKey, check));
+        const copies = memo('legacyMenuCopies', chatKey, () => legacyMenuCopies(db, chatKey));
+        const out = rows.filter(r => !copies.has(r.id)).map(r => ({ ...r, quotes: JSON.parse(r.quotes), audience: JSON.parse(r.audience), keys: r.keys ? JSON.parse(r.keys) : [], money: r.money ? JSON.parse(r.money) : null, relation: r.relation ? JSON.parse(r.relation) : null, clock: r.clock ? JSON.parse(r.clock) : null, wide: r.wide ? JSON.parse(r.wide) : [], faction: r.faction ? JSON.parse(r.faction) : null, promise: r.promise ? JSON.parse(r.promise) : null, known: r.known ? JSON.parse(r.known) : [], lesson: r.lesson ? JSON.parse(r.lesson) : null, life: r.life ? JSON.parse(r.life) : null, rep: r.rep ? JSON.parse(r.rep) : null, matter: r.matter ? JSON.parse(r.matter) : null })).filter(r => rawBasis || liveSource(r.known, chatKey, check));
         const notThere = absentMembers(chatKey);
         if (notThere) for (const r of out) if (r.job_id != null) r.audience = r.audience.filter(n => n === r.holder_name || !notThere(n, r.pos));
         if (status !== 'ok') return out;
@@ -347,7 +398,8 @@ export function openRecords(db) {
     function linksOf(chatKey, rawBasis = false, through = null) { return memo('links', `${chatKey}|${rawBasis ? 1 : 0}|${through ?? ''}`, () => readLinks(chatKey, rawBasis, through)); }
     function readLinks(chatKey, rawBasis = false, through = null) {
         const closed = new Map(), answered = new Map(), superseded = new Map(), outgoing = new Map();
-        const seen = q(`select r.id, r.type, r.idea_ref, r.outcome, r.known, l.to_id, l.kind, target.todo_kind target_kind, min(s.pos) pos from records r
+        const seen = q(`select r.id, r.type, r.idea_ref, r.outcome, r.known, l.to_id, l.kind, target.todo_kind target_kind,
+                        target.promise target_promise, target.matter target_matter, min(s.pos) pos from records r
                         join chats c on c.key = ? and c.story_id = r.story_id
                         join chat_seq s on s.chat_key = c.key and s.fp = r.fp
                         left join record_links l on l.from_id = r.id
@@ -366,7 +418,10 @@ export function openRecords(db) {
             if (superseded.has(x.id)) continue;
             if (x.kind === '回答' && !answered.has(x.to_id)) answered.set(x.to_id, { id: x.id, pos: x.pos, kind: x.kind });
             if ((x.kind === '回答' || x.kind === '证实') && x.target_kind !== 'action' && !closed.has(x.to_id)) closed.set(x.to_id, { id: x.id, pos: x.pos, kind: x.kind });
-            if (x.type === '了结' && x.idea_ref != null) closed.set(x.idea_ref, { id: x.id, pos: x.pos, outcome: x.outcome });
+            // 碰上的事失败、改了做法仍待处理；结果事实保留，不能据此关掉原事。
+            const pendingMatter = menuMatterNeedsResult({ promise: x.target_promise ? JSON.parse(x.target_promise) : null,
+                matter: x.target_matter ? JSON.parse(x.target_matter) : null });
+            if (x.type === '了结' && x.idea_ref != null && !(pendingMatter && ['没办成', '改了'].includes(x.outcome))) closed.set(x.idea_ref, { id: x.id, pos: x.pos, outcome: x.outcome });
         }
         return { closed, answered, superseded, outgoing };
     }

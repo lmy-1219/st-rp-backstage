@@ -41,9 +41,20 @@ const userOf = messages => [...messages].reverse().find(m => m.is_user)?.name ??
 const live = messages => messages.filter(m => !m.hidden);
 const rowsOf = tl => pos => (tl.firmRows ?? tl.rows).filter(r => r.pos <= pos).at(-1) ?? { day: tl.firmToday ?? tl.today, part: tl.firmPart ?? tl.part };
 
+// 仅收敛进程内的重复诊断，不改历史元数据或来源有效性。
+const staleReported = new WeakMap();
 function currentSource(store, chatKey, item, log = true) {
     const ok = !item.sourceVersion || item.sourceVersion === sourceVersion(store, chatKey, item.through ?? item.checkedAt ?? item.at);
-    if (!ok && log) store.logEvent?.(chatKey, 'auto_stale_result', { avatar: item.avatar, at: item.at, reason: '判定依据已更新，保留当前状态' });
+    if (log) {
+        let seen = staleReported.get(store);
+        if (!seen) staleReported.set(store, seen = new Set());
+        const key = JSON.stringify([chatKey, item.avatar, item.at, item.fp, item.through ?? item.checkedAt, item.sourceVersion]);
+        if (ok) seen.delete(key);
+        else if (!seen.has(key)) {
+            seen.add(key);
+            store.logEvent?.(chatKey, 'auto_stale_result', { avatar: item.avatar, at: item.at, reason: '判定依据已更新，保留当前状态' });
+        }
+    }
     return ok;
 }
 

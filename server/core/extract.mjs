@@ -10,6 +10,7 @@ import { LINK_KINDS, similar } from './records.mjs';
 import { rankByOverlap } from './recall.mjs';
 import { LIFE_KINDS } from './life.mjs';
 import { isPrivate } from './visibility.mjs';
+import { MENU_EVIDENCE_PROTOCOL, menuEvidenceVersion, menuSource, actualMenuRecord, quotedMenuRecord } from './menu-evidence.mjs';
 
 import { registerPromptDefaults, promptText } from './prompt-slots.mjs';
 export const TYPES = ['说', '心里', '做', '想法', '改变', '时间', '了结', '钱', '关系', '协议', '归属', '立场', '余波'];
@@ -30,7 +31,7 @@ export const SYSTEM_PROMPT = `你在给一部长篇角色扮演做"记账"。这
   "想法"——有人提出的想法、提议、打算、约好要一起做的事，哪怕是随口一句；
   "改变"——这条消息让某人、某物、某地的状态发生了会持续下去的改变（身上的、处境上的、心里长久的都算：受了伤、搬了家、从此落下了心病；心里一阵子的劲记"余波"）。要有这条消息里发生的事做依据（受了伤、砸了、搬了、定了、弄清了）；说话人对别人身体、处境的揣测、形容、夸张不是改变，记成"心里"或"说"；眼前一时的（眼花一下、头晕一阵）不算，当场就完的不记，事本身记"做"；
   "时间"——叙述中属于故事当下的日期或已发生时长；证据不完整就保留未确认线索。区分当下变化与人物对往事、意图的描述；
-  "了结"——这条消息把"还开着的想法和约定"里的某一条做成了、明说不做了、改了日子或做法、或者去办了没成（标着"没讲完"的那几条，这条消息把它接着讲完了也算，结果写"做了"）；"做成了"只算那件事本身办完：出发了、在路上、来接人了、准备去，都还不算；标着"碰上的事""他牵头的事"的那几条，这条消息让它有了着落才了结——解决了、弄清了是怎么回事写"做了"，明说放下不管了写"不做了"；只是提起、问起、还在想办法、试了没成，都不了结（那件事照常记）；标着"来意"的那几条，他这条消息把来意说出来了、或者那件事办了，就了结，结果写"做了"，只是来了、开了口说别的不算；标着"规矩"的那几条里只管那一回的（"检查完了把原话发过来""这次进去把脸板着"），这条消息把那一回办了、过了，也了结，结果写"做了"；一直算数的规矩不了结；
+  "了结"——这条消息把"还开着的想法和约定"里的某一条做成了、明说不做了、改了日子或做法、或者去办了没成（标着"没讲完"的那几条，这条消息把它接着讲完了也算，结果写"做了"）；"做成了"只算那件事本身办完：出发了、在路上、来接人了、准备去，都还不算；标着"碰上的事""他牵头的事"的那几条，这条消息让它有了着落才了结——解决了、弄清了是怎么回事写"做了"，明说放下不管了写"不做了"；只是提起、问起、还在想办法，不写了结；实际试了没成、改了做法也记结果，原事仍待处理；标着"来意"的那几条，他这条消息把来意说出来了、或者那件事办了，就了结，结果写"做了"，只是来了、开了口说别的不算；标着"规矩"的那几条里只管那一回的（"检查完了把原话发过来""这次进去把脸板着"），这条消息把那一回办了、过了，也了结，结果写"做了"；一直算数的规矩不了结；
   "钱"——谁给谁钱、多少、到了哪一步（没写明数目的也记，"金额"填"不明"）；泛泛说的行情、价位（"这种活一般两三千""那一带月租一千多"）不是谁和谁之间的钱，不记成"钱"；
   "关系"——说话人和另一个人之间的关系有了实质变化，或者这条消息说清了两人眼下是什么关系：表白、确定关系、第一次亲密、闹翻、和好、结仇、认了家人、从此信任或不再信任；两人之间头一回的也算：吵了一架后头一回服软、一向嘴硬的人头一回开口关心（"外头下雨，开慢点"）、头一回把对方推开、头一回当面说"谢谢"——"内容"写这是头一回怎样，"现在"写从这一刻起说话人这一边对那个人是什么关系（见下）；
   "协议"——两方（人，或公司、帮派、组织、团体这些势力，也包括主角这一伙）之间谈的交换或合作：拿什么换什么、谁替谁办什么、互不侵犯、结盟；谈着的、说定的、正在兑现的、兑现完的、违约的、撕毁的都记，同一笔后来有了进展再记一条；
@@ -81,8 +82,9 @@ export const SYSTEM_PROMPT = `你在给一部长篇角色扮演做"记账"。这
 特别注意：角色嘴里对别人经历的概括、猜测、夸张，不是那个人亲口说的经历——要么不记，要么如实记成"某某认为/某某说另一人……"，"关于谁"填那个人。讲到一半停下的经历，只记讲出来的部分；明显还没讲完的（讲到一半停下、被打断、岔开、含糊带过），这条"说"加"没说完": true，"内容"末尾写清停在哪（"……讲到……就没往下说"）。
 一个人对他没亲眼见到的事的猜测，永远不要记成那件事本身——要么照"猜的"记成"某某猜……"，要么不记。
 
-另外，"口袋里的事"是幕后排好、由角色挑时候拿出来的事（有的已经在口袋里，有的还排着没到时候）。要记的消息里如果有角色把一件"在口袋里"的拿了出来（照着它做了、说了、让它发生了；只是字面沾边不算；"还排着"的不算露面），另输出一条 {"消息号": 数字, "型": "露面", "对应": "袋编号"}；
-带"露面条件"的件，不管在口袋里还是还排着，正文（角色的，或玩家亲口叙述的实际行动）照条件出现了，也输出这条露面，并加 "引文": "原文里的那一句"；只是打算、假设、没做成的不算。
+另外，【口袋里的事】里的都是待核对象：幕后排好的计划，只供对照，不是已经发生的事，它写的露面、收尾、知情别照抄成记录。要记的消息里如果有角色把一件"在口袋里"的拿了出来（照着它做了、说了、让它发生了；只是字面沾边不算；"还排着"的不算露面），另输出一条 {"消息号": 数字, "型": "露面", "对应": "袋编号", "引文": "本条原文里证明它出现的那一句"}；没有引文的露面不算。
+带"露面条件"的件，不管在口袋里还是还排着，正文（角色的，或玩家亲口叙述的实际行动）照条件出现了，也输出这条露面；只是打算、假设、没做成的不算。露面只说明它出现了，不等于它办完了。
+一条普通记录记下的实际表达、动作或结果正好就是某件的露面或收尾目标本身（对象、对谁、做到哪一步都对上），在这条里加 "袋": "袋编号", "边界": "露面"或"收尾"；已提出的问题可完成提问目标，后续待答另算；协议兑现、归属或立场实际变化同样对照。只是复述要求、只做了一部分、对象或对谁不对的，不加。
 如果要记的消息让其中一件已经不成立了（它要催、要办、要等的事已经在别处办完或者黄了，要见的人已经走了、死了，它的前提被推翻了；被角色拿出来、照着办了的算露面，不算作废；发来消息、打来电话、托人带话不等于人来过、见过面），另输出一条 {"消息号": 数字, "型": "作废", "对应": "袋编号", "为什么": "一句"}。只是还没发生、换个时候也还说得通的，不算作废；拿不准就不写。这两种都不用填别的格，不算记录。
 不要用原作或任何外部知识补全或纠正这里的设定。只输出一个 JSON 数组，不要任何别的文字；"内容"里要引人说的话时用「」，不要用英文双引号。`;
 
@@ -193,7 +195,8 @@ export function buildUserPrompt({ window, context, openIdeas, openItems = null, 
     const before = context.length ? context.map(m => block(m, t => clean(t).slice(0, 800), presenceOf(m), farOf(m))).join('\n\n') : '无';
     const target = window.map(m => block(m, clean, presenceOf(m), farOf(m))).join('\n\n');
     const only = onlyTypes ? `【这一遍只补记"${onlyTypes.join('"、"')}"型；别的型已经记过了，不要再记。没有就输出 []】\n\n` : '';
-    const bag = pocket.length ? `【口袋里的事】（供对照：角色把哪件拿出来了、哪件已经不成立了）\n${pocket.map(m => `袋${m.id}${(m.status ?? 'pocket') === 'pocket' ? '（在口袋里）' : '（还排着）'} ${m.who}「${m.title}」：${String(m.surface ?? '').slice(0, 120)}${m.showCondition ? `；露面条件：${m.showCondition}` : ''}`).join('\n')}\n\n` : '';
+    const stateOf = m => ({ pocket: '（在口袋里）', waiting: '（还排着）' })[m.status ?? 'pocket'] ?? '（已露面，还没收尾）';
+    const bag = pocket.length ? `【口袋里的事】（待核对象：幕后计划，不是已经发生的事；只供对照哪件被拿了出来、哪件办到了收尾、哪件已经不成立了）\n${pocket.map(m => `袋${m.id}${stateOf(m)} ${m.who}「${m.title}」：${String(m.surface ?? '').slice(0, 120)}${m.showCondition ? `；露面条件：${m.showCondition}` : ''}${String(m.closeText ?? '').trim() ? `；收尾：${String(m.closeText).trim().slice(0, 120)}` : ''}`).join('\n')}\n\n` : '';
     const pacts = deals.length ? `【进行中的约定】（名目照这里写；有进展才再记）\n${deals.map(d => `${d.parties.join(' 和 ')}「${d.title}」：${d.stage}`).join('\n')}\n\n` : '';
     return `${only}${bag}${pacts}${given}${head}\n${ideas}\n\n【前文】（只供理解）\n${before}\n\n【要记的消息】\n${target}`;
 }
@@ -323,6 +326,8 @@ export function verify(items, { window, clean, presenceOf, remoteOf = () => [], 
             selfIdea: selfNo(item?.['对应']),
             outcome: item?.['结果'] ?? null,
             lasting: item?.['分量'] === '长',
+            // 模型声称这条实际记录对上某件的露面／收尾：只是待核的声称，落账前由 bindMenuEvidence 再核
+            ...(item?.['袋'] != null ? { menuClaim: { id: Number(String(item['袋']).trim().replace(/^袋/, '')), boundary: item?.['边界'] } } : {}),
             selfLinks: (Array.isArray(item?.['接上']) ? item['接上'] : []).map(l => ({ n: selfNo(l?.['编号']), kind: l?.['关系'] })).filter(l => l.n != null && ['回答', '改掉'].includes(l.kind)),
             links: (Array.isArray(item?.['接上']) ? item['接上'] : []).filter(l => selfNo(l?.['编号']) == null).map(l => ({ to: Number(String(l?.['编号'] ?? '').replace(/^#/, '')), kind: l?.['关系'] })).filter(l => Number.isInteger(l.to) && linkIds.has(l.to)),
             // 提起的已知的事（只认这次给过的编号），存 {key, title}
@@ -394,8 +399,7 @@ export function verify(items, { window, clean, presenceOf, remoteOf = () => [], 
         });
         // 了结也可以关【还开着的】里的问题、要求、钱上的事（实测模型拿它关"这顿我请"）
         if (record.type === '了结' && !((record.selfIdea != null || openIdeaIds.has(record.ideaRef) || linkIds.has(record.ideaRef)) && OUTCOMES.includes(record.outcome))) { reject('了结对不上还开着的想法'); continue; }
-        // 碰上的事有了着落才关：解决了、弄清了（做了），放下不管了（不做了）；试了没成、改了做法都还开着
-        if (record.type === '了结' && linkRows.get(record.ideaRef)?.matter && !['做了', '不做了'].includes(record.outcome)) { reject('碰上的事还没着落，不了结'); continue; }
+        // 失败/改法也是实际结果，照常入账；原事是否关上由 records 的统一链接投影决定。
         // 约定（N-268）：类认得、谁办写了人；办的人里得有说话人或在场的人——只说到不在场的人会怎样的，是预判，不是约定（只去掉这一格，记录照收）
         if (['说', '想法'].includes(record.type) && item?.['约定'] && typeof item['约定'] === 'object') {
             const p = item['约定'];
@@ -636,7 +640,53 @@ export function prepareWindow({ records, config, chat, window, context, names, o
     const user = buildUserPrompt({ window, context, openIdeas, openItems, known: givenKnown, clean, presenceOf, remoteOf, onlyTypes, pocket: onlyTypes ? [] : pocket, deals });
     const conditionItems = new Map(pocket.filter(m => String(m.showCondition ?? '').trim()).map(m => [m.id,
         { condition: m.showCondition, source: m.sourceAt ? { ...m.sourceAt } : null }]));
-    return { clean, presenceOf, remoteOf, facePresentOf, openIdeas, linkIds: new Set(openItems.map(r => r.id)), linkRows: new Map(openItems.map(r => [r.id, { holder: r.holder_name ?? r.holder, guess: !!r.guess, matter: !!r.matter }])), recent, known: givenKnown, pocketIds: new Set(pocket.filter(m => (m.status ?? 'pocket') === 'pocket').map(m => m.id)), menuIds: new Set(pocket.map(m => m.id)), conditionItems, user, system: windowSystem(config, chat.key) };
+    // 待核对象（同一次调用里给的那几件）：版本按给出时的样子定，计划后来改了，这次的绑定就不算数
+    const menuRefs = new Map(pocket.map(m => [m.id, { id: m.id, who: m.who, title: m.title ?? '', status: m.status ?? 'pocket', entry: m.entry ?? null, origin: m.origin ?? null,
+        source: menuSource(m) ? { ...menuSource(m) } : null, version: menuEvidenceVersion(m),
+        show: String(m.showCondition || m.surface || '').trim(), close: String(m.closeText ?? '').trim(), conditioned: !!String(m.showCondition ?? '').trim() }]));
+    return { clean, presenceOf, remoteOf, facePresentOf, openIdeas, linkIds: new Set(openItems.map(r => r.id)), linkRows: new Map(openItems.map(r => [r.id, { holder: r.holder_name ?? r.holder, guess: !!r.guess, matter: !!r.matter }])), recent, known: givenKnown, pocketIds: new Set(pocket.filter(m => (m.status ?? 'pocket') === 'pocket').map(m => m.id)), menuIds: new Set(pocket.filter(m => ['pocket', 'waiting'].includes(m.status ?? 'pocket')).map(m => m.id)), conditionItems, menuRefs, user, system: windowSystem(config, chat.key) };
+}
+
+// 露面：要有本楼引文，证明里存候选版本；只证明露面，不升级成收尾。没认的带上原因，交给 worker 留痕。
+function showProofs(items, window, prepared) {
+    const shown = [], unshown = [];
+    for (const i of items.filter(i => i?.['型'] === '露面')) {
+        const m = window.find(w => w.pos === Number(i['消息号'])), id = Number(String(i['对应'] ?? '').trim().replace(/^袋/, ''));
+        const ref = prepared.menuRefs?.get(id), conditioned = prepared.conditionItems?.has(id);
+        const miss = why => unshown.push({ id: Number.isSafeInteger(id) ? id : null, pos: m?.pos ?? null, fp: m?.fp ?? null, why });
+        if (!m || !Number.isSafeInteger(id) || !ref || !prepared.menuIds?.has(id)) { miss('露面对不上这次给的件或消息'); continue; }
+        // 没带条件的旧件只认在口袋里的、角色的消息（老规矩）；带条件的还排着也认，玩家亲口叙述的实际行动也算
+        if (!conditioned && (m.is_user || !prepared.pocketIds?.has(id))) { miss('露面不是在口袋里的件或是玩家的消息'); continue; }
+        const quote = typeof i['引文'] === 'string' ? i['引文'].trim() : '';
+        if (!squash(quote)) { miss('露面缺引文未认'); continue; }
+        if (!squash(prepared.clean(m.text)).includes(squash(quote))) { miss('露面引文不在本楼原文里'); continue; }
+        if (!ref.source || !Number.isInteger(ref.source.pos) || m.pos <= ref.source.pos) { miss('露面不在这件放出以后'); continue; }
+        shown.push({ id, pos: m.pos, fp: m.fp, conditionProof: { condition: conditioned, protocol: MENU_EVIDENCE_PROTOCOL, menu: id, version: ref.version, boundary: '露面',
+            evidence: { pos: m.pos, fp: m.fp }, source: ref.source, quote, ...(conditioned ? { conditionText: prepared.conditionItems.get(id).condition } : {}) } });
+    }
+    return { shown, unshown };
+}
+
+// 普通记录对上某件的露面/收尾：与消费端共用实际发生及引文判断，不按类型或后续待办排除本次事件。
+// 合格的都挂上这件（matter.menu，只是关联：场上、还没下文、了结用）；证明（matter.evidence）只在本人做的、在这件放出以后、
+// 引文在本楼时才写，并和这条记录的人、受众、出处绑在一起。返回没认的原因（只去掉绑定，记录照收）。
+function bindMenuClaim(r, window, prepared) {
+    const claim = r.menuClaim;
+    delete r.menuClaim;
+    if (!claim) return null;
+    const ref = prepared.menuRefs?.get(claim.id), m = window.find(w => w.fp === r.fp);
+    const target = claim.boundary === '收尾' ? ref?.close : claim.boundary === '露面' ? ref?.show : '';
+    if (!ref || !m || !target) return '对不上这次给的件或边界';
+    if (!actualMenuRecord(r)) return '不是已经发生的实际记录';
+    if (!ref.source || !Number.isInteger(ref.source.pos) || m.pos <= ref.source.pos) return '不在这件放出以后';
+    if (!quotedMenuRecord({ ...r, pos: m.pos }, window)) return '引文不在本楼原文里';
+    if (r.matter) return '这条已经挂着别的事';
+    const relation = r.type === '了结' && r.outcome !== '做了' ? '撤销' : claim.boundary === '露面' ? '发生' : '实现';
+    const own = r.holderName === ref.who;
+    r.matter = { menu: ref.id, boundary: claim.boundary, title: ref.title, who: ref.who, ...(ref.entry ? { entry: ref.entry } : {}), ...(ref.origin ? { origin: ref.origin } : {}),
+        ...(own ? { evidence: { protocol: MENU_EVIDENCE_PROTOCOL, menu: ref.id, version: ref.version, boundary: claim.boundary, relation,
+            source: { pos: m.pos, fp: m.fp }, holder: r.holder, audience: [...(r.audience ?? [])] } } : {}) };
+    return own ? null : '不是这件的牵头人做的：只挂关联，不算证明';
 }
 
 // 拿到回答以后：解析、核对、落账。模型答的和窗口交回的走同一条路。
@@ -644,28 +694,21 @@ export function applyReply({ records, config, chat, window, prepared, jobId, raw
     const items = parseOutput(raw);
     // 一大段一条都没记，多半是模型整段放弃（比如碰到敏感内容），不当作"记完了"，让它重试或最终跳过留痕。
     if (!onlyTypes && !items.length && window.length >= 4 && window.reduce((s, m) => s + m.text.length, 0) >= 2000) throw new Error('suspicious_empty');
-    // "露面"不是记录：认出哪条角色的消息把口袋里的哪件拿了出来（用户的消息不算；编号得是这次给过的）。
-    const shown = items.filter(i => i?.['型'] === '露面').flatMap(i => {
-        const m = window.find(w => w.pos === Number(i['消息号'])), id = Number(String(i['对应'] ?? '').replace(/^袋/, ''));
-        if (!m) return [];
-        const item = prepared.conditionItems?.get(id);
-        if (!item) return !m.is_user && prepared.pocketIds?.has(id) ? [{ id, pos: m.pos, fp: m.fp }] : [];
-        const quote = typeof i['引文'] === 'string' ? i['引文'].trim() : '';
-        if (!Number.isSafeInteger(id) || !prepared.menuIds?.has(id) || !item.source || !Number.isInteger(item.source.pos)
-            || m.pos <= item.source.pos || !squash(quote) || !squash(prepared.clean(m.text)).includes(squash(quote))) return [];
-        return [{ id, pos: m.pos, fp: m.fp, conditionProof: { condition: true, evidence: { pos: m.pos, fp: m.fp },
-            source: item.source, quote, conditionText: item.condition } }];
-    });
+    // "露面"不是记录：认出哪条消息把哪件拿了出来；要有本楼引文，只证明露面（showProofs）。
+    const { shown, unshown } = showProofs(items, window, prepared);
     // "作废"：要记的消息让口袋里或排着的哪件已经不成立了（一单已经交了，"催这单"那件就撤掉），记在让它不成立的那条消息上。
     const voided = items.filter(i => i?.['型'] === '作废').map(i => ({ m: window.find(w => w.pos === Number(i['消息号'])), id: Number(String(i['对应'] ?? '').replace(/^袋/, '')), why: String(i['为什么'] ?? '').slice(0, 200) }))
         .filter(x => x.m && (prepared.menuIds ?? prepared.pocketIds)?.has(x.id) && !shown.some(s => s.id === x.id)).map(x => ({ id: x.id, pos: x.m.pos, fp: x.m.fp, why: x.why }));
     items.forEach((x, i) => { if (x && typeof x === 'object') x.__n = i + 1; });
     const { accepted, rejected } = verify(items.filter(i => i?.['型'] !== '露面' && i?.['型'] !== '作废'), { window, clean: prepared.clean, presenceOf: prepared.presenceOf, remoteOf: prepared.remoteOf, facePresentOf: prepared.facePresentOf, openIdeaIds: new Set(prepared.openIdeas.map(r => r.id)), onlyTypes, linkIds: prepared.linkIds, linkRows: prepared.linkRows, recent: prepared.recent, known: prepared.known ?? [] });
+    const unbound = [];
+    for (const r of accepted) { const claim = r.menuClaim, why = bindMenuClaim(r, window, prepared); if (why) unbound.push({ id: claim.id, pos: window.find(w => w.fp === r.fp)?.pos ?? null, why: `${claim.boundary ?? '?'}绑定未认：${why}` }); }
+    for (const x of rejected) delete x.record.menuClaim;
     const used = usage ?? { input: 0, output: 0 };
     const e = config.extractor;
     const costUsd = (used.input * e.priceInPerM + used.output * e.priceOutPerM) / 1e6;
     records.finishJob({ jobId, storyId: chat.story_id, fps: window.map(m => m.fp), accepted, rejected, usage: used, costUsd, raw, markDone: !onlyTypes });
-    return { jobId, accepted: accepted.length, rejected: rejected.length, costUsd, usage: used, shown, voided };
+    return { jobId, accepted: accepted.length, rejected: rejected.length, costUsd, usage: used, shown, voided, unshown: [...unshown, ...unbound] };
 }
 
 export async function runWindow({ records, client, config, chat, window, context, names, onlyTypes = null, pocket = [], known = [], remoteOf = () => [], facePresentOf = () => [] }) {

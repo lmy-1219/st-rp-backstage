@@ -523,7 +523,7 @@ async function turnMemo({ chatKey, verdict, thread }) {
 // 玩家的角色提了新想法（记账记下来的）：便宜模型看一眼是不是认真要长期去做的新方向、对不对得上哪条储备线。是就记下判定，
 // 下一次开口时重新规划（needsPlan → 'turn'）。不排外援：调不通就算了，下一个想法再看；/聊 和面板也能手动要。
 // changes：这份规划之后新记下的关系变化、一直算数的改变（谁的都算）——看规划设想的局面还成不成立（用户 10/4）。
-async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [], acts = [], outside = [], at = null, verification: requestedVerification = false, basis = null }) {
+async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [], acts = [], outside = [], at = null, verification: requestedVerification = false, basis = null, verificationItems = null }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
     const cfg = getConfig(), a = cfg.stages.judge, p = cfg.planner;
     if (!p.judge || !a.baseUrl || !a.apiKey || !p.judgeModel || (!requestedVerification && !(ideas.length || others.length || changes.length || acts.length || outside.length))) return { skipped: true };
@@ -573,7 +573,8 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
             ...sliceParts(recordParts(r), 200)];
         return { ...r, raw_text: r.raw_text ?? r.text, text: partsText(parts), [TEXT_PARTS]: parts };
     });
-    const verification = verificationSnapshot(store, records, chatKey, planId, checkedAt?.pos);
+    const verification = verificationSnapshot(store, records, chatKey, planId, checkedAt?.pos,
+        verificationItems ? { keys: verificationItems } : null);
     const prompt = turnCheckPrompt({ node, reserve: setup?.储备线 ?? [], main: setup?.主线 ?? [], ideas, others, changes, acts, outside, waiting, completed, onEvidence, verification });
     // 已知来源失效的材料不能送出；没有历史来源的材料仍按兼容路径处理。
     if (invalidMaterial) return;
@@ -591,8 +592,8 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
         const v = parseTurnCheck(r.text);
         const beforeCommit = basis && planningInput(store, records, chatKey, { through: stablePlanEdge(currentMessages)?.pos ?? -1 });
         const sameInput = beforeCommit && evaluationBasis(beforeCommit.snapshot, beforeCommit.scene) === basis;
-        receivePlanningCheck(store, chatKey, verification, v, { at: checkedAt, completed, verdict: !staleReply });
-        if (staleReply) return;
+        const accepted = receivePlanningCheck(store, chatKey, verification, v, { at: checkedAt, completed, verdict: !staleReply });
+        if (staleReply) return { stale: true };
         const done = v.done && !!node?.算成 && completed.length > 0;
         log(`plan ${planId} turn check on ${[...ideas, ...others, ...changes, ...acts].map(i => i.id).join(',')}: ${v.turn ? '转向' : v.broke ? '弄断' : done ? '算成' : v.shift ? '局面变了' : '没有'}${v.thread ? `（${v.thread}）` : ''}${v.why ? `（${v.why}）` : ''}${v.idea ? `；念头：${v.idea.who}——${v.idea.what}` : ''}${v.loud ? `；发酵：${v.loud.ids.join(',')}（${v.loud.why}）` : ''}`);
         // 闹出了大动静（D-170，用户 10/6）：不等换天，当场让局势跑一次——各方动起来、消息传开、给玩家这边排一两件后续。一个剧情时段至多一次
@@ -630,10 +631,12 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
         // 请求期间有新材料仍沿用旧依据；本次提交是否还需重核由生产/回放共用边界判断。
         if (sameInput) {
             const committed = planningInput(store, records, chatKey, { through: stablePlanEdge(store.currentMessages(chatKey))?.pos ?? -1 });
-            return { checked: planningCheckBasis(beforeCommit, committed) };
+            return { checked: planningCheckBasis(beforeCommit, committed), accepted };
         }
+        return { accepted };
     } catch (error) {
         records.logAssemble({ chatKey, speaker: '(转向检查)', model: p.judgeModel, status: 'failed', ms: Date.now() - started, error: error.message });
+        return { error: error.message };
     }
 }
 
@@ -1203,6 +1206,9 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     }
     if (playModeOf(store,chatKey,getConfig()) === 'memory' && ['pocket','settle','reach'].includes(offer?.from)) offer=null;
     if (!offer && mode !== 'come') offer = { who, avatar, why: '', way: '', from: 'user', lines: [] };
+    // 旧元数据没有当前来源版本，只能保留由头；方式须由本次请求/有效交接或当前简报重建。
+    const offerWayLive = offer?.fp === briefTip?.fp && offer?.sourceVersion === version;
+    if (offer?.way && !offerWayLive) offer = { ...offer, way: '' };
     // 玩家去找他：他在原地；远程：说好了是消息还是电话，模型答"上门"也不算
     if (offer && mode === 'go') offer = { ...offer, why: [`玩家去找${who}`, offer.lines?.[0], offer.from === 'settle' ? '' : offer.why].filter(Boolean).join('；'), way: '' };
     if (offer && mode === 'remote') offer = { ...offer, way: /电话/.test(way) ? '打来电话' : /消息/.test(way) ? '发来消息' : /电话|消息/.test(offer.way ?? '') ? offer.way : '发来消息' };
@@ -1271,8 +1277,10 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     if (!handoffValid() || sourceVersion(store, chatKey, briefTip?.pos ?? -1) !== version) return { ok: false, why: '进场来源已改变，请重新核对' };
     if (prepare) { log(`arrive ${chatKey} ${who}: prepared ${got ? 'brief' : 'no brief'}`); return { ok: true, prepared: true }; }
     const at = (msgs.at(-1)?.pos ?? -1) + 1;   // 他从下一条起在场（叩门的：就是他那条）
-    // 递的时候说好了是发消息、打电话来的（结算定的、玩家点名叫的），模型答"上门"也不算：旁白写的是终端响了，他不能这一条就走进屋（D 副本假模型 10/7 撞到）
-    const offeredHow = /电话/.test(offer?.way ?? '') ? '电话' : /消息/.test(offer?.way ?? '') ? '消息' : '';
+    // 交接已经确定的方式双向锁定；候着与回应后进场仍由原叩门链推进。
+    const offeredWay = way || (mode === 'remote' || offerWayLive ? offer?.way : '') || '';
+    const offeredHow = /电话/.test(offeredWay) ? '电话' : /消息/.test(offeredWay) ? '消息'
+        : /^(他过来|去找他|找上门|上门|当面)$/.test(offeredWay) ? '上门' : '';
     const pending = knock ? pendingKnock(store, chatKey) : null;
     const linked = pending?.who === who && pending.at === at && pending.fp === tip?.fp ? pending
         : knock ? [...knocksOf(store, chatKey)].reverse().find(k => k.at === at && k.fp === tip?.fp && k.who === who) : null;
@@ -1286,7 +1294,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
         ...(offer?.earlier?.surface ? { earlier: { way: offer.earlier.way, surface: offer.earlier.surface, respond: offer.earlier.respond ?? '' } } : {}) };
     // 结算写的这一回带着"顺带"（waiting.mjs）：他人找上门来，约他的那人正好在——顺便把约好的那件提前到眼下（只认人真到了的）
     let pull = null;
-    if (offer?.from === 'settle' && !offeredHow && !/电话|消息/.test(arr.how)) {
+    if (offer?.from === 'settle' && !/电话|消息/.test(arr.how)) {
         try { pull = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null')?.pull ?? null; } catch {}
         if (pull?.with) arr.why = [arr.why, `顺便：${pull.with}约他的那件（${pull.text}），人既然到了这儿，想就在眼下当面说开`].filter(Boolean).join('；');
     }

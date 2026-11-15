@@ -22,6 +22,7 @@ import { scaleOf, scaleNote, DAY } from './timescale.mjs';
 import { paceOf, paceNote, spreadLine } from './tempo.mjs';
 import { dateIn, dayNumber } from './timeline.mjs';
 import { sameName } from './setup.mjs';
+import { MENU_EVIDENCE_PROTOCOL, OFFER_HOLD_SPAN, menuEvidenceVersion, menuRecordVersion, menuBoundaryEvidence, citedMenuProof, menuLinkedRecords } from './menu-evidence.mjs';
 
 // 【怎么排才好看】（章程 J1；T076 收成九条：八条口味＋一条底线）。基调和类别是和玩家的约定。
 // 用户 10/12：开局单的基调写的是日常、喜剧、热血，规划却连着几份排伤病；开局单写好要来的主线在"往后"里推了六份没排进来。
@@ -216,8 +217,10 @@ export const WORLD = '世界';
 
 // 玩家的角色提了新想法时看一眼（便宜模型）：是不是认真要长期去做的新方向、对不对得上这一局备着的哪条线。是就重新规划（N-72：当引力，不当轨道）。
 export const PLAYER_FACT_NOTE = "这些事实是玩家已确认的本局事实，优先于模型候选、角色猜测和冲突的新回忆。引用时给出事实编号和原文，按明确的作用范围判断；“谁知道”为空数组表示所有人都知道，任何角色都算知情；非空时只有名单中的人知情，不扩大到其他角色。未确认的建议不在此列。认旧话只核对应心事是否已说出，穿新衣只核对应等待机会是否已到，物件已取回只核对应的件，不顺带关闭别的事。对象对不上就拿不准。";
-export const REVISION_NOTE = "【局部修订的写法】\n只修材料给过稳定编号的四类格。目标：现在只写真或假，对应 JSON 的 true 或 false；线：现在只写“还在”或“暂停”；假设：现在只写“还在”“被推翻”或“拿不准”；心事：现在写 {\"状态\":\"已说出|机会已到过|还成立|拿不准\",\"机会\":\"机会已到过时引用旧机会原话，其他写空字符串\"}。\n每条修订只写“哪格”“哪条”“现在”“依据”四格，依据引已发生原话。心事只有机会过时就只撤那个机会，心事本身仍未说出的留着。拿不准不冒充还成立，不凭一个局部变化判整个目标失效。";
+export const REVISION_NOTE = "【局部修订的写法】\n只修材料给过稳定编号的四类格。目标：现在只写真或假，对应 JSON 的 true 或 false；线：现在只写“还在”或“暂停”；假设：现在只写“还在”“被推翻”或“拿不准”；心事：现在写 {\"状态\":\"已说出|机会已到过|还成立|拿不准\",\"机会\":\"机会已到过时引用旧机会原话，其他写空字符串\"}。\n每条修订写“哪格”“哪条”“现在”“引用”“解释”；引用是来源编号与原文短摘的数组，解释单独写判断。只有目标判断允许多条相关原话共同支持推断，每条短摘都须含目标中的完整分句，不能拿别的目标、别人的事凑证。心事只有机会过时就只撤那个机会，心事本身仍未说出的留着。拿不准不冒充还成立，不凭一个局部变化判整个目标失效。";
+export const VERIFICATION_NOTE = '【核验依据】候选、心事和节点修订都把“引用”和“解释”分开：引用给来源编号和原文短摘，确认事实用完整事实编号；解释不能代替原话。事实前提、持续条件逐项核对；还成立只允许尝试，不代表演过或办完。演过、办完分别依据同件露面、完整收尾的正文证明关系，并引用其中的实际记录；确认前史、要求复述和计划文本都不能代替发生。拿出不等于交付，交付不等于收到；表达本身完成不代表表达中声称的别的事为真。对象、受众或边界不全就拿不准，不拼接别条记录补人，也不照收尾全文相等认完成。顶层目标判断也用引用与解释，或写成带稳定编号的目标修订。';
 export const TURN_CHECK_SYSTEM = [
+    VERIFICATION_NOTE,
     "下面是一部长篇角色扮演眼下这个阶段的规划、这一局备着的几条线，以及刚发生的事和与核对对象相关的历史原话。",
     "判断下面八件事：",
     "一、有没有玩家认真提出的、要长期去做的新方向——不是随口一说、不是气话玩笑、不是眼前的小事，也不在眼下这个阶段的规划里（转向）。",
@@ -243,10 +246,8 @@ export const TURN_CHECK_SYSTEM = [
     "    {",
     "      \"事\": 1,",
     "      \"现在\": \"办完了\",",
-    "      \"记录\": [",
-    "        2",
-    "      ],",
-    "      \"依据\": \"角色甲把这份资料交还角色乙，角色乙确认已经收到。\"",
+    "      \"引用\": [{\"来源\":2,\"原文\":\"角色甲把这份资料交还角色乙，角色乙确认已经收到。\"}],",
+    "      \"解释\": \"对象、交还动作和收尾均已发生。\"",
     "    }",
     "  ],",
     "  \"心事核对\": [",
@@ -254,10 +255,8 @@ export const TURN_CHECK_SYSTEM = [
     "      \"心事\": \"心事:1:1\",",
     "      \"现在\": \"机会已到过\",",
     "      \"机会\": \"等角色乙第一次穿这件衣服\",",
-    "      \"记录\": [",
-    "        3",
-    "      ],",
-    "      \"依据\": \"角色乙已经当面穿过这件衣服。\"",
+    "      \"引用\": [{\"来源\":3,\"原文\":\"角色乙已经当面穿过这件衣服。\"}],",
+    "      \"解释\": \"原来等待的机会已经到过。\"",
     "    }",
     "  ],",
     "  \"节点修订\": [",
@@ -268,7 +267,8 @@ export const TURN_CHECK_SYSTEM = [
     "        \"状态\": \"机会已到过\",",
     "        \"机会\": \"等角色乙第一次穿这件衣服\"",
     "      },",
-    "      \"依据\": \"角色乙已经当面穿过这件衣服。\"",
+    "      \"引用\": [{\"来源\":3,\"原文\":\"角色乙已经当面穿过这件衣服。\"}],",
+    "      \"解释\": \"只撤旧机会。\"",
     "    }",
     "  ],",
     "  \"缘由过了\": [],",
@@ -284,7 +284,15 @@ export function mindReasons(node) {
         .filter(x => x && typeof x === 'object' && String(x.谁 ?? '').trim() && x.心思 && typeof x.心思 === 'object')
         .map((x, i) => ({ id: i + 1, who: String(x.谁).trim(), why: x.心思.出发点 ?? '' }));
 }
+function verificationPromptNode(node, verification) {
+    if (verification?.allowedKeys && node) {
+        const selected = type => (node.核验条目?.[type] ?? node[type] ?? []).filter(x => verification.allowedKeys.includes(x.编号));
+        return { ...node, 线: selected('线'), 假设: selected('假设'), 核验条目: { ...node.核验条目, 线: selected('线'), 假设: selected('假设') } };
+    }
+    return node;
+}
 export function turnCheckPrompt({ node = null, reserve = [], main = [], ideas = [], others = [], changes = [], acts = [], outside = [], waiting = [], completed = [], onEvidence = null, verification = null }) {
+    node = verificationPromptNode(node, verification);
     const cut = (t, n) => {
         const text = Array.isArray(t) ? partsText(t) : String(t ?? '');
         const clipped = text.length > n ? `${text.slice(0, n)}…` : text;
@@ -310,8 +318,12 @@ export function turnCheckPrompt({ node = null, reserve = [], main = [], ideas = 
     if (node) material(node, stageHeading);
     const reasons = mindReasons(node);
     const rowsOrNone = rows => rows.length ? rows : ['（没有）'];
+    const boundaryProofs = (item, boundary) => menuBoundaryEvidence(item, boundary, {
+        visible: verification.evidenceRecords ?? verification.history, messages: verification.messages, facts: verification.facts,
+    }).proofs.filter(pair => [pair.action, pair.result].every(r => verification.history.some(h => h.id === r.id)))
+        .map(pair => ({ action: pair.action.id, result: pair.result.id }));
     return [
-        partsText(stageHeading), ...(verification ? [node ? `目标编号：${node.目标编号}；目标：${node.目标}；目标核验：${node.目标状态 === true ? '已核还在' : node.目标状态 === false ? '已核失效' : '未核'}` : '（还没有阶段规划）',
+        partsText(stageHeading), ...(verification?.allowedKeys ? [`本次只核这些编号，其余只作上下文：${verification.allowedKeys.join('、')}`] : []), ...(verification ? [node ? `目标编号：${node.目标编号}；目标：${node.目标}；目标核验：${node.目标状态 === true ? '已核还在' : node.目标状态 === false ? '已核失效' : '未核'}` : '（还没有阶段规划）',
             `焦点：${node?.焦点 ?? '（没有）'}`, '【可修订的线】', ...rowsOrNone((node?.核验条目?.线 ?? node?.线 ?? []).map(x => JSON.stringify(x))),
             '【节点假设】', ...rowsOrNone((node?.核验条目?.假设 ?? node?.假设 ?? []).map(x => JSON.stringify(x)))]
             : [node?.目标 ? `目标：${node.目标}` : '（还没有阶段规划）', ...(node?.线 ?? []).map(l => `· ${l.名}：${l.走向}`)]),
@@ -332,14 +344,15 @@ export function turnCheckPrompt({ node = null, reserve = [], main = [], ideas = 
         ...(verification ? ['', '【逐件核对】（后台排着、在口袋里，以及已经露面但应答还没交的；逐件核已经发生的事，不把候选当事实）',
             ...verification.menu.map(w => render(w)`${JSON.stringify({ 编号: w.id, 谁: w.who, 题: w.title, 状态: w.status === 'shown' ? 'shown，待应答' : w.status,
                 露面: w.surface ?? null, 露面条件: w.showCondition ?? null, 前提: w.premise ?? null, 收尾: w.closeText ?? null, 时效: w.ttl ?? null, 持续条件: w.conditions ?? [],
-                进场: entryOf(w), 在哪: w.place ?? null, 真实结果: menuSuccessEvidence(w, { visible: verification.history, messages: verification.messages }), 来源记录: [w.cause?.type === 'record' ? w.cause.id : null].filter(Boolean) })}`),
+                进场: entryOf(w), 在哪: w.place ?? null,
+                露面证明: boundaryProofs(w, '露面'), 真实结果: boundaryProofs(w, '收尾'), 来源记录: [w.cause?.type === 'record' ? w.cause.id : null].filter(Boolean) })}`),
             '【心事与开口条件】（这是本人候选处置；已说出、机会已到过、仍未说清分开核）', ...verification.hearts.map(h => JSON.stringify({ 编号: h.编号, 谁: h.谁, 对谁: h.对谁, 事: h.事, 处置: h.处置, 为什么: h.为什么,
                 开口条件: h.开口条件, 说的场合: h.说的场合, 以前核验: h.状态 ?? '未核', 相关历史记录: verification.history.filter(r => r.holder_name === h.谁 || r.audience?.includes(h.谁)).map(r => r.id) })),
             '【与这些对象相关的已发生原话】（可早于本规划；只取当前分支、检查截止前、实际给出的证据）',
             ...rowsOrNone(verification.history.map(r => render(r)`[记录${r.id}] ${r.holder_name ?? r.holder}：${recordParts(r)}（谁看见或听见：${(r.audience ?? []).join('、')}）`)),
             '【玩家已确认的事实】（只列已确认开局单中常驻为 true、且不是“某人记得的版本”的前史；空表不代表事实不存在）',
             ...verification.facts.map(f => JSON.stringify({ 编号: f.id, 原前史序号: f.index, 开局单版本: f.setupVersion, 事: f.text, 作用范围: f.scope, 谁知道: f.knownBy })),
-            PLAYER_FACT_NOTE, REVISION_NOTE] : []),
+            PLAYER_FACT_NOTE, REVISION_NOTE, VERIFICATION_NOTE] : []),
     ].join('\n');
 }
 // 转向检查先程序初筛（10/16，试玩七天 266 次里 259 次什么都没判出来、每次 47 秒）：玩家的"说"里没有拿主意的字眼、做的事里没有闹大的字眼，不叫模型；
@@ -378,15 +391,16 @@ export function parseTurnCheck(text) {
     }).filter(n => Number.isSafeInteger(n) && n > 0))];
     const stale = staleIds.length ? { ids: staleIds, why: typeof raw?.['缘由依据'] === 'string' ? raw['缘由依据'].trim().slice(0, 200) : '' } : null;
     return { target: typeof strict?.目标还在 === 'boolean' ? strict.目标还在 : null,
+        ...(strict && Object.hasOwn(strict, '引用') ? { 引用: strict.引用, 解释: strict.解释 } : {}),
         checks: Array.isArray(strict?.候选) ? strict.候选 : [], heartChecks: Array.isArray(strict?.心事核对) ? strict.心事核对 : [], revisions: Array.isArray(strict?.节点修订) ? strict.节点修订 : [],
         done: strict?.['算成'] === true && !!doneWhy, doneWhy, turn: raw?.['转向'] === true, broke: raw?.['弄断'] === true, shift: raw?.['变了'] === true, thread: typeof raw?.['对得上'] === 'string' ? raw['对得上'].slice(0, 40) : '', why: typeof raw?.['依据'] === 'string' ? raw['依据'].slice(0, 300) : '', idea, loud, ...(gone ? { gone } : {}), ...(stale ? { stale } : {}) };
 }
 
-export function verificationSnapshot(store, records, chatKey, planId, through = Infinity) {
+export function verificationSnapshot(store, records, chatKey, planId, through = Infinity, selection = null) {
     const messages = store.currentMessages(chatKey).filter(m => m.pos <= through);
     const plan = planId == null ? null : store.planById(planId), node = effectivePlanNode(store, chatKey, plan, { messages });
     const catalog = store.menuOf(chatKey);
-    const menu = catalog.filter(m => ['waiting', 'pocket', 'shown'].includes(m.status)).slice(0, 20);
+    const menu = catalog.filter(m => ['waiting', 'pocket', 'shown'].includes(m.status));
     const hearts = node?.核验条目?.心事 ?? node?.心事 ?? [];
     const people = new Set([...catalog.map(m => m.who), ...hearts.flatMap(h => [h.谁, h.对谁])].filter(Boolean));
     const ids = new Set(menu.flatMap(m => [m.cause?.type === 'record' ? m.cause.id : null, ...(m.conditions ?? []).filter(c => c.basis?.type === 'record').map(c => c.basis.id)]).filter(Boolean));
@@ -398,8 +412,9 @@ export function verificationSnapshot(store, records, chatKey, planId, through = 
     // 新近变化仍能触发旧转向检查；是否额外补进历史段与是否触发检查分别决定。
     const recent = visible.filter(r => r.pos > (plan?.anchor_pos ?? -1) && ['想法', '说', '做', '钱', '关系', '改变'].includes(r.type)).slice(-60);
     const facts = confirmedFacts(store, chatKey).filter(f => f.objective);
-    return { chatKey, planId, requested: store.lastPlan(chatKey)?.id, node, nodeText: plan?.node, nodeBasis: nodeBasis(node, store, chatKey, planId), messages, menu, catalog, hearts, history, recent, facts,
+    const snapshot = { chatKey, planId, requested: store.lastPlan(chatKey)?.id, node, nodeText: plan?.node, nodeBasis: nodeBasis(node, store, chatKey, planId), messages, menu, catalog, hearts, history, recent, facts, evidenceRecords: visible,
         correction: correctionRev(store, chatKey), through: messages.at(-1)?.pos ?? -1 };
+    return selection ? selectVerification(snapshot, { state: evaluationState(store, chatKey), ...selection }) : snapshot;
 }
 export function evaluationState(store, chatKey) {
     try { const value = JSON.parse(store.getMeta?.(`plan_eval:${chatKey}`) ?? '{}'); return value && !Array.isArray(value) ? value : {}; }
@@ -416,19 +431,62 @@ export function signalEvaluation(store, chatKey, signal) {
     if (!pending.some(x => JSON.stringify(x) === JSON.stringify(signal))) pending.push(signal);
     return saveEvaluation(store, chatKey, { pending: pending.slice(-20) });
 }
-export const deliveryVerified = (store, chatKey, m) => !(m.contract === 1 || evaluationState(store, chatKey).enforce)
-    || m.status === 'shown' || m.verification?.state === '还成立';
+export const deliveryVerified = (store, chatKey, m, exhausted = null) => !exhausted?.(m) && (!(m.contract === 1 || evaluationState(store, chatKey).enforce)
+    || m.status === 'shown' || m.verification?.state === '还成立');
 export const facesForItems = (faces, items) => faces.filter(f => items.some(m => m.who === f.name || JSON.stringify(m).includes(f.name)));
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 // 无现实时间或末条消息位置；原材料删改、节点修订、确认事实及场面才改变依据。
+// 全局材料只收相关人物的历史和新近变化；每件再带自己的同件关联记录（结构字段改了也算），无关旧记录改删不重开别件的预算。
+const itemBasis = (m, snapshot) => [menuEvidenceVersion(m), m.ttl, m.ready_day,
+    menuLinkedRecords(m, snapshot.evidenceRecords ?? snapshot.history).map(menuRecordVersion)];
 export function evaluationBasis(snapshot, scene = {}) {
     return digest([snapshot.planId, snapshot.requested, snapshot.nodeBasis, snapshot.correction, snapshot.facts,
-        [...new Map([...snapshot.history, ...(snapshot.recent ?? [])].map(r => [r.id, r])).values()].map(r => [r.id, partsText(recordParts(r)), partsSources(recordParts(r))]),
-        (snapshot.catalog ?? snapshot.menu).map(m => [m.id, m.sourceAt, m.premise, m.conditions, m.ttl, m.ready_day]),
+        [...new Map([...snapshot.history, ...(snapshot.recent ?? [])].map(r => [r.id, r])).values()].map(r => [menuRecordVersion(r), partsText(recordParts(r)), partsSources(recordParts(r))]),
+        (snapshot.catalog ?? snapshot.menu).map(m => [m.id, ...itemBasis(m, snapshot)]),
         snapshot.hearts.map(({ 状态, ...h }) => h),
         [scene.today, scene.part, scene.place, scene.here, !!scene.hold, scene.stacked, !!scene.awaiting, scene.echoes, scene.results, scene.world]]);
 }
+// 补进一个新候选不等于事实升版；失败旧件不能因此重新获得无限预算。
+export function verificationMaterial(snapshot, scene = {}) {
+    return evaluationBasis({ ...snapshot, menu: [], catalog: [] }, scene);
+}
+export function verificationAgenda(snapshot, scene, state = {}, nowMs = Date.now()) {
+    const material = verificationMaterial(snapshot, scene);
+    const rows = [
+        ...snapshot.menu.map(m => ({ key: `事:${m.id}`, content: itemBasis(m, snapshot) })),
+        ...snapshot.hearts.map(({ 状态, ...h }) => ({ key: h.编号, content: h })),
+        { key: snapshot.node?.目标编号 ?? `目标:${snapshot.planId}`, content: snapshot.node?.目标 },
+        ...['线', '假设'].flatMap(type => (snapshot.node?.核验条目?.[type] ?? snapshot.node?.[type] ?? [])
+            .map(({ 状态, ...row }) => ({ key: row.编号, content: row }))),
+    ];
+    return rows.map(row => {
+        const basis = digest([material, row.content]), old = state.verification?.[row.key];
+        const previous = old?.basis === basis ? old : null;
+        return { key: row.key, basis, previous, due: !previous || (previous.unknown && previous.failures < (state.retryMax ?? 3) && nowMs >= previous.coolUntil) };
+    });
+}
+export function firstVerificationDue(agenda, state, basis) {
+    // 无逐项账的旧状态仍兼容 checked；有账后由同依据的尝试记录决定，不能挡下一批。
+    if (state.checked === basis && !Object.keys(state.verification ?? {}).length) return false;
+    return agenda.some(x => x.due && !x.previous?.attempted);
+}
+// 先让冷却、耗尽和已知项让位，再限制请求大小；三个宿主共用同一批编号。
+export function selectVerification(snapshot, { scene = {}, state = {}, keys, nowMs = Date.now() } = {}) {
+    const items = verificationAgenda(snapshot, scene, state, nowMs).filter(x => keys ? keys.includes(x.key) : x.due).slice(0, 20);
+    const allowedKeys = items.map(x => x.key);
+    return { ...snapshot, allowedKeys, menu: snapshot.menu.filter(m => allowedKeys.includes(`事:${m.id}`)),
+        hearts: snapshot.hearts.filter(h => allowedKeys.includes(h.编号)), items };
+}
 // 所有入口共用的供给分类；口袋件只暂移自己的容量占位。
+// T140b 第三项（D-300）：本依据下核验未得结论且预算已尽的件暂不作供给。只认 agenda 已按依据配上的那一行（依据变了自然恢复首次核验），
+// 不落新状态、不改 menu.verification。已露面待应答的、已递给某人还在锁期内或等记账确认的（已递出待承接）不在此列。
+export const SUPPLY_EXHAUSTED = '本依据核验未得结论且预算已尽';
+export function exhaustedSupply(agenda, state = {}, { at = null, span = OFFER_HOLD_SPAN, awaiting = m => m.awaiting === true } = {}) {
+    const max = state.retryMax ?? 3;
+    const ids = new Set(agenda.filter(x => x.key.startsWith('事:') && x.previous?.attempted && x.previous.unknown && (x.previous.failures ?? 0) >= max).map(x => x.key.slice(2)));
+    const handed = m => awaiting(m) || (!!m.held_by && (!Number.isFinite(at) || !Number.isFinite(m.held_pos) || at - m.held_pos < span));
+    return m => !!m && ids.size > 0 && ids.has(String(m.id)) && m.status !== 'shown' && !handed(m);
+}
 export function classifySupply(menu, ctx) {
     const waitingGate = pocketGate(menu, ctx);
     return menu.map(m => {
@@ -436,6 +494,7 @@ export function classifySupply(menu, ctx) {
         if (['void', 'expired', 'used', 'sunk', 'sunk_told'].includes(m.status)) kind = '退出';
         else if (m.purpose === '亲密' && ctx.allowIntimate?.(m) !== true) { kind = '未核'; reason = '核心亲密资格未通过'; }
         else if (m.status === 'shown') kind = '待应答';
+        else if (ctx.exhausted?.(m)) { kind = '未核'; reason = SUPPLY_EXHAUSTED; }
         else if (m.verification?.state !== '还成立' || !entryOf(m) || (entryOf(m) === '到现场' && !m.place)) kind = '未核';
         else if (ctx.today < m.ready_day || !triggerTimeReady(m, ctx.part) || afterBlocked(m, menu, x => x.status, ctx)) kind = '未到';
         else if (entryOf(m) === '到现场' && !ctx.place) kind = '未核';
@@ -449,23 +508,45 @@ export function classifySupply(menu, ctx) {
         return { id: m.id, kind, ...(reason ? { reason } : {}) };
     });
 }
-export function planningDecision({ snapshot, menu = snapshot.menu, scene, state = {}, lastPlan, verdict = null, running = false, nowMs = Date.now() }) {
+export function planningDecision({ snapshot, menu = snapshot.menu, scene, state = {}, lastPlan, verdict = null, running = false, nowMs = Date.now(), exhausted = null }) {
     const basis = evaluationBasis(snapshot, scene);
-    const supply = classifySupply(menu, scene);
+    const agenda = verificationAgenda(snapshot, scene, state, nowMs);
+    const supply = classifySupply(menu, { ...scene, exhausted: exhausted ?? exhaustedSupply(agenda, state, { at: scene.at }) });
     const result = (kind, why) => ({ kind, why, basis, supply });
     if (running || state.checking) return result('wait', '正在核验或请求');
-    if ((snapshot.menu.length || snapshot.hearts.length) && state.checked !== basis) return result('verify', '先核旧件与心事');
+    if ((snapshot.menu.length || snapshot.hearts.length) && agenda.some(x => x.due)
+        && (firstVerificationDue(agenda, state, basis) || agenda.some(x => x.due && x.previous?.unknown))) return result('verify', '先核旧件与心事');
     const full = needsPlan({ lastPlan, nodeOver: verdict?.result, target: snapshot.node?.目标状态 });
     if (full) return result('full', full);
     if (!lastPlan || lastPlan.status !== 'ready') return result('wait', '没有就绪节点');
     if (scene.hold || scene.stacked > 0 || scene.awaiting || supply.some(x => x.kind === '待应答')) return result('wait', '场面正在承接');
-    if (supply.some(x => ['未核', '未到', '让路'].includes(x.kind))) return result('wait', '保留等待或让路');
+    if (supply.some(x => x.kind === '让路')) return result('wait', '保留容量与资格让路');
     if (supply.some(x => x.kind === '可用')) return result('wait', '已有可用供给');
+    // 本依据核验耗尽的件（T140b 第三项，D-300）：无论曾否核成"还成立"，一律不算可递供给、也不占容量，不在此拦截；
+    // 事实层旧结论原样保留（见 classifySupply 不改 menu.verification）。场面缺料就照常落到下面的补拍，
+    // 补拍仍受 empty/supplemented 同事实防重拍与全局补拍上限约束；已 shown、已递出待承接的件在 exhaustedSupply 里已排除。
     if (state.empty === basis) return result('wait', '同依据成功空表');
+    if (state.supplemented === verificationMaterial(snapshot, scene)) return result('wait', '同事实已补短拍，等待新依据');
     if ((state.failures ?? 0) >= (state.retryMax ?? 3) || nowMs < (state.coolUntil ?? 0)) return result('wait', '失败上限或冷却');
     return result('beat', '此刻缺料');
 }
 function verificationProof(row, snapshot, infer = false) {
+    if (row && Object.hasOwn(row, '引用')) {
+        if (!Array.isArray(row.引用) || !row.引用.length || typeof row.解释 !== 'string' || !row.解释.trim()) return null;
+        const proofs = [];
+        for (const q of row.引用) {
+            if (typeof q?.原文 !== 'string' || q.原文.trim().length < 3) return null;
+            const fact = snapshot.facts.find(f => f.id === q.来源);
+            if (!fact && (!Number.isInteger(q.来源) || !(snapshot.sentHistory ?? snapshot.history).some(r => r.id === q.来源))) return null;
+            const proof = verificationProof({ 依据: fact ? `${fact.id}：${q.原文.trim()}` : q.原文.trim(), 记录: [q.来源] }, snapshot);
+            if (!proof) return null;
+            proofs.push(proof);
+        }
+        return { because: row.解释.trim(), quotes: row.引用.map(q => ({ source: q.来源, quote: q.原文.trim() })),
+            evidence: [...new Map(proofs.flatMap(p => p.evidence).map(a => [`${a.pos}:${a.fp}`, a])).values()],
+            records: [...new Map(proofs.flatMap(p => p.records).map(r => [r.id, r])).values()],
+            facts: [...new Map(proofs.flatMap(p => p.facts).map(f => [f.id, f])).values()], through: snapshot.through };
+    }
     if (typeof row?.依据 !== 'string' || row.依据.trim().length < 3) return null;
     const basis = row.依据.trim(), selected = [];
     const evidence = [], facts = [], records = [];
@@ -477,7 +558,7 @@ function verificationProof(row, snapshot, infer = false) {
         const sources = partsSources(recordParts(r)).filter(a => Number.isInteger(a.pos) && a.fp);
         if (!sources.length) continue;
         evidence.push(...sources.map(a => ({ pos: a.pos, fp: a.fp })));
-        records.push({ id: r.id, text: r.raw_text ?? r.text, fp: r.fp }); selected.push(r.id);
+        records.push({ id: r.id, text: r.raw_text ?? r.text, fp: r.fp, version: menuRecordVersion(r) }); selected.push(r.id);
     }
     for (const fact of snapshot.facts) if (basis.includes(fact.id)) {
         const quote = basis.replace(fact.id, '').replace(/^[\s：:、\[\]（）()]+|[\s\[\]（）()]+$/g, '');
@@ -485,6 +566,44 @@ function verificationProof(row, snapshot, infer = false) {
     }
     if (!evidence.length && !facts.length) return null;
     return { because: basis, evidence: [...new Map(evidence.map(a => [`${a.pos}:${a.fp}`, a])).values()], records, facts, through: snapshot.through };
+}
+// 新协议的事实结论逐项对上原措辞；不拿自由解释补事实，也不做词语相似度猜配。
+const assertionText = text => String(text ?? '').trim().replace(/[。.!！]+$/, '');
+function proofUnits(proof, snapshot) {
+    const quotes = proof.quotes ?? [
+        ...proof.records.map(r => ({ source: r.id, quote: proof.because })),
+        ...proof.facts.map(f => ({ source: f.id, quote: proof.because.replace(f.id, '').replace(/^[：:\s]+/, '') })),
+    ];
+    return quotes.map(q => ({ ...q, record: snapshot.history.find(r => r.id === q.source), fact: proof.facts.find(f => f.id === q.source) }));
+}
+// 只认完整、直接的事实陈述或已有结构化事实属性；短摘不能切掉条件/否定来升级事实。
+function directAssertion(unit, text) {
+    const wanted = assertionText(text), source = unit.fact?.text ?? unit.record?.text;
+    if (!wanted || !unit.quote.includes(wanted) || !source) return false;
+    const r = unit.record;
+    if (r && (r.tense === '将来' || r.todo || r.promise || r.guess || r.fabricated || ['想法', '心里'].includes(r.type))) return false;
+    return assertionText(source) === wanted;
+}
+function candidateProofMatches(proof, item, state, snapshot) {
+    if (state === '拿不准') return true;
+    const units = proofUnits(proof, snapshot);
+    const contradicts = (u, text) => directAssertion({ ...u, quote: u.fact?.text ?? u.record?.text ?? '' }, `并非${assertionText(text)}`)
+        || (u.record?.type === '改变' && assertionText(u.record.life?.gone) === assertionText(text) && directAssertion(u, u.record.text));
+    const fact = text => units.some(u => directAssertion(u, text)) && !units.some(u => contradicts(u, text));
+    if (state === '还成立') {
+        const premises = [item.premise, ...(item.conditions ?? []).map(c => c.condition)].filter(s => String(s ?? '').trim());
+        return premises.every(fact);
+    }
+    if (state === '办完了' || state === '演过了') {
+        return menuBoundaryEvidence(item, state === '办完了' ? '收尾' : '露面', {
+            visible: snapshot.evidenceRecords ?? snapshot.history, messages: snapshot.messages, facts: snapshot.facts,
+        }).proofs.some(pair => citedMenuProof(pair, proof.records));
+    }
+    const premises = [item.premise, ...(item.conditions ?? []).map(c => c.condition)].map(assertionText).filter(Boolean);
+    // 撤前提也须精确核那个条件；已有改变属性明确指出被替换的旧事实时可用。
+    return units.some(u => premises.some(p => directAssertion(u, `并非${p}`)
+        || (u.record?.type === '改变' && assertionText(u.record.life?.gone) === p
+            && u.record.life?.who === item.who && directAssertion(u, u.record.text))));
 }
 // 只提交每项确实使用的原文；解析失败或失效项不会把旧结论写空。
 export function commitVerification(store, chatKey, snapshot, result) {
@@ -494,32 +613,52 @@ export function commitVerification(store, chatKey, snapshot, result) {
     const ctx = nodeContext(store, chatKey), accepted = [], current = store.menuOf(chatKey);
     for (const row of result.checks ?? []) {
         const item = snapshot.menu.find(m => m.id === row?.事), now = current.find(m => m.id === row?.事);
-        if (!item || !now || !['还成立', '前提没了', '演过了', '办完了', '拿不准'].includes(row.现在)) continue;
+        if (!item || !now || (snapshot.allowedKeys && !snapshot.allowedKeys.includes(`事:${item.id}`)) || !['还成立', '前提没了', '演过了', '办完了', '拿不准'].includes(row.现在)) continue;
         if (row.现在 === '办完了' && !String(item.closeText ?? '').trim()) continue;
         const proof = verificationProof(row, snapshot);
-        if (!proof || !verificationProofLive(proof, ctx) || JSON.stringify(now.sourceAt) !== JSON.stringify(item.sourceAt)) continue;
+        const liveSnapshot = { ...snapshot, evidenceRecords: store.menuEvidenceRecords?.(chatKey, { through: snapshot.through }) ?? snapshot.evidenceRecords };
+        if (!proof || !candidateProofMatches(proof, item, row.现在, liveSnapshot) || !verificationProofLive(proof, ctx) || menuEvidenceVersion(now) !== menuEvidenceVersion(item)) continue;
         const key = `menu_checks:${chatKey}:${item.id}`, raw = store.getMeta(key);
         let old; try { old = raw == null ? [] : JSON.parse(raw); } catch { store.logEvent(chatKey, 'verification_invalid_log', { item: item.id }); continue; }
         if (!Array.isArray(old)) { store.logEvent(chatKey, 'verification_invalid_log', { item: item.id }); continue; }
-        const value = { ...proof, state: row.现在, source: JSON.stringify(item.sourceAt ?? null), nodeBasis: snapshot.nodeBasis };
+        const value = { ...proof, state: row.现在, source: JSON.stringify(item.sourceAt ?? null), nodeBasis: snapshot.nodeBasis,
+            ...(['办完了', '演过了'].includes(row.现在) ? { protocol: MENU_EVIDENCE_PROTOCOL, candidateVersion: menuEvidenceVersion(item) } : {}) };
         if (!old.some(r => JSON.stringify(r) === JSON.stringify(value))) store.setMeta(key, JSON.stringify([...old, value]));
         accepted.push({ item: item.id, state: row.现在 });
     }
-    const revisions = (result.revisions ?? []).map(r => ({ type: r?.哪格, ref: r?.哪条, value: r?.现在, 依据: r?.依据, origin: 'revision' }));
+    const revisions = (result.revisions ?? []).map(r => ({ ...r, type: r?.哪格, ref: r?.哪条, value: r?.现在, origin: 'revision' }));
     if (typeof result.target === 'boolean' && !revisions.some(r => r.type === '目标'))
-        revisions.push({ type: '目标', ref: snapshot.node?.目标编号, value: result.target, 依据: result.why, origin: 'revision' });
+        revisions.push({ ...result, type: '目标', ref: snapshot.node?.目标编号, value: result.target, 依据: result.why, origin: 'revision' });
     for (const row of result.heartChecks ?? []) revisions.push({ type: '心事', ref: row?.心事, value: { 状态: row?.现在, 机会: row?.机会 ?? '' }, ...row, origin: 'check' });
     const fresh = [];
     for (const row of revisions) {
+        if (snapshot.allowedKeys && !snapshot.allowedKeys.includes(row.ref)) continue;
         if (row.type === '心事' && revisions.some(r => r.ref === row.ref && r.origin !== row.origin && JSON.stringify(r.value) !== JSON.stringify(row.value))) continue;
         const proof = verificationProof(row, snapshot, true), value = { type: row.type, ref: row.ref, value: row.value, ...proof };
         if (!proof || !verificationProofLive(proof, ctx) || !validNodeRevision(value, snapshot.node)) continue;
         if (row.type === '目标' && (result.target === null || row.value !== result.target)) continue;
+        if (proof.quotes) {
+            if (row.type === '目标') {
+                const clauses = String(snapshot.node?.目标 ?? '').split(/[，。；！？,;!?\n]/).map(s => s.trim()).filter(Boolean);
+                if (!clauses.length || !proof.quotes.every(q => clauses.some(s => q.quote.includes(s)))) continue;
+            } else if (row.type !== '心事') {
+                const subject = snapshot.hearts.find(h => h.编号 === row.ref);
+                const assertion = subject ? row.value?.状态 === '机会已到过' ? subject.开口条件 : subject.事
+                    : (snapshot.node?.核验条目?.[row.type] ?? snapshot.node?.[row.type] ?? []).find(x => x.编号 === row.ref)?.[row.type === '线' ? '走向' : '内容'];
+                if (!proofUnits(proof, snapshot).some(u => directAssertion(u, assertion))) continue;
+            }
+        }
         const heart = snapshot.hearts.find(h => h.编号 === row.ref);
-        if (heart && proof.facts.some(f => !factKnownTo(f, heart.谁) || (row.value.状态 === '已说出' && heart.对谁 && !factKnownTo(f, heart.对谁)))) continue;
-        if (heart && row.value.状态 === '已说出' && !proof.facts.length && !proof.records.some(p => {
-            const r = snapshot.history.find(r => r.id === p.id);
-            return r?.type === '说' && r.holder_name === heart.谁 && (!heart.对谁 || r.audience?.includes(heart.对谁));
+        if (heart && !proofUnits(proof, snapshot).some(u => {
+            if (u.fact && row.value.状态 === '已说出') {
+                // “双方知道这件事”不是“本人说过”；无记录身份的前史须自身明确记载完整表达。
+                const expression = `${heart.谁}${heart.对谁 ? `对${heart.对谁}` : ''}说：${heart.事}`;
+                return directAssertion(u, expression) && factKnownTo(u.fact, heart.谁) && (!heart.对谁 || factKnownTo(u.fact, heart.对谁));
+            }
+            if (!directAssertion(u, row.value.状态 === '机会已到过' ? heart.开口条件 : heart.事)) return false;
+            if (u.fact) return factKnownTo(u.fact, heart.谁) && (row.value.状态 !== '已说出' || !heart.对谁 || factKnownTo(u.fact, heart.对谁));
+            const r = u.record;
+            return row.value.状态 !== '已说出' || (r?.type === '说' && r.holder_name === heart.谁 && (!heart.对谁 || r.audience?.includes(heart.对谁)));
         })) continue;
         if (!fresh.some(r => JSON.stringify(r) === JSON.stringify(value))) fresh.push(value);
     }
@@ -1633,22 +1772,16 @@ export function parseNodeCheck(text) {
 // shown＝角色已经把这件事拿出来了（记账认出来的，D-100）；接下来给后半截，然后算 used。
 export const SETTLED = new Set(['used', 'shown', 'sunk', 'sunk_told', 'void', 'expired']);
 // 只读当前可见记录；结果必须能用原文核实，任何相反结论都阻断成功。
-export function menuSuccessEvidence(m, { visible = [], messages = [] } = {}) {
-    const quoted = r => Array.isArray(r.quotes) && r.quotes.length > 0 && r.quotes.every(q =>
-        typeof q === 'string' && q.trim() && messages.some(msg => msg.fp === r.fp && String(msg.text ?? '').includes(q)));
-    return visible.filter(r => r.type === '做' && r.matter?.menu === m.id && !r.matter?.kind).flatMap(action => {
-        const ends = visible.filter(end => end.type === '了结' && end.idea_ref === action.id);
-        if (ends.some(end => end.outcome !== '做了')) return [];
-        return ends.filter(end => end.outcome === '做了' && quoted(end)).map(result => ({ action, result }));
-    });
+export function menuSuccessEvidence(m, context = {}) {
+    return menuBoundaryEvidence(m, '收尾', context).proofs;
 }
 // 后件只凭同一窗口里有原文依据的实际成功解锁；菜单状态不是办成的证据。
-export function afterBlocked(m, menu = [], statusOf = x => x.status, { visible = [], messages = [] } = {}) {
+export function afterBlocked(m, menu = [], statusOf = x => x.status, context = {}) {
     if (!m?.after_title) return false;
     const same = menu.filter(x => x.plan_id === m.plan_id && x.title === m.after_title);
     const prior = same.length ? same : menu.filter(x => x.plan_id < m.plan_id && x.title === m.after_title);
     if (prior.length !== 1 || prior[0].id === m.id) return true;
-    return !menuSuccessEvidence(prior[0], { visible, messages }).length;
+    return !menuSuccessEvidence(prior[0], context).length;
 }
 
 export const roll = (key, sides) => parseInt(createHash('sha256').update(String(key)).digest('hex').slice(0, 8), 16) % sides;
@@ -1675,7 +1808,7 @@ export const NOW_MOTIF = '后续·当下';
 // timeScale：这一局的尺度——放几格沉底按它（天尺度 2 天、慢沉 5 天；年尺度 1 年、2 年）；按消息数沉的不变。
 // pace：这局的节奏（章程 H2，tempo.paceOf）——份数、沉底的格数和条数、氛围意外各几件、一场戏叠几件；不给就是中档（和以前一样）。
 // stacked：此刻这场戏里已经拿出来、还没下文的有几件（stackedHere）；到了这一档的上限，别的先不进口袋（镜头外的、局势排的"当下"、跟着约定的不算）。
-export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, firm = null, hold = null, keep = () => false, gone = null, timeScale = DAY, pace = null, stacked = 0, contentTier = null, visible = [], messages = [], notHere = () => false, verified = false }) {
+export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, firm = null, hold = null, keep = () => false, gone = null, timeScale = DAY, pace = null, stacked = 0, contentTier = null, visible = [], messages = [], notHere = () => false, verified = false, exhausted = () => false }) {
     const ts = scaleOf(timeScale);
     const basePace = paceOf(pace, ts);
     const intimateFirst = contentTier === '纯NSFW';
@@ -1703,7 +1836,7 @@ export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, fir
         if (agedByDay(m) && !(at && Number.isFinite(m.pocket_pos) && at - m.pocket_pos >= (slow(m) ? p.slowMsgs : p.sinkMsgs))) Object.defineProperty(change, 'basisDay', { value: sink.today });
         changes.push(change);
     }
-    const gate = pocketGate(menu, { today: sink.today, part, at, hold, pace: p, stacked, contentTier, timeScale, gone, verified,
+    const gate = pocketGate(menu, { today: sink.today, part, at, hold, pace: p, stacked, contentTier, timeScale, gone, verified, exhausted,
         statusOf: m => changes.find(c => c.id === m.id)?.status ?? m.status, visible, messages, notHere });
     for (const m of gate.ready) {
         if (!gate.canEnter(m.id)) continue;
@@ -1717,15 +1850,16 @@ export function stepPocket(menu, { today, part = null, dayOf = null, at = 0, fir
 
 // 普通入袋和兴头提前共用；唯一可免的是候选件的 ready_day。
 // statusOf 让普通步进看见本轮先过期／沉底的结果；提前按写入前的最新菜单重建。
-export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone = null, pace = null, stacked = 0, contentTier = null, timeScale = DAY, statusOf = m => m.status, visible = [], messages = [], notHere = () => false, verified = false } = {}) {
+// 核验耗尽的件（exhausted）不进袋、不占容量和类别份额；状态不改，口袋里的照旧留着，等依据变了重核。
+export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone = null, pace = null, stacked = 0, contentTier = null, timeScale = DAY, statusOf = m => m.status, visible = [], messages = [], notHere = () => false, verified = false, exhausted = () => false } = {}) {
     const base = paceOf(pace, scaleOf(timeScale)), intimateFirst = contentTier === '纯NSFW';
     const p = intimateFirst ? { ...base, mix: { ...base.mix, 亲密: base.name === '慢' ? 1 : 2 } } : base;
     const now = m => m.motif === NOW_MOTIF;
     const blocked = m => afterBlocked(m, menu, statusOf, { visible, messages });
-    const valid = m => statusOf(m) === 'waiting' && (!(verified || m.contract === 1) || m.verification?.state === '还成立') && !gone?.(m)?.status && !blocked(m);
+    const valid = m => statusOf(m) === 'waiting' && (!(verified || m.contract === 1) || m.verification?.state === '还成立') && !exhausted(m) && !gone?.(m)?.status && !blocked(m);
     const ready = menu.filter(m => valid(m) && today >= m.ready_day && triggerTimeReady(m, part))
         .sort((a, b) => rankOf(a, intimateFirst) - rankOf(b, intimateFirst) || a.ready_day - b.ready_day || a.id - b.id);
-    const stillIn = menu.filter(m => statusOf(m) === 'pocket');
+    const stillIn = menu.filter(m => statusOf(m) === 'pocket' && !exhausted(m));
     const budget = pocketBudget(menu, ready.length, p);
     const countsForBudget = m => entryOf(m) !== '镜头外' && !(entryOf(m) === '到现场' && notHere(m));
     let used = stillIn.filter(countsForBudget).reduce((sum, m) => sum + units(m), 0);
@@ -1743,7 +1877,7 @@ export function pocketGate(menu, { today, part = null, at = 0, hold = null, gone
             return !used || used + units(m) <= budget;
         },
         take(m) {
-            if (entryOf(m) === '镜头外') return;
+            if (entryOf(m) === '镜头外' || exhausted(m)) return;
             if (countsForBudget(m)) used += units(m);
             if (kinds.has(m.purpose)) kinds.set(m.purpose, kinds.get(m.purpose) + 1);
         },

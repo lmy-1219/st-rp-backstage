@@ -7,9 +7,12 @@ import { createModelClient } from './model.mjs';
 import { addFaces, facesFromRecords } from './cast.mjs';
 import { remoteWayAt } from './arrival.mjs';
 import { boardLoader } from './board.mjs';
+import { shownMenuProofLive } from './menu-evidence.mjs';
 
 const MAX_FAILURES = 3;
 const TRANSIENT_RETRY_MS = 10 * 60 * 1000;
+// 已露面、还没收尾的件随记账一起给几件（提示词篇幅有限）
+const SHOWN_REFS_MAX = 6;
 
 // 外援（D-73）：API 没响应（超时、断连、5xx）时，这一小窗写成外援包交给 AI 窗口，这个窗口的记账先停着等它交回；
 // extractor.provider = 'window' 时一律交给窗口（测试期不走中转）。交回的回答和模型的走同一套核对。
@@ -47,6 +50,13 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     };
     // 口袋里和还排着的事（记账顺带认：角色把哪件拿出来了，D-100；哪件已经不成立了，D-107）；认出来的记在那条消息上，删了那条就回来。
     const pocketOf = chatKey => (store.menuOf?.(chatKey) ?? []).filter(m => m.status === 'pocket' || m.status === 'waiting');
+    // 待核对象：再带上已露面、还没核成办完的几件（最近的在前、有收尾目标的才带，封顶），说完以后的结果才有机会绑上同一件
+    const candidatesOf = chatKey => {
+        const all = store.menuOf?.(chatKey) ?? [];
+        const open = all.filter(m => ['shown', 'used'].includes(m.status) && String(m.closeText ?? '').trim() && m.verification?.state !== '办完了')
+            .sort((a, b) => (b.settled_pos ?? -1) - (a.settled_pos ?? -1)).slice(0, SHOWN_REFS_MAX);
+        return [...all.filter(m => m.status === 'pocket' || m.status === 'waiting'), ...open];
+    };
     const facePresentOf = chat => {
         try {
             const allowed = new Set((store.getCast?.(chat.story_id) ?? []).filter(e => e.role !== '不用' && String(e.avatar).startsWith('face:')).map(e => e.avatar));
@@ -54,19 +64,19 @@ export function createWorker({ store, records, getConfig, clientFactory = create
             return pos => { try { return board.atPos(pos).people.filter(p => p.status === 'present' && allowed.has(p.avatar)).map(p => p.name); } catch { return []; } };
         } catch { return () => []; }
     };
-    const markShown = (chatKey, shown = [], voided = []) => {
+    const markShown = (chatKey, shown = [], voided = [], unshown = []) => {
         // 同一回包内各条引文独立成立；落第一条shown不能使后续证据失去候选身份。
+        // 露面都要有证明：候选版本、来源和本楼都还对得上才落 shown；只按袋号的不再认
         const candidates = pocketOf(chatKey);
         for (const s of shown) {
-            if (s.conditionProof) {
-                const messages = store.currentMessages(chatKey), p = s.conditionProof;
-                const item = candidates.find(m => m.id === s.id);
-                if (!item || item.showCondition !== p.conditionText || JSON.stringify(item.sourceAt) !== JSON.stringify(p.source)
-                    || !messages.some(m => m.pos === s.pos && m.fp === s.fp)) continue;
-            }
-            store.updateMenu(chatKey, s.id, { status: 'shown', at: { pos: s.pos, fp: s.fp }, ...(s.conditionProof ? { conditionProof: s.conditionProof } : {}) });
+            const messages = store.currentMessages(chatKey), p = s.conditionProof;
+            const item = candidates.find(m => m.id === s.id);
+            if (!shownMenuProofLive(item, { ...s, status: 'shown' }, p, messages)) { unshown.push({ id: s.id, pos: s.pos, fp: s.fp, why: '露面证明和当前候选对不上' }); continue; }
+            store.updateMenu(chatKey, s.id, { status: 'shown', at: { pos: s.pos, fp: s.fp }, conditionProof: p });
         }
         for (const v of voided) { store.updateMenu(chatKey, v.id, { status: 'void', why: v.why, at: { pos: v.pos, fp: v.fp } }); log(`menu ${v.id} void at ${v.pos}: ${v.why}`); }
+        // 没认的露面/绑定只留痕（事件账），不改状态；逐楼对照时数得出频率
+        for (const u of unshown) { store.logEvent?.(chatKey, 'menu_unshown', { item: u.id, pos: u.pos, why: u.why }); log(`menu ${u.id ?? '?'} at ${u.pos ?? '?'}: ${u.why}`); }
     };
 
     // 记完一小窗：记账里反复出现（至少 3 条是他说的、做的）、名册里没有的人，记成这一局的新面孔（D-107）。
@@ -119,7 +129,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     const waiting = chatKey => !!handoffs && store.pendingHandoffs().some(h => h.kind === 'extract' && h.chat_key === chatKey);
 
     function handOff({ chat, window, context, names, why, budget = false, transient = false }) {
-        const prepared = prepareWindow({ records, config: getConfig(), chat, window, context, names, pocket: pocketOf(chat.key), known: knownOf(chat, names.user), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
+        const prepared = prepareWindow({ records, config: getConfig(), chat, window, context, names, pocket: candidatesOf(chat.key), known: knownOf(chat, names.user), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
         return handoffs.request({
             kind: 'extract', key: `${chat.key}:${window[0].fp}:${window.length}`, chatKey: chat.key, why,
             system: prepared.system, user: prepared.user,
@@ -145,11 +155,11 @@ export function createWorker({ store, records, getConfig, clientFactory = create
             const start = messages.indexOf(window[0]);
             const context = messages.slice(Math.max(0, start - 2), start);
             const config = getConfig();
-            const prepared = prepareWindow({ records, config, chat, window, context, names: { user: userName(messages) }, pocket: pocketOf(meta.chatKey), known: knownOf(chat, userName(messages)), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
+            const prepared = prepareWindow({ records, config, chat, window, context, names: { user: userName(messages) }, pocket: candidatesOf(meta.chatKey), known: knownOf(chat, userName(messages)), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
             const jobId = records.startJob({ storyId: chat.story_id, chatKey: chat.key, positions: window.map(m => m.pos), model: 'window' });
             try {
                 const r = applyReply({ records, config, chat, window, prepared, jobId, raw: text });
-                markShown(meta.chatKey, r.shown, r.voided);
+                markShown(meta.chatKey, r.shown, r.voided, r.unshown);
                 noteFaces(chat);
                 void afterCommit(meta.chatKey);
                 kick();
@@ -201,8 +211,8 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                 if (byWindow) { results.push({ handoff: handOff({ chat, window, context, names, why: '设成了把记账交给窗口做（不走 API）' }) }); break; }
                 if (over) { results.push({ handoff: handOff({ chat, window, context, names, budget: true, why: `今天的花费到了上限（约 ${records.spentToday().toFixed(2)} / ${config.extractor.dailyBudgetUsd}），这一段交给窗口记` }) }); break; }
                 try {
-                    const r = await runWindow({ records, client, config, chat, window, context, names, pocket: pocketOf(chatKey), known: knownOf(chat, names.user), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
-                    markShown(chatKey, r.shown, r.voided);
+                    const r = await runWindow({ records, client, config, chat, window, context, names, pocket: candidatesOf(chatKey), known: knownOf(chat, names.user), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
+                    markShown(chatKey, r.shown, r.voided, r.unshown);
                     noteFaces(chat);
                     await afterCommit(chatKey);
                     results.push(r);

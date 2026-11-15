@@ -6,6 +6,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { liveEpisodes } from './episodes.mjs';
 import { liveAnchors } from './landing.mjs';
 import { identifyNode, createMenuVerifier } from './held.mjs';
+import { currentMenuRecords, menuRecordVersion, shownMenuProofLive } from './menu-evidence.mjs';
+import { absentRecordMembers, legacyMenuCopies } from './records.mjs';
 
 // 这几种重新规划（玩家转向、弄断、局面变了）交回以后，旧节点里还在口袋里的事一并撤下（menuOf），要用的规划者重写进新的事件（用户 10/4）。
 export const RETIRES_POCKET = new Set(['turn', 'broken', 'shift']);
@@ -1194,26 +1196,39 @@ export function openStore(file) {
     }
     // 只认当前窗口仍看得见、没有被改掉的事实。菜单结果另查真正落下的「碰上的事」，
     // 单靠 shown/used 的菜单步骤不能证明那件事已有结果。
-    function causeFor(chatKey, cause) {
-        if (!cause || !['record', 'menu_result'].includes(cause.type) || !Number.isSafeInteger(cause.id) || cause.id <= 0) return null;
-        const rows = memo('cause_rows', chatKey, () => q(`select r.id, r.pos, r.fp, r.type, r.text, r.holder, r.holder_name, r.audience, r.matter, r.idea_ref, r.outcome
-            from (select r.*, min(s.pos) pos from records r
+    function menuEvidenceRecords(chatKey, { through = Infinity } = {}) {
+        // store 也供不启用记账的宿主使用；不在读口建表。
+        if (!q("select 1 from sqlite_master where type = 'table' and name = 'records'").get()) return [];
+        return memo('menu_evidence', `${chatKey}|${through}`, () => {
+            const messages = currentMessages(chatKey).filter(m => m.pos <= through), check = sourceReader(chatKey);
+            const rows = q(`select r.*, min(s.pos) pos from records r
                 join chats c on c.key = ? and c.story_id = r.story_id
                 join chat_seq s on s.chat_key = c.key and s.fp = r.fp
-                where r.status = 'ok' group by r.id) r
-            where not exists (select 1 from record_links l join records newer on newer.id = l.from_id and newer.status = 'ok'
-                join chat_seq ns on ns.chat_key = ? and ns.fp = newer.fp
-                where l.to_id = r.id and l.kind in ('改掉', '否定'))`).all(chatKey, chatKey));
+                where r.status = 'ok' and s.pos <= ? group by r.id order by pos, r.id`).all(chatKey, Number.isFinite(through) ? through : Number.MAX_SAFE_INTEGER)
+                .map(r => ({ ...r, quotes: fromJson(r.quotes) ?? [], audience: fromJson(r.audience) ?? [],
+                    known: fromJson(r.known) ?? [], matter: fromJson(r.matter), life: fromJson(r.life), promise: fromJson(r.promise) }));
+            const copies = legacyMenuCopies(db, chatKey);
+            const visible = rows.filter(r => !copies.has(r.id) && !r.known.some(k => k?.basis && !check(k.basis)));
+            const notThere = absentRecordMembers(db, chatKey);
+            if (notThere) for (const r of visible) if (r.job_id != null) r.audience = r.audience.filter(n => n === r.holder_name || !notThere(n, r.pos));
+            const links = q(`select l.* from record_links l join chats c on c.story_id = l.story_id where c.key = ?`).all(chatKey);
+            return currentMenuRecords({ visible, messages, links, through });
+        });
+    }
+    function causeFor(chatKey, cause) {
+        if (!cause || !['record', 'menu_result'].includes(cause.type) || !Number.isSafeInteger(cause.id) || cause.id <= 0) return null;
+        const rows = menuEvidenceRecords(chatKey);
         if (cause.type === 'record') return rows.find(r => r.id === cause.id) ?? null;
-        const happened = new Set(rows.filter(r => r.type === '做' && fromJson(r.matter)?.menu === cause.id && !fromJson(r.matter)?.kind).map(r => r.id));
+        const happened = new Set(rows.filter(r => r.type === '做' && r.matter?.menu === cause.id && !r.matter?.kind).map(r => r.id));
         return rows.find(r => r.type === '了结' && r.outcome && happened.has(r.idea_ref)) ?? null;
     }
     function putMenuContract(id, item) {
         if (item.contract === 1) setMeta(`menu_contract:${id}`, JSON.stringify({ version: 1, conditions: item.conditions ?? [] }));
     }
     function recordEvidenceLive(chatKey, record) {
-        const current = causeFor(chatKey, { type: 'record', id: record?.id });
-        return !!current && current.text === record.text && current.fp === record.fp;
+        const current = menuEvidenceRecords(chatKey).find(r => r.id === record?.id);
+        return !!current && current.text === record.text && current.fp === record.fp
+            && (!record.version || menuRecordVersion(current) === record.version);
     }
     // 交回的菜单落账。旧菜单里还没放出来的由新菜单接手（见 menuOf），口袋里那一样留着。
     // crew、romance、gaps（章程 K1）：规划交回的"主角团""感情线""口子"，存进 node（node.主角团、node.感情线、node.口子；没写的不加这一格）
@@ -1397,25 +1412,26 @@ export function openStore(file) {
         const ids = plans.map(p => p.id), marks = ids.map(() => '?').join(', ');
         const items = q(`select * from menu where plan_id in (${marks}) order by id`).all(...ids)
             .filter(m => menuItemLive(chatKey, m, h));
-        for (const m of items) readMenuCondition(chatKey, m, plans.find(p => p.id === m.plan_id));
+        for (const m of items) {
+            readMenuCondition(chatKey, m, plans.find(p => p.id === m.plan_id));
+            readCells(m);
+            const contract = fromJson(getMeta(`menu_contract:${m.id}`));
+            if (contract?.version === 1) { m.contract = 1; m.conditions = contract.conditions; }
+            m.cause = causeFor(chatKey, fromJson(m.cause_ref)) ? fromJson(m.cause_ref) : null;
+            m.entryBasis = fromJson(m.entry_basis);
+        }
         const messages = currentMessages(chatKey);
-        const strict = a => a && Number.isInteger(a.pos) && (a.pos === -1 ? a.fp == null : !!a.fp && messages.some(m => m.pos === a.pos && m.fp === a.fp));
         const logs = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids);
         const proofs = new Map(logs.map(s => [s.id, fromJson(getMeta(`menu_proof:${s.id}`))]));
         const baseLive = s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && (proofs.get(s.id)?.timeBasis ? timeProofLive(chatKey, proofs.get(s.id).timeBasis) : basisLive(chatKey, s.pos, s.story_day, s.basis_part)) && replied(s);
-        const conditionLive = (s, p) => {
-            const item = items.find(m => m.id === s.item_id), source = item?.sourceAt;
-            return p?.condition === true && s.status === 'shown' && strict(p.evidence) && p.evidence.pos >= 0
-                && s.pos === p.evidence.pos && s.fp === p.evidence.fp && strict(p.source)
-                && source && p.source.pos === source.pos && p.source.fp === source.fp && p.evidence.pos > source.pos;
-        };
+        const shownLive = (s, p) => shownMenuProofLive(items.find(m => m.id === s.item_id), s, p, messages);
         const steps = logs.filter(s => {
             if (!baseLive(s)) return false;
             const proof = proofs.get(s.id);
-            if (!proof || (!proof.condition && !proof.conditionStep)) return true;
-            if (proof.condition) return conditionLive(s, proof);
+            if (!proof || (!Object.hasOwn(proof, 'condition') && !proof.conditionStep)) return true;
+            if (Object.hasOwn(proof, 'condition')) return shownLive(s, proof);
             const parent = logs.find(p => p.id === proof.conditionStep && p.item_id === s.item_id && p.id < s.id);
-            return !!parent && baseLive(parent) && conditionLive(parent, proofs.get(parent.id));
+            return !!parent && baseLive(parent) && shownLive(parent, proofs.get(parent.id));
         });
         const active = plans.filter(p => !replaced.has(p.id)).at(-1);
         const current = active?.id;
@@ -1424,14 +1440,10 @@ export function openStore(file) {
         // 局势后续和明确留下的旧件，换了规划仍按原状态保留。
         const follow = m => m.motif === '后续' || m.motif === '后续·当下';
         const included = m => m.plan_id === current || ((follow(m) || m.kept_pos != null) && (m.status === 'waiting' || m.status === 'pocket')) || (m.status !== 'waiting' && !(retire && m.status === 'pocket'));
-        const verify = createMenuVerifier({ getMeta, setMeta, currentMessages, requireChat, setupOf, recordEvidenceLive, readyPlans, lastReadyPlan }, chatKey);
+        const verify = createMenuVerifier({ getMeta, setMeta, currentMessages, requireChat, setupOf, recordEvidenceLive, menuEvidenceRecords, readyPlans, lastReadyPlan }, chatKey);
         for (const m of items) {
-            readCells(m);
-            const contract = fromJson(getMeta(`menu_contract:${m.id}`));
-            if (contract?.version === 1) { m.contract = 1; m.conditions = contract.conditions; }
-            if (m.showCondition) m.conditionSteps = steps.filter(s => s.item_id === m.id && proofs.get(s.id)?.condition).map(s => s.id);
-            m.cause = causeFor(chatKey, fromJson(m.cause_ref)) ? fromJson(m.cause_ref) : null;
-            m.entryBasis = fromJson(m.entry_basis);
+            if (m.showCondition || logs.some(s => s.item_id === m.id && Object.hasOwn(proofs.get(s.id) ?? {}, 'condition')))
+                m.conditionSteps = steps.filter(s => s.item_id === m.id && Object.hasOwn(proofs.get(s.id) ?? {}, 'condition')).map(s => s.id);
             if (all) { const stopped = steps.filter(s => s.item_id === m.id && s.why?.startsWith('/停：')).at(-1); if (stopped) m.intimate_stop = { pos: stopped.pos, fp: stopped.fp }; }
             Object.assign(m, { status: 'waiting', pocket_day: null, pocket_pos: null, pocket_step: null, pocket_by: null, settled_pos: null, settled_step: null, settled_by: null, settled_day: null, held_by: null, held_pos: null, why: null, early_why: null });
             // settled_pos：有了结果（拿出来了、用上了、沉了、撤了）的那一步在哪条消息上——局势推演按它找"刚有了结果的事"
@@ -1439,7 +1451,7 @@ export function openStore(file) {
             // pocket_by：谁把它放进口袋的（"引子"＝活动快到了替它挂上门的；门上按它判引子自己到点没，T073）
             for (const s of steps) if (s.item_id === m.id && s.status === 'offered') Object.assign(m, { held_by: s.by_name, held_pos: s.pos });
             else if (s.item_id === m.id && s.status === KEPT) m.kept_pos = s.pos;
-            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null, conditionStep: s.status === 'shown' && proofs.get(s.id)?.condition ? s.id : null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_step: null, pocket_by: null, held_by: null, held_pos: null, settled_step: null, settled_pos: null, settled_by: null, settled_day: null, early_why: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_step: s.id, pocket_by: s.by_name ?? null, early_why: s.by_name === '兴头' ? s.why ?? null : m.early_why } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_step: s.id, settled_by: s.by_name ?? null, settled_day: s.story_day } : {});
+            else if (s.item_id === m.id) Object.assign(m, { status: s.status, why: s.why ?? null, conditionStep: s.status === 'shown' && Object.hasOwn(proofs.get(s.id) ?? {}, 'condition') ? s.id : null }, s.status === 'waiting' ? { pocket_day: null, pocket_pos: null, pocket_step: null, pocket_by: null, held_by: null, held_pos: null, settled_step: null, settled_pos: null, settled_by: null, settled_day: null, early_why: null } : {}, s.status === 'pocket' ? { pocket_day: s.story_day, pocket_pos: s.pos, pocket_step: s.id, pocket_by: s.by_name ?? null, early_why: s.by_name === '兴头' ? s.why ?? null : m.early_why } : {}, m.settled_pos == null && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status) ? { settled_pos: s.pos, settled_step: s.id, settled_by: s.by_name ?? null, settled_day: s.story_day } : {});
             // offered_n（T077）：递出过几次——按不同消息位置去重（同一楼换人开口、左滑重来只算一次）；没递过的件不加这个字段
             // 退回 waiting 的那一步（/停 撤回、重新规划）把这件重新算起：撤掉的递送没成，不计
             const offeredAt = new Set();
@@ -1461,12 +1473,16 @@ export function openStore(file) {
     }
     function readMenuCondition(chatKey, m, plan) {
         const condition = getMeta(`menu_condition:${m.id}`);
-        if (!condition) return;
-        m.showCondition = condition;
         const pos = m.anchor_pos ?? plan?.anchor_pos;
         // 补件用自己的锚点；普通件用规划锚点。继承关系仍由原来的 menuItemLive/plansOf 管。
         const current = currentMessages(chatKey).find(x => x.pos === pos);
-        m.sourceAt = pos === -1 ? { pos: -1, fp: null } : current ? { pos, fp: current.fp } : null;
+        const at = pos === -1 ? { pos: -1, fp: null } : current ? { pos, fp: current.fp } : null;
+        // anchorAt 只在读时派生、不落库：证据只拿它核"在放出以后"和锚点还在；锚点只改了字不换件版本（件还活着由上面那两处判）。
+        m.anchorAt = at;
+        if (!condition) return;
+        // 带露面条件的件照旧绑当时那一版（条件按那一版的字核过）
+        m.showCondition = condition;
+        m.sourceAt = at;
     }
     function planItems(chatKey, planIds = []) {
         const ids = planIds.filter(Number.isInteger);
@@ -1604,5 +1620,5 @@ export function openStore(file) {
         };
     }
 
-    return { recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    return { menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

@@ -38,7 +38,8 @@ import { openGaps, CLOSE_UNITS, intimatePair } from './planner.mjs';
 import { toText as relationsText } from './relations.mjs';
 import { normalizeRelations, slotLines as relationLines, leaderOf, followersOf, personOf, givesWork, giverLine, mentionLines, currentRelations } from './relations.mjs';
 import { pickSeed, seedLines, storyYear } from './world.mjs';
-import { verificationSnapshot, deliveryVerified, retryKnob, evaluationState, saveEvaluation, signalEvaluation, planningDecision, evaluationBasis, commitVerification } from './planner.mjs';
+import { verificationSnapshot, selectVerification, deliveryVerified, retryKnob, evaluationState, saveEvaluation, signalEvaluation, planningDecision, evaluationBasis, commitVerification, verificationAgenda, firstVerificationDue, verificationMaterial, exhaustedSupply } from './planner.mjs';
+import { OFFER_HOLD_SPAN } from './menu-evidence.mjs';
 import { picksOf } from './guide.mjs';
 import { SIGN_PICKS_MAX, NOW_MOTIF, placesIn, buildBrief, needsPlan, stepPocket, stackedHere, reachedFor, awaitingExtract, AWAIT_SPAN, pocketLines, respondLines, shownLines, sinkLines, storyDigest, WORLD, OFFSCREEN_FIT, entryOf, nearPlace, timePassed, offscreenLines, errandLines, entryProjection, ifTakenOf, ifSunkOf, takenOf, expiredPocket, premiseGone, storyLayers, layerNote, briefBlocks, BRIEF_CHARS, BRIEF_SHARES, UNSQUEEZED, categoryCounts, draggingLines, overdueAhead, LOOKBACK_PLANS } from './planner.mjs';
 import { foldState, stateLines, herOwnOnly } from './state.mjs';
@@ -1826,7 +1827,9 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             const contentTier = activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null;
             const scenePlace = board?.camera?.place || confirmedScenePlace(messages, store.stateNotesOf?.(chatKey) ?? [], lastPos, userName);
             const placeNames = nameFinder(rel, rosterNames);
-            for (const c of stepPocket(menu, { verified: !!planner?.checkTurn, today, part: timelineFor(store, records, chatKey, messages).part, dayOf, at: lastPos, timeScale: scaleFor(store, chatKey), pace: paceFor(store, chatKey), contentTier, stacked, firm: { today, dayOf }, hold: promised?.hold ?? null, keep: promised?.keeps ?? (() => false), gone, visible: records.visible(chatKey), messages, notHere: m => !nearPlace(m, scenePlace, placeNames) })) {
+            // 核验耗尽的件（T140b 第三项）：不进袋、不占容量；入袋和下面的定日递送共用这一份
+            const exhausted = supplyEligibility(store, records, chatKey, planner);
+            for (const c of stepPocket(menu, { verified: !!planner?.checkTurn, exhausted, today, part: timelineFor(store, records, chatKey, messages).part, dayOf, at: lastPos, timeScale: scaleFor(store, chatKey), pace: paceFor(store, chatKey), contentTier, stacked, firm: { today, dayOf }, hold: promised?.hold ?? null, keep: promised?.keeps ?? (() => false), gone, visible: records.visible(chatKey), messages, notHere: m => !nearPlace(m, scenePlace, placeNames) })) {
                 store.updateMenu(chatKey, c.id, c.status === 'pocket' ? { ...c, basisDay: today } : c);
                 if (c.why && (c.status === 'expired' || c.status === 'void')) store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : 'menu_void', { id: c.id, why: c.why });
             }
@@ -1834,7 +1837,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             // 挂到门上（找上门、牵头的人有卡又不在场），或者下一次开口那一格最前面一句；知道了却没去的，牵头的人镜头外照常办了、排一件回音
             try {
                 const player = [userName, ...(rel && userName ? (p => (p ? [p.名, ...p.又名] : []))(personOf(rel, userName, rosterNames)) : [])].filter(Boolean);
-                const events = eventStep(store, records, chatKey, { menu: menuDays(store, store.menuOf(chatKey), dayOf).filter(m => deliveryVerified(store, chatKey, m)), messages, today, firmToday: today, part: timelineFor(store, records, chatKey, messages).part, here, roster, userName, player, node: latestNode(store, chatKey).node });
+                const events = eventStep(store, records, chatKey, { menu: menuDays(store, store.menuOf(chatKey), dayOf).filter(m => deliveryVerified(store, chatKey, m, exhausted)), messages, today, firmToday: today, part: timelineFor(store, records, chatKey, messages).part, here, roster, userName, player, node: latestNode(store, chatKey).node });
                 // 去随机以后，引子可能已由普通入口进袋；仍保留定日活动的原递送身份。
                 for (const s of events.steps) if (s.how === 'door' && s.lead.status === 'pocket' && !s.lead.pocket_by)
                     store.updateMenu(chatKey, s.lead.id, { status: 'pocket', pocket_day: today, by: '引子', at: { pos: last.pos, fp: last.fp }, basisDay: today });
@@ -2068,30 +2071,63 @@ export function completePlanningBeat(store, records, chatKey, input, empty) {
     const current = planningInput(store, records, chatKey, { through: input.snapshot.through });
     const basis = evaluationBasis(current.snapshot, current.scene);
     saveEvaluation(store, chatKey, { empty: empty ? basis : null,
+        supplemented: verificationMaterial(current.snapshot, current.scene),
         ...(empty && state.checked === evaluationBasis(input.snapshot, input.scene) ? { checked: basis } : {}) });
 }
 export function planningEvaluation(store, records, chatKey, planner = {}, options = {}) {
     const stable = stablePlanEdge(store.currentMessages(chatKey));
     const input = planningInput(store, records, chatKey, { ...options, board: null, promised: null, today: null, dayOf: null, through: stable?.pos ?? -1 }), { snapshot, scene } = input;
     let state = evaluationState(store, chatKey);
-    if (state.planId !== snapshot.planId) state = saveEvaluation(store, chatKey, { planId: snapshot.planId, checked: null, checking: null, failures: 0, coolUntil: 0, empty: null });
+    if (state.planId !== snapshot.planId) state = saveEvaluation(store, chatKey, { planId: snapshot.planId, checked: null, checking: null, verification: {}, supplemented: null, failures: 0, coolUntil: 0, empty: null });
     state = { ...state, retryMax: retryKnob(planner.retryMax, 'max') };
+    const agenda = verificationAgenda(snapshot, scene, state);
+    const exhausted = eligibilityFrom(store, records, chatKey, input, state, planner, agenda);
     const lastPlan = store.lastPlan(chatKey);
     const rawVerdict = lastPlan?.status === 'ready' ? verdictOf(store, chatKey, lastPlan.id) : null;
     const verdict = rawVerdict?.at?.pos <= (stable?.pos ?? -1) ? rawVerdict : null;
-    let decision = planningDecision({ ...input, state, lastPlan, verdict,
+    let decision = planningDecision({ ...input, state, lastPlan, verdict, exhausted,
         running: !!store.activePlanAttempt?.(chatKey, lastPlan?.id) });
+    if (decision.kind === 'beat') {
+        const view = planningView(store, records, chatKey, stable?.pos ?? -1);
+        // 门收的是同一份资格（只读派生），不回调 planningEvaluation
+        const ready = doorFor(view.store, view.records, chatKey, { present: scene.here, timeline: timelineFor(view.store, view.records, chatKey), exhausted }).allReady ?? [];
+        if (ready.some(i => i.source?.type !== 'pocket')) decision = { ...decision, kind: 'wait', why: '已有其他可用供给' };
+    }
     const seen = Number(store.getMeta?.(`turn_checked:${chatKey}`) ?? -1);
     const fresh = (snapshot.recent ?? snapshot.history).filter(r => r.id > seen && r.pos > (lastPlan?.anchor_pos ?? -1));
     const outside = scene.world;
-    if (lastPlan?.status === 'ready' && stable && !state.checking && ((decision.kind === 'beat' && fresh.length)
-        || (state.checked !== decision.basis && outside.length && decision.kind !== 'full'))) decision = { ...decision, kind: 'verify' };
-    return { input, snapshot, scene, state, lastPlan, verdict, stable, fresh, outside, decision };
+    if (lastPlan?.status === 'ready' && stable && !state.checking && agenda.some(x => x.due)
+        && ((decision.kind === 'beat' && fresh.length) || (firstVerificationDue(agenda, state, decision.basis) && outside.length && decision.kind !== 'full'))) decision = { ...decision, kind: 'verify' };
+    const selection = selectVerification(snapshot, { scene, state });
+    return { input, snapshot, scene, state, lastPlan, verdict, stable, fresh, outside, decision, selection, exhausted };
+}
+// 供给资格（T140b 第三项，D-300）：和 planningEvaluation 同一份输入、同一份逐项账派生"本依据核验耗尽"；
+// 已递给某人、回复还没记账的（awaitingExtract）照旧算待承接，不撤。只读，不写任何账。
+function eligibilityFrom(store, records, chatKey, input, state, planner = null, agenda = verificationAgenda(input.snapshot, input.scene, state)) {
+    const messages = store.currentMessages(chatKey);
+    const isDone = typeof records?.isDone === 'function' ? fp => records.isDone(input.context.chat.story_id, fp) : null;
+    return exhaustedSupply(agenda, state, { at: messages.at(-1)?.pos,
+        awaiting: m => m.awaiting === true || awaitingExtract(m, { messages, isDone, record: planner?.record !== false }) });
+}
+// 递送各口（入袋、提前入袋、组格递送、门）用：账里没有任何耗尽项就不建输入，直接全放行。
+export function supplyEligibility(store, records, chatKey, planner = null) {
+    const none = () => false;
+    if (!store.lastReadyPlan || !records) return none;
+    let state;
+    try { state = evaluationState(store, chatKey); } catch { return none; }
+    const retryMax = retryKnob(planner?.retryMax ?? state.retryMax, 'max');
+    if (!Object.entries(state.verification ?? {}).some(([k, v]) => k.startsWith('事:') && v?.unknown && (v.failures ?? 0) >= retryMax)) return none;
+    try {
+        const input = planningInput(store, records, chatKey, { through: stablePlanEdge(store.currentMessages(chatKey))?.pos ?? -1 });
+        if (input.snapshot.planId !== state.planId) return none;
+        return eligibilityFrom(store, records, chatKey, input, { ...state, retryMax }, planner);
+    } catch { return none; }
 }
 export function planningCheckArgs(store, chatKey, evaluation, { mark = true } = {}) {
     const { input, snapshot, stable, fresh: history, outside, decision } = evaluation, user = input.context.userName;
     if (mark && history.length) store.setMeta(`turn_checked:${chatKey}`, String(Math.max(...history.map(r => r.id))));
     return { chatKey, planId: snapshot.planId, verification: true, at: stable, basis: decision.basis,
+        verificationItems: (evaluation.selection ?? selectVerification(snapshot, { scene: input.scene, state: evaluation.state })).allowedKeys,
         ideas: history.filter(r => ['想法', '说'].includes(r.type) && r.holder_name === user),
         others: history.filter(r => r.type === '想法' && r.holder_name !== user), changes: history.filter(r => ['关系', '改变'].includes(r.type)),
         acts: history.filter(r => ACTS.has(r.type) && r.type !== '改变' && !(r.holder_name === user && r.type === '说')), outside };
@@ -2110,6 +2146,35 @@ export function planningCheckBasis(input, committed) {
     const checked = recheck ? input : committed;
     return evaluationBasis(checked.snapshot, checked.scene);
 }
+// 请求令牌保护新请求；checked 仅保留兼容读口，实际完成与未知由逐项账决定。
+export function beginPlanningCheck(store, chatKey, evaluation) {
+    const state = evaluationState(store, chatKey), sequence = (state.checkSequence ?? 0) + 1;
+    const request = { token: `${evaluation.snapshot.planId}:${sequence}:${evaluation.decision.basis}`, planId: evaluation.snapshot.planId,
+        items: (evaluation.selection ?? selectVerification(evaluation.snapshot, { scene: evaluation.scene, state: evaluation.state })).items };
+    saveEvaluation(store, chatKey, { checking: request.token, checkSequence: sequence });
+    return request;
+}
+export function finishPlanningCheck(store, chatKey, request, result, planner = {}) {
+    const state = evaluationState(store, chatKey);
+    if (state.checking !== request.token) return;
+    if (state.planId !== request.planId || store.lastPlan(chatKey)?.id !== request.planId) {
+        saveEvaluation(store, chatKey, { checking: null });
+        return;
+    }
+    const verification = { ...state.verification }, now = Date.now();
+    for (const item of request.items) {
+        const conclusion = (result?.accepted ?? []).find(a => (a.item != null ? `事:${a.item}` : a.ref) === item.key);
+        const status = conclusion?.state ?? (typeof conclusion?.value === 'object' ? conclusion.value?.状态 : conclusion?.value);
+        const known = conclusion && status != null && status !== '拿不准';
+        const failures = known ? 0 : (item.previous?.failures ?? 0) + 1;
+        verification[item.key] = { basis: item.basis, attempted: true, attempts: (item.previous?.attempts ?? 0) + 1,
+            conclusion: known ? conclusion : null, unknown: !known, failures,
+            coolUntil: known ? 0 : now + retryKnob(planner.retryGapMin, 'gapMin') * 60000,
+            ...(known ? {} : { failure: result?.error ?? (result?.stale ? '来源已变' : result?.skipped ? '跳过' : '没有有效结论') }) };
+    }
+    saveEvaluation(store, chatKey, { checking: null, verification,
+        ...(result?.accepted?.length && result.checked ? { checked: result.checked } : {}) });
+}
 export function evaluatePlanning(store, records, chatKey, planner, options = {}) {
     const evaluation = planningEvaluation(store, records, chatKey, planner, options);
     const { input, snapshot, scene, state, lastPlan, verdict, stable, fresh, outside, decision } = evaluation;
@@ -2124,11 +2189,16 @@ export function evaluatePlanning(store, records, chatKey, planner, options = {})
     const at = stable;
     if (decision.kind === 'verify') {
         if (!planner.checkTurn) return decision;
-        saveEvaluation(store, chatKey, { checking: decision.basis });
-        Promise.resolve(planner.checkTurn(planningCheckArgs(store, chatKey, evaluation)))
-            .then(result => { if (result?.skipped) return; saveEvaluation(store, chatKey, { checked: result?.checked ?? decision.basis }); })
-            .catch(error => store.logEvent?.(chatKey, 'verification_failed', { error: error.message }))
-            .finally(() => saveEvaluation(store, chatKey, { checking: null }));
+        const request = beginPlanningCheck(store, chatKey, evaluation);
+        let work;
+        try { work = planner.checkTurn(planningCheckArgs(store, chatKey, evaluation)); }
+        catch (error) { work = Promise.reject(error); }
+        Promise.resolve(work)
+            .then(result => finishPlanningCheck(store, chatKey, request, result, planner))
+            .catch(error => {
+                store.logEvent?.(chatKey, 'verification_failed', { error: error.message });
+                finishPlanningCheck(store, chatKey, request, { error: error.message }, planner);
+            });
     } else if (decision.kind === 'full') {
         if (decision.why !== 'first' || store.setupOf?.(input.context.chat.story_id) || store.currentMessages(chatKey).some(m => m.is_user))
             requestPlanNow(store, records, chatKey, planner, { reason: decision.why, present: scene.here, verdict: verdict?.why, thread: verdict?.thread, ...(decision.why === 'first' ? {} : { anchor: at, basis: at }) });
@@ -2839,7 +2909,7 @@ const isDoneFor = (store, records, chatKey) => {
     const storyId = store.requireChat?.(chatKey)?.story_id;
     return storyId != null ? fp => records.isDone(storyId, fp) : null;
 };
-const HOLD_SPAN = 6, AIM_WAIT = 6, ERRAND_GAP = 12, NODE_EVERY = 40, POCKET_KIND = 'pocket';
+const HOLD_SPAN = OFFER_HOLD_SPAN, AIM_WAIT = 6, ERRAND_GAP = 12, NODE_EVERY = 40, POCKET_KIND = 'pocket';
 const focusNodeFor = (store, chatKey) => {
     const last = playModeOf(store, chatKey) === 'full' ? store.lastReadyPlan?.(chatKey) : null;
     return effectivePlanNode(store, chatKey, last);
@@ -2865,7 +2935,8 @@ function menuFor(store, chatKey, { records = null, isCarded = () => false, scene
     const menuTs = scaleFor(store, chatKey);
     const dated = m => (Number.isFinite(m.said_day) && m.said_day !== today ? { ...m, ...Object.fromEntries(['surface', 'respond', 'know', 'sink', 'fit'].map(k => [k, m[k] == null ? m[k] : retime(m[k], m.said_day, today, menuTs)])) } : m);
     const visible = (records?.visible?.(chatKey) ?? []).filter(r => r.pos <= (anchorAt ?? at));
-    const eligible = m => deliveryVerified(store, chatKey, m) && !afterBlocked(m, allMenu, x => x.status, { visible, messages: upto ?? store.currentMessages(chatKey) });
+    const exhausted = supplyEligibility(store, records, chatKey, { record });
+    const eligible = m => deliveryVerified(store, chatKey, m, exhausted) && !afterBlocked(m, allMenu, x => x.status, { visible, messages: upto ?? store.currentMessages(chatKey) });
     const causeText = m => {
         const r = m.cause?.type === 'record' ? visible.find(x => x.id === m.cause.id)
             : m.cause?.type === 'menu_result' ? menuResultRecord(visible, m.cause.id) : null;
@@ -3432,7 +3503,7 @@ export function advanceImpulse(store, records, chatKey, id, at, { expected = nul
     const contentTier = activeIntimate(intimateSetup(store, chatKey)).length ? promptOptionsFor(store, chatKey).tier : null;
     const scenePlace = board?.camera?.place || confirmedScenePlace(s.messages, store.stateNotesOf?.(chatKey) ?? [], s.lastPos, s.userName);
     const placeNames = nameFinder(rel ? normalizeRelations(rel) : null, names);
-    const gate = pocketGate(menu, { today: s.firm.today, part: timelineFor(store, records, chatKey, s.messages).part, at: s.lastPos, hold: promised.hold, gone, stacked, pace: paceFor(store, chatKey), timeScale: s.ts, contentTier, visible: s.visible, messages: s.messages, notHere: m => !nearPlace(m, scenePlace, placeNames) });
+    const gate = pocketGate(menu, { today: s.firm.today, part: timelineFor(store, records, chatKey, s.messages).part, at: s.lastPos, hold: promised.hold, gone, stacked, exhausted: supplyEligibility(store, records, chatKey), pace: paceFor(store, chatKey), timeScale: s.ts, contentTier, visible: s.visible, messages: s.messages, notHere: m => !nearPlace(m, scenePlace, placeNames) });
     if (!gate.canEnter(id, { ignoreReadyDay: true })) return null;
     store.updateMenu(chatKey, id, { status: 'pocket', pocket_day: s.firm.today, at, by: '兴头', ...(knownWhy && item.who ? { why: knownWhy } : {}) });
     return item;
@@ -3677,7 +3748,7 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
         // 旧格的版本照旧；新进场供料的有效集合变了才重组。
         const arrivalsVersion = tracked ? `:arrival:${createHash('sha1').update(JSON.stringify([store.getMeta?.(`arrived:${chatKey}`), store.getMeta?.(`arrivals:${chatKey}`)])).digest('hex').slice(0, 16)}` : '';
         const menu = store.menuOf?.(chatKey) ?? [];
-        const conditions = menu.filter(m => m.showCondition).map(m => [m.id, m.sourceAt, m.conditionSteps ?? []]);
+        const conditions = menu.filter(m => m.showCondition || m.conditionSteps).map(m => [m.id, m.sourceAt, m.conditionSteps ?? []]);
         const conditionVersion = conditions.length ? ':condition:' + createHash('sha1').update(JSON.stringify(conditions)).digest('hex').slice(0, 16) : '';
         const checks = menu.filter(m => (store.getRawMeta ?? store.getMeta)?.(`menu_checks:${chatKey}:${m.id}`)).map(m => [m.id, m.verification?.state ?? '未核']);
         const checkVersion = checks.length ? ':checked:' + createHash('sha1').update(JSON.stringify(checks)).digest('hex').slice(0, 16) : '';

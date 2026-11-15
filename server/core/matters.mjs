@@ -36,7 +36,7 @@ export function toldOf(r, text, names = []) {
     for (const g of a) if (b.has(g)) n++;
     return n >= 3;
 }
-export const isOpenMatter = r => !!r?.matter && !settledMatter(r) && !r.superseded_by;
+export const isOpenMatter = r => !!r?.matter && !settledMatter(r) && !r.superseded_by && r.matter.evidence?.boundary !== '收尾';
 // 牵头的人自己那一份（用户 10/8：她打电话叫 V 一个人来、别带顶着他脸的那个人，V 到了她却不知道他回来了）：
 // 事情是他牵头做的，他人又不在那儿（电话是别人接的、露面是旁白写的）——他做过、说过的，接着要做的，那时他知道的，记成他自己的一件
 export const LEAD = '牵头';
@@ -125,20 +125,15 @@ export function settleMatters({ store, records, chatKey, storyId, messages, pres
         const isPlayer = player.includes(m.who);
         // 镜头外：发生在牵头的人身上、玩家不在的时候——只有他知道
         const own = entryOf(m) === '镜头外' && m.who !== WORLD && !isPlayer;
-        const by = m.settled_by && m.settled_by !== '程序' && m.settled_by !== camera ? m.settled_by : null;
-        // 那条时在场的人，加上把它拿出来的那个人（镜头不算）
-        const far = new Set(own ? [] : remoteAt(at.pos) ?? []);
-        const here = own ? [] : [...new Set([...presentAt(at.pos).filter(n => !far.has(n)), by].filter(n => n && n !== camera))];
         const lead = m.who === WORLD || isPlayer ? null : m.who;
-        // 他自己当面进场那一下用掉的（进场记录不是电话、消息，那一刻他也不在电话那头）：记成他的来意，不记"牵头"、也不替旁人记"碰上了"——
-        // 那条消息没发生过，这件事还在他嘴里没说；说出来以后记账会记
+        // 他自己当面进场那一下用掉的（进场记录不是电话、消息，那一刻他也不在电话那头）：记成他的来意（还没说出口的打算，只他知道）——
+        // 那条消息没发生过，这件事还在他嘴里没说；说出来以后记账会记。规划写的知情不当成他那时知道的事实
         if (lead && !own && m.status === 'used' && m.settled_by && same(m.settled_by, lead)) {
             const how = arrivedAt(at.pos, lead);
             if (how != null && !REMOTE_WAY.test(how) && !(remoteAt(at.pos + 1) ?? []).some(n => same(n, lead))) {
                 if (!all.some(r => r.matter?.menu === m.id && r.matter.kind === INTENT)) {
-                    const know = String(m.know ?? '').trim().replace(/[。．.]+$/, '');
                     const said = String(m.respond || m.surface || m.title || '').trim().replace(/[。．.]+$/, '');
-                    const id = records.addDerived({ storyId, fp: at.fp, type: '心里', text: `${lead}本来要跟${userName ?? '对方'}说的：${said}${know ? `（那时${lead}知道：${know}）` : ''}`.slice(0, 300),
+                    const id = records.addDerived({ storyId, fp: at.fp, type: '心里', text: `${lead}本来要跟${userName ?? '对方'}说的：${said}`.slice(0, 300),
                         holder: holderOf(lead), holderName: lead, audience: [lead], about: lead, keys: matterKeys(m, [promiseText(m)]),
                         matter: { menu: m.id, title: m.title ?? '', entry: entryOf(m), who: m.who, kind: INTENT, ...(m.origin ? { origin: m.origin } : {}) } });
                     made.push({ id, menu: m.id, pos: at.pos, holderName: lead, audience: [lead], intent: true });
@@ -148,33 +143,19 @@ export function settleMatters({ store, records, chatKey, storyId, messages, pres
                 continue;
             }
         }
-        // 牵头的人那一份：他不在那儿——他做过的、说过的、接着要做的、那时知道的，记成他自己的一件（只他知道，有了着落才了结）；
-        // 他就在那儿——事情他当面做了，大家都看见了，只把他那时心里知道的记给他
-        if (lead && !own) {
-            const know = String(m.know ?? '').trim().replace(/[。．.]+$/, '');
-            const where = m.place || placeAt(at.pos) || '';
-            const at_ = where ? `（这是在${where}那会儿）` : '';
-            if (!here.includes(lead) && !led.has(m.id)) {
-                const text = `${lead}牵头的「${m.title}」：${m.surface ?? ''}${m.respond ? `——${m.respond}` : ''}${know ? `（那时${lead}知道：${know}）` : ''}${at_}`.slice(0, 440);
-                const id = records.addDerived({ storyId, fp: at.fp, type: '做', text, holder: holderOf(lead), holderName: lead, audience: [lead], about: lead, keys: matterKeys(m, [promiseText(m)]),
-                    matter: { menu: m.id, title: m.title ?? '', entry: entryOf(m), who: m.who, kind: LEAD, ...(m.origin ? { origin: m.origin } : {}) } });
-                led.add(m.id);
-                made.push({ id, menu: m.id, pos: at.pos, holderName: lead, audience: [lead], lead: true });
-            } else if (here.includes(lead) && know) {
-                const head = `${lead}那时知道的（「${m.title}」${where ? `，在${where}那会儿` : ''}）：`;
-                if (!all.some(r => r.holder_name === lead && String(r.text ?? '').startsWith(head))) records.addDerived({ storyId, fp: at.fp, type: '心里', text: `${head}${know}`.slice(0, 300), holder: holderOf(lead), holderName: lead, audience: [lead], about: lead, keys: matterKeys(m, []) });
-            }
-        }
-        if (have.has(m.id)) continue;
-        const holderName = own ? m.who : lead && here.includes(lead) ? lead : by && here.includes(by) ? by : userName ?? by ?? lead ?? m.who;
-        const audience = own ? [m.who] : [...new Set([...here, holderName, userName].filter(Boolean))];
-        const text = (own ? `${m.who}这段时间自己碰上过：${m.surface ?? m.title ?? ''}${m.respond ? `——${m.respond}` : ''}` : `碰上了「${m.title}」：${m.surface ?? ''}`).slice(0, 240);
+        // 当着人拿出来的（T140b）：菜单命中只说明这件被递出、被认出过，不说明计划里写的露面、应答、知情真在正文里发生了。
+        // 这件"碰上的事"只由记账核过、绑在这件上的实际记录本身来当（它有自己的引文、出处、谁知道；删稿改稿跟着撤），
+        // 这里不再照抄计划补记"碰上了""牵头的""那时知道的"；牵头的人自己做的、说的，那条实际记录本来就在他名下。
+        if (!own || have.has(m.id)) continue;
+        const holderName = m.who;
+        const audience = [m.who];
+        const text = `${m.who}这段时间自己碰上过：${m.surface ?? m.title ?? ''}${m.respond ? `——${m.respond}` : ''}`.slice(0, 240);
         // 先前那版替他记的"这段时间自己碰上过"（只当记忆、不算没下文的）作废，换成这一件
-        if (own && records.retireDerived) for (const fp of new Set(all.filter(r => r.job_id == null && !r.matter && r.holder_name === m.who && String(r.text ?? '').startsWith(`${m.who}这段时间自己碰上过：`)).map(r => r.fp))) {
+        if (records.retireDerived) for (const fp of new Set(all.filter(r => r.job_id == null && !r.matter && r.holder_name === m.who && String(r.text ?? '').startsWith(`${m.who}这段时间自己碰上过：`)).map(r => r.fp))) {
             records.retireDerived({ storyId, fp, holderName: m.who, prefixes: [`${m.who}这段时间自己碰上过：`] });
         }
         const id = records.addDerived({ storyId, fp: at.fp, type: '做', text, holder: holderOf(holderName), holderName, audience, about: lead ?? holderName, keys: matterKeys(m, [promiseText(m)]),
-            matter: { menu: m.id, title: m.title ?? '', entry: entryOf(m), who: m.who, ...(m.origin ? { origin: m.origin } : {}), ...(own ? {} : m.respond ? { respond: String(m.respond).slice(0, 300) } : {}) } });
+            matter: { menu: m.id, title: m.title ?? '', entry: entryOf(m), who: m.who, ...(m.origin ? { origin: m.origin } : {}) } });
         have.add(m.id);
         made.push({ id, menu: m.id, pos: at.pos, holderName, audience });
     }
@@ -191,10 +172,12 @@ export function closeLed({ records, chatKey, storyId, who, fp, same = (a, b) => 
     const ended = new Set(vis.filter(x => x.type === '了结' && x.idea_ref != null && x.outcome).map(x => x.idea_ref));
     const open = r => isOpenMatter(r) && !ended.has(r.id);
     const acted = r => vis.some(x => x.pos > r.pos && x.job_id != null && same(x.holder_name, who) && ['说', '做'].includes(x.type));
-    const done = vis.filter(r => open(r) && r.matter.kind === LEAD && same(r.holder_name, who) && acted(r));
+    // 他牵头的那份：旧的"牵头"记录，或记账绑在这件上、他自己名下的实际记录（T140b 起不再照抄计划补记"牵头"）
+    const mine = r => r.matter.kind === LEAD || (!r.matter.kind && r.matter.evidence && same(r.matter.who, who));
+    const done = vis.filter(r => open(r) && mine(r) && same(r.holder_name, who) && acted(r));
     // 接到这件事的那一边（电话是谁接的、场面是谁看见的）跟着收：他当面把这件事接着办了
     const menus = new Set(done.map(r => r.matter.menu).filter(x => x != null));
-    const theirs = vis.filter(r => open(r) && !PRIVATE.has(r.matter.kind) && (menus.has(r.matter.menu) || (wide && same(r.matter.who, who) && acted(r))));
+    const theirs = vis.filter(r => open(r) && !done.includes(r) && !PRIVATE.has(r.matter.kind) && (menus.has(r.matter.menu) || (wide && same(r.matter.who, who) && acted(r))));
     for (const r of [...done, ...theirs]) records.addDerived({ storyId, fp, type: '了结', ideaRef: r.id, outcome: '做了', text: `${who}当面办过了：「${r.matter.title}」`, holder: r.holder, holderName: r.holder_name, audience: r.audience ?? [who] });
     return [...done, ...theirs].map(r => r.id);
 }

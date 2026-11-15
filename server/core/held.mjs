@@ -1,4 +1,5 @@
 import { personWord } from './pronoun.mjs';
+import { MENU_EVIDENCE_PROTOCOL, menuEvidenceVersion, menuBoundaryEvidence, citedMenuProof } from './menu-evidence.mjs';
 // 心里压着的事（用户 10/16，小说转卡那边做开局单时的发现："不止是误会，主要是认知错位和角色性格以及剧情条件的关系，这是剧情节奏和拉扯的来源……
 // 同样的还影响'报喜不报忧'这种事——角色心里有事/遇到了事，什么情况会说，不说的时候是什么表现，说的时候会挑在什么场景/时间"）。
 // 他知道一件事、心里压着一件事（误会、秘密、坏消息、心意、打算），不等于他会说。每件旁边带一个处置：说不说、不说时往哪漏、什么条件才说、挑什么场合。
@@ -29,7 +30,7 @@ export function confirmedFacts(store, chatKey) {
 export const factKnownTo = (fact, who, same = (a, b) => a === b) => Array.isArray(fact?.knownBy) && (!fact.knownBy.length || fact.knownBy.some(n => same(n, who)));
 export function nodeContext(store, chatKey) {
     const facts = confirmedFacts(store, chatKey);
-    return { messages: store.currentMessages?.(chatKey) ?? [], facts,
+    return { messages: store.currentMessages?.(chatKey) ?? [], facts, menuRecords: store.menuEvidenceRecords?.(chatKey) ?? [],
         factLive: f => facts.some(x => JSON.stringify(x) === JSON.stringify(f)), recordLive: r => store.recordEvidenceLive?.(chatKey, r) === true };
 }
 export function verificationProofLive(row, ctx) {
@@ -151,7 +152,15 @@ function verifyMenuItem(store, chatKey, item, context, basis) {
     let rows;
     try { rows = JSON.parse(store.getMeta(`menu_checks:${chatKey}:${item.id}`) ?? '[]'); } catch { return { state: '未核' }; }
     if (!Array.isArray(rows) || !rows.length) return { state: '未核' };
-    const valid = rows.filter(r => r.source === JSON.stringify(item.sourceAt ?? null) && verificationProofLive(r, context));
+    const valid = rows.filter(r => {
+        const completion = ['办完了', '演过了'].includes(r.state);
+        if (r.source !== JSON.stringify(item.sourceAt ?? null) || !verificationProofLive(r, context)) return false;
+        if (!completion) return true;
+        if (r.protocol !== MENU_EVIDENCE_PROTOCOL || r.candidateVersion !== menuEvidenceVersion(item)) return false;
+        return menuBoundaryEvidence(item, r.state === '办完了' ? '收尾' : '露面', {
+            visible: context.menuRecords, messages: context.messages, facts: context.facts,
+        }).proofs.some(pair => citedMenuProof(pair, r.records));
+    });
     if (!valid.length) return { state: '未核' };
     const completed = valid.filter(r => ['办完了', '前提没了', '演过了'].includes(r.state));
     const candidates = completed.length ? completed : valid.filter(r => r.nodeBasis === basis);
