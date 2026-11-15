@@ -36,7 +36,7 @@ export function availableWays(store, chatKey, who, userName, messages = store.cu
     try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]'); } catch {}
     let anchors = null;
     try { anchors = JSON.parse(store.requireChat?.(chatKey)?.anchors ?? 'null'); } catch {}
-    for (const a of Array.isArray(arrivals) ? arrivals : []) if (same(a.who, who) && store.knockLive?.(chatKey, a) !== false && arrivalLive(a, messages, arrivals, anchors)) add(a.way ?? a.how);
+    for (const a of Array.isArray(arrivals) ? arrivals : []) if (same(a.who, who) && store.knockLiveFor?.(chatKey)?.(a, { phase: 'prepare' }) !== false && arrivalLive(a, messages, arrivals, anchors, store.knockLiveFor?.(chatKey))) add(a.way ?? a.how);
     try { const c = JSON.parse(store.getMeta?.(`settled_contact:${chatKey}:${who}`) ?? 'null'); if (c && live(c)) add(c.way); } catch {}
     return [...ways];
 }

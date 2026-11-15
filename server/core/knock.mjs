@@ -7,6 +7,7 @@
 //（作废的叩门开的那段区间不算在场；场面表的读口由主窗接）。记录存哪、何时叩、扩展怎么叫他是主窗 1b、1c 的事。
 // 认不出是不是在回他的那几句（asks）交给便宜模型，判了写回记录的 verdicts（"条号:指纹" → true/false），状态机先看它。题材无关。
 import { arrivalLive } from './landing.mjs';
+import { assertKnockReader } from './store.mjs';
 import { sameIdentity, messageIsPerson } from './cast.mjs';
 import { partsBetween } from './arrival.mjs';
 import { PARTS } from './timeline.mjs';
@@ -85,12 +86,13 @@ function knockMessage(k, messages, mine) {
  * 返回 { state: 候着|进场|作废|没发生, why, at（叩门的 at）, message（他那条）, decided（定下进场／作废的那条）, unanswered（玩家没回的句数）, asks（认不出的那几句，给便宜模型）, held（场合不合适、没算的句数） }
  * occasion：false＝不看场合；默认看——玩家那句写在亲密戏、打斗里（occasion.mjs），不算他没回（他候着），换了时段照样作废
  */
-export function knockState(knock, { messages = [], knocks = [], userName = null, roster = [], relations = null, rowAt = null, parts = PARTS, maxTurns = MAX_TURNS, occasion = true } = {}) {
+export function knockState(knock, { messages = [], knocks = [], userName = null, roster = [], relations = null, rowAt = null, parts = PARTS, maxTurns = MAX_TURNS, occasion = true, sourceLive = null } = {}) {
+    assertKnockReader(sourceLive, knockState);
     const at = num(knock?.at);
     const base = { at, message: null, decided: null, unanswered: 0, asks: [] };
     if (!knock?.who || at == null) return { ...base, state: '没发生', why: '记录不全' };
     const mine = knocks.filter(k => sameKnocker(k, knock, roster));
-    if (!arrivalLive(knock, messages, mine.length ? mine : [knock])) return { ...base, state: '没发生', why: '挂的那条没了，或者他那条换成了别人在说' };
+    if (!arrivalLive(knock, messages, mine.length ? mine : [knock], null, sourceLive)) return { ...base, state: '没发生', why: '挂的那条没了，或者他那条换成了别人在说' };
     const msg = knockMessage(knock, messages, mine.length ? mine : [knock]);
     if (!msg) return { ...base, state: '候着', why: '他那条还在写' };
     const message = { pos: msg.pos, fp: msg.fp };

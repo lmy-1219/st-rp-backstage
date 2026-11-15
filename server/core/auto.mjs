@@ -1,3 +1,5 @@
+import { cancelArrival } from './landing.mjs';
+import { messageBasis, sourceIndex, sourceMessage } from './source-basis.mjs';
 import { personWord } from './pronoun.mjs';
 import { createHash } from 'node:crypto';
 // 自动进离场与调度的后台接口层（方案 自动进离场与调度 第七节 1b，N-377～N-379，D-201）。
@@ -145,6 +147,8 @@ export function executionFor(store, chatKey, item, kind = 'speak', retryOf = nul
         }
         all.push(e); write(store, `auto_execution:${chatKey}`, all.slice(-60));
     }
+    const arrival = readRaw(store, `arrivals:${chatKey}`, []).findLast(a => a.avatar === e.avatar && a.at === through + 1 && a.source_basis);
+    if (arrival && !e.arrivalId) { e.arrivalId = arrival.source_basis.id; write(store, `auto_execution:${chatKey}`, all.slice(-60)); }
     return { ...item, execution: { ...e } };
 }
 export function executionResult(store, chatKey, receipt, { records = null, config = null } = {}) {
@@ -172,11 +176,15 @@ export function executionResult(store, chatKey, receipt, { records = null, confi
     if (e.handoff && ['start', 'retry', 'check'].includes(receipt.result) && !sameHandoff(e.handoff, narratorHandoff(store, chatKey))) return { ok: false, why: '原旁白交接已撤回或换稿' };
     if(receipt.result==='start'&&e.state==='superseded')return {ok:false,why:'旧凭据已被替换，请核对当前执行'};
     const messages = live(store.currentMessages(chatKey));
-    const landed = messages.find(m => m.pos > e.through && !m.is_user && String(m.text??'').trim() && (e.avatar ? m.speaker === e.avatar : m.name === '旁白'));
+    const proof = e.reply ?? (receipt.result === 'delivered' ? receipt.reply : null);
+    const landed = !e.arrivalId && !e.handoff ? messages.find(m => m.pos > e.through && !m.is_user && String(m.text ?? '').trim() && (e.avatar ? m.speaker === e.avatar : m.name === '旁白'))
+        : proof && messageBasis(proof, sourceIndex({ messages })).state === 'live'
+        ? messages.find(m => m.pos === proof.pos && m.fp === proof.fp && m.pos === e.through + 1 && !m.is_user
+            && String(m.text ?? '').trim() && (e.avatar ? m.speaker === e.avatar : m.name === '旁白')) : null;
     const sameSource=executionSourceMatches(e,store.currentMessages(chatKey));
     if(!sameSource)return {ok:false,why:'来源版本已失效'};
     if(e.state==='delivered'&&!landed){e.state='unconfirmed';e.reason='原回复已撤回，请核对后重试';write(store,`auto_execution:${chatKey}`,all.slice(-60));}
-    if (landed) { e.state = 'delivered'; e.reply = { pos: landed.pos, fp: landed.fp }; }
+    if (landed) { e.state = 'delivered'; e.reply ??= sourceMessage(landed); }
     else if (receipt.result === 'check') return { ok: true, execution: e };
     else if (receipt.result === 'retry') {
         if(e.state==='superseded')return {ok:false,why:'旧凭据已被替换，请核对当前执行'};
@@ -218,6 +226,7 @@ export function executionResult(store, chatKey, receipt, { records = null, confi
         e.state = 'running';
     } else if (['muted','cancelled','error','unconfirmed','waiting'].includes(receipt.result)) {
         e.state = receipt.result; e.reason = String(receipt.reason ?? '').slice(0,300);
+        if (e.kind !== 'knock' && ['cancelled', 'error', 'muted'].includes(e.state) && e.arrivalId) cancelArrival(store, chatKey, e.arrivalId);
     } else return { ok: false, why: '没有找到已落下的本人消息' };
     if(missing)all.push(e);
     if (e.kind === 'knock' && !['queued','running','delivered'].includes(e.state)) {
@@ -294,7 +303,7 @@ export const pendingKnock = (store, chatKey) => {
     }
     let valid=!k||currentSource(store,chatKey,k,false);
     // 联系/口袋的来源读口已核过日期和步骤；只改措辞的同一消息沿用项目既有改稿链。
-    if(k&&!valid&&k.sourceBasis&&['contact','pocket'].includes(k.source?.type)&&k.sourceStep&&store.knockLive?.(chatKey,k)===true){
+    if(k&&!valid&&k.sourceBasis&&['contact','pocket'].includes(k.source?.type)&&k.sourceStep&&store.knockLiveFor?.(chatKey)?.(k, { phase: 'prepare' })===true){
         const rows=store.currentMessages(chatKey).filter(m=>m.pos<=k.through);
         valid=k.sourceBasis.version===sourceVersion(store,chatKey,-1)&&rows.length===k.sourceBasis.rows.length&&rows.every((m,i)=>{
             const b=k.sourceBasis.rows[i];return m.pos===b.pos&&!!m.hidden===b.hidden&&(m.boardMark??null)===b.mark&&(m.fp===b.fp||store.sameMessage?.(m.fp,b.fp));
@@ -305,7 +314,7 @@ export const pendingKnock = (store, chatKey) => {
     return blockedKnock(store,chatKey,k) ? null : k;
 };
 export const writeKnocks = (store, chatKey, knocks) => {
-    const hidden = readRaw(store, KNOCKS(chatKey), []).filter(k => !store.knockLive?.(chatKey, k));
+    const hidden = readRaw(store, KNOCKS(chatKey), []).filter(k => !store.knockLiveFor?.(chatKey)?.(k, { phase: 'prepare' }));
     write(store, KNOCKS(chatKey), [...hidden, ...knocks].slice(-KEEP));
 };
 
@@ -552,7 +561,7 @@ export async function knockAdvance(store, records, chatKey, { arrive = null, jud
     }
     if (!knocks.length) return out;
     const opts = { messages, knocks, userName, roster, relations, rowAt, parts: tl.parts, maxTurns: auto.maxTurns };
-    const stateOf = k => (k.forced ? { state: k.forced, why: '玩家点了按钮', decided: k.forcedAt ?? { pos: messages.at(-1)?.pos, fp: messages.at(-1)?.fp }, asks: [] } : knockState(k, opts));
+    const stateOf = k => (k.forced ? { state: k.forced, why: '玩家点了按钮', decided: k.forcedAt ?? { pos: messages.at(-1)?.pos, fp: messages.at(-1)?.fp }, asks: [] } : knockState(k, { ...opts, sourceLive: store.knockLiveFor?.(chatKey) }));
     const keep = [];
     for (const k of knocks) {
         if (k.entered || k.lapsed || blockedKnock(store,chatKey,k)) { keep.push(k); continue; }
@@ -592,7 +601,7 @@ export function waitingKnock(store, records, chatKey) {
     const knocks = knocksOf(store, chatKey);
     for (const k of [...knocks].reverse()) {
         if (k.entered || k.lapsed || k.forced || blockedKnock(store,chatKey,k)) continue;
-        const s = knockState(k, { messages: ctx.messages, knocks, userName: ctx.userName, roster: ctx.roster, relations: ctx.relations, rowAt: ctx.rowAt, parts: ctx.tl.parts });
+        const s = knockState(k, { sourceLive: store.knockLiveFor?.(chatKey), messages: ctx.messages, knocks, userName: ctx.userName, roster: ctx.roster, relations: ctx.relations, rowAt: ctx.rowAt, parts: ctx.tl.parts });
         if (s.state === '候着' && s.message) return { who: k.who, avatar: k.avatar ?? null, way: k.way, at: k.at, unanswered: s.unanswered };
     }
     return null;

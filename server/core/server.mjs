@@ -16,7 +16,7 @@ import { readOpeningPack, installPack, backupStFiles, findOpeningPacks, openingS
 import { profileHash } from './profile.mjs';
 import { toText, fromText, advisorContext, parseSetup, SETUP_SYSTEM, setupPrompt, KEYS_SYSTEM, keysPrompt, parseBackstoryKeys, withKeys, formMerge, formMissing, receiptLines, formRows, formUnshown, splitSource, mustCastOf, checkIntimate, intimateRows } from './setup.mjs';
 import { ensureOpening } from './opening.mjs';
-import { relinkArrivals } from './landing.mjs';
+import { cancelArrival, bindArrivalReceipts } from './landing.mjs';
 import { snapshot as snapshotRewind, checkRewind } from './rewind.mjs';
 import { isTransient, renderPrompt } from './handoff.mjs';
 import { storyYear } from './world.mjs';
@@ -248,13 +248,13 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             if (result.committed) syncDoorHandoffs(store, records, chatKey, b.doorHandoffs);
             // 开局单"人物开场状态"里要记成记录的那几类（约定、欠账、名声、手头的事）落到第一条消息上；开局单没变就不动（opening.mjs）
             if (result.committed && records) try { ensureOpening(store, records, b.chatKey); } catch {}
-            // 进场时替他记的那几笔挂到他那条回复上：删了、换了跟着看不见，又开口了跟着回来（landing.mjs）
-            if (result.committed && records) try { relinkArrivals(store, records, b.chatKey); } catch {}
+            // 只接实际保存消息的精确回执；不搬动共享记录。
+            const arrivalsBound = result.committed ? bindArrivalReceipts(store, records, chatKey, b.arrivalReceipts) : 0;
             // 删回去了：重算的和那条当时的快照比，对不上的面板上亮一行（rewind.mjs）
             if (result.committed && records) try { checkRewind(store, records, b.chatKey, result); } catch {}
             // 同步提交了就折一次：不等有人开口，世界也往前走（到日子的传开、口袋进沉、几种检查）
             if (result.committed && records) measure('advance', () => advance(store, records, b.chatKey, withPack(b.chatKey))).catch(() => {});
-            if (result.committed && result.added) worker?.kick();
+            if (result.committed && (result.added || arrivalsBound)) worker?.kick();
             // 看一眼（glance）：此刻的样子＋兴头并成一次；面板关了合并就各调各的
             if (result.committed) settings().glance?.run?.({ chatKey: b.chatKey }).catch(() => {});
             if (result.committed) settings().episodes?.run?.({ chatKey: b.chatKey }).catch(() => {});
@@ -463,6 +463,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         },
         // 进场：玩家点了"进场"，替他理一次怎么来的、为什么来、到场那一刻看得见什么（调一次便宜模型）
         'POST /v1/arrive': async b => {
+            if (typeof b.cancel === 'string') return { ok: cancelArrival(store, str(b.chatKey, 'chatKey'), b.cancel) };
             const arrive = settings().arrive;
             if (!arrive) bad('arrive_unavailable');
             return arrive({ chatKey: str(b.chatKey, 'chatKey'), who: str(b.who, 'who', { max: 80 }), mode: ['go','come','remote'].includes(b.mode) ? b.mode : 'come', way: typeof b.way === 'string' ? b.way : '', avatar: typeof b.avatar === 'string' ? b.avatar.slice(0, 200) : null, prepare: b.prepare === true });
@@ -483,6 +484,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/turn-result': b => {
             const chatKey = str(b.chatKey, 'chatKey'); store.requireChat(chatKey);
             return executionResult(store, chatKey, { id: str(b.id, 'id', { max: 1000 }), result: str(b.result, 'result', { max: 30 }), reason: String(b.reason ?? '').slice(0,300),
+                reply: b.reply && typeof b.reply === 'object' ? b.reply : null,
                 previous: b.previous && typeof b.previous==='object' ? b.previous : null,
                 ownReplies: Array.isArray(b.ownReplies) ? b.ownReplies.map(m=>({pos:m.pos,fp:m.fp,text:String(m.text??''),extra:{rp_vis:m.extra?.rp_vis}})) : [],
                 sequence: Array.isArray(b.sequence) ? b.sequence.map(m=>({pos:m.pos,fp:m.fp,hidden:!!m.hidden,boardMark:m.boardMark??null})) : null }, {records,config:settings()});

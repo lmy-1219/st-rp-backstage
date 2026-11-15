@@ -1,6 +1,6 @@
 import { freshChain } from './store.mjs';
 import { sameIdentity } from './cast.mjs';
-import { emptySegment } from './landing.mjs';
+import { sourceRows, emptySegment } from './landing.mjs';
 import { menuMatterNeedsResult } from './menu-evidence.mjs';
 
 // 记录（证据账）：每条都挂在一条消息（局＋指纹）上，带原文片段、谁的说法、当时谁在场。
@@ -167,6 +167,7 @@ export function openRecords(db) {
     };
     try { db.exec('alter table chats add column extract integer not null default 0'); } catch {}
     try { db.exec('alter table records add column keys text'); } catch {}
+    try { db.exec('alter table records add column source_basis text'); } catch {}
     try { db.exec('alter table extract_jobs add column served_model text'); } catch {}
     try { db.exec('alter table records add column money text'); } catch {}   // 钱型记录：{from, to, amount, raw, stage, every, monthly}
     try { db.exec('alter table records add column relation text'); } catch {}   // 关系型记录：{with, now}（说话人和谁、从这条起是什么关系）
@@ -187,24 +188,13 @@ export function openRecords(db) {
     try { db.exec('alter table records add column reach text'); } catch {}   // 到谁手上（用户 10/8）：东西、话、钱经别人的手送到、带给了一个不在场的人——他那边就收到了（offstage.mjs）   // 名声（D-172）：{who, among 在哪个圈子, view 他们怎么看, deal 他们往后怎么待他, keys 认这个圈子的词}   // 生活现状（N-288）：{who, kind 住处|家里|衣服|东西, now, gone, where}   // 认过的错（用户 10/5）：{with, did, cost}——对谁、错在哪、惹出了什么   // 提起的已知的事（开局单、世界书里本来就有的）：[{key, title}]
     const q = sql => db.prepare(sql);
     const now = () => new Date().toISOString();
-    // 同一条上替同一个人记了好几回的进场那几笔（他那一条删了重来、又进一次场；试玩 10/7 #286 记了三遍，中间那遍照删掉的那一版写了
-    // "还没顾上去喝热汤"）：每种只留最后一回的。以后 main.arrive 进场前先把旧的作废，这里把已经攒下的清掉；没有就不动
-    try {
-        const rows = q("select id, story_id, fp, holder_name, text from records where job_id is null and status = 'ok' and holder_name is not null").all();
-        const kindOf = r => ['来这儿', '离开这段时间', '换了住处'].find(k => String(r.text ?? '').startsWith(`${r.holder_name}${k}`));
-        const latest = new Map();
-        for (const r of rows) { const k = kindOf(r); if (k) { const key = `${r.story_id}|${r.fp}|${r.holder_name}|${k}`; if (!latest.has(key) || latest.get(key) < r.id) latest.set(key, r.id); } }
-        const retire = q("update records set status = 'void_redo', reason = '重新进场，上一回进场替他记的作废' where id = ?");
-        for (const r of rows) { const k = kindOf(r); if (k && latest.get(`${r.story_id}|${r.fp}|${r.holder_name}|${k}`) !== r.id) retire.run(r.id); }
-    } catch {}
-
     // 记录的写入统一走这里（新写入与重核共用）。
-    const COLUMNS = 'story_id, fp, job_id, type, text, about, tense, quotes, todo, todo_kind, fabricated, duration, elapsed, idea_ref, outcome, holder, holder_name, audience, keys, money, relation, wide, faction, standing, clock, unfinished, promise, lasting, known, lesson, life, rep, guess, matter, reach, status, reason, created_at';
+    const COLUMNS = 'story_id, fp, job_id, type, text, about, tense, quotes, todo, todo_kind, fabricated, duration, elapsed, idea_ref, outcome, holder, holder_name, audience, keys, money, relation, wide, faction, standing, clock, unfinished, promise, lasting, known, lesson, life, rep, guess, matter, reach, source_basis, status, reason, created_at';
     // 被拦下的记录可能对不上任何一条消息（模型报错了消息号），指纹记成 '-' 照样留痕。
     const valuesOf = (storyId, jobId, r, status, reason) => [storyId, r.fp ?? '-', jobId, r.type ?? '?', r.text ?? '', r.about ?? null, r.tense ?? null,
         JSON.stringify(r.quotes ?? []), r.todo ? 1 : 0, r.todoKind ?? null, r.fabricated ? 1 : 0, r.duration ?? null, r.elapsed ?? null,
         r.ideaRef ?? null, r.outcome ?? null, r.holder ?? '?', r.holderName ?? null, JSON.stringify(r.audience ?? []),
-        r.keys?.length ? JSON.stringify(r.keys) : null, r.money ? JSON.stringify(r.money) : null, r.relation ? JSON.stringify(r.relation) : null, r.wide?.length ? JSON.stringify(r.wide) : null, r.faction ? JSON.stringify(r.faction) : null, r.standing ? 1 : 0, r.clock ? JSON.stringify(r.clock) : null, r.unfinished ? 1 : 0, r.promise ? JSON.stringify(r.promise) : null, r.lasting ? 1 : 0, r.known?.length ? JSON.stringify(r.known) : null, r.lesson ? JSON.stringify(r.lesson) : null, r.life ? JSON.stringify(r.life) : null, r.rep ? JSON.stringify(r.rep) : null, r.guess ? 1 : 0, r.matter ? JSON.stringify(r.matter) : null, r.reach ?? null, status, reason, now()];
+        r.keys?.length ? JSON.stringify(r.keys) : null, r.money ? JSON.stringify(r.money) : null, r.relation ? JSON.stringify(r.relation) : null, r.wide?.length ? JSON.stringify(r.wide) : null, r.faction ? JSON.stringify(r.faction) : null, r.standing ? 1 : 0, r.clock ? JSON.stringify(r.clock) : null, r.unfinished ? 1 : 0, r.promise ? JSON.stringify(r.promise) : null, r.lasting ? 1 : 0, r.known?.length ? JSON.stringify(r.known) : null, r.lesson ? JSON.stringify(r.lesson) : null, r.life ? JSON.stringify(r.life) : null, r.rep ? JSON.stringify(r.rep) : null, r.guess ? 1 : 0, r.matter ? JSON.stringify(r.matter) : null, r.reach ?? null, r.source_basis ? JSON.stringify(r.source_basis) : null, status, reason, now()];
     const insertRecord = () => q(`insert into records(${COLUMNS}) values (${COLUMNS.split(',').map(() => '?').join(', ')})`);
     // 同一段里接上的、了结的（extract.verify 存的是那条在 accepted 里的位置）：落账后换成记录号。
     const withSelf = (r, ids) => [...(r.links ?? []), ...(r.selfLinks ?? []).filter(l => ids[l.at] != null).map(l => ({ to: ids[l.at], kind: l.kind }))];
@@ -333,14 +323,10 @@ export function openRecords(db) {
     // 被改掉的默认不给（那一格、规划、账本都只拿活着的）；all=true 时连它们一起给（面板上划线显示）。
     function visible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false, through = null } = {}) { return memo('visible', `${chatKey}|${status}|${type ?? ''}|${all ? 1 : 0}|${rawBasis ? 1 : 0}|${through ?? ''}`, () => readVisible(chatKey, { status, type, all, rawBasis, through }), a => [...a]); }
     function readVisible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false, through = null } = {}) {
-        const rows = q(`select r.*, min(s.pos) pos from records r
-                        join chats c on c.key = ? and c.story_id = r.story_id
-                        join chat_seq s on s.chat_key = c.key and s.fp = r.fp
-                        where r.status = ?${type ? ' and r.type = ?' : ''}${through == null ? '' : ' and s.pos <= ?'}
-                        group by r.id order by pos, r.id`).all(...[chatKey, status, ...(type ? [type] : []), ...(through == null ? [] : [through])]);
+        const rows = sourceRows(db, chatKey, { status, type, through: through ?? Infinity, rawBasis }).rows;
         const check = !rawBasis && sourceReader ? memo('sourceReader', chatKey, () => sourceReader(chatKey)) : null;
         const copies = memo('legacyMenuCopies', chatKey, () => legacyMenuCopies(db, chatKey));
-        const out = rows.filter(r => !copies.has(r.id)).map(r => ({ ...r, quotes: JSON.parse(r.quotes), audience: JSON.parse(r.audience), keys: r.keys ? JSON.parse(r.keys) : [], money: r.money ? JSON.parse(r.money) : null, relation: r.relation ? JSON.parse(r.relation) : null, clock: r.clock ? JSON.parse(r.clock) : null, wide: r.wide ? JSON.parse(r.wide) : [], faction: r.faction ? JSON.parse(r.faction) : null, promise: r.promise ? JSON.parse(r.promise) : null, known: r.known ? JSON.parse(r.known) : [], lesson: r.lesson ? JSON.parse(r.lesson) : null, life: r.life ? JSON.parse(r.life) : null, rep: r.rep ? JSON.parse(r.rep) : null, matter: r.matter ? JSON.parse(r.matter) : null })).filter(r => rawBasis || liveSource(r.known, chatKey, check));
+        const out = rows.filter(r => !copies.has(r.id)).map(r => ({ ...r, quotes: JSON.parse(r.quotes), audience: JSON.parse(r.audience), keys: r.keys ? JSON.parse(r.keys) : [], money: r.money ? JSON.parse(r.money) : null, relation: r.relation ? JSON.parse(r.relation) : null, clock: r.clock ? JSON.parse(r.clock) : null, wide: r.wide ? JSON.parse(r.wide) : [], faction: r.faction ? JSON.parse(r.faction) : null, promise: r.promise ? JSON.parse(r.promise) : null, known: r.known ? JSON.parse(r.known) : [], lesson: r.lesson ? JSON.parse(r.lesson) : null, life: r.life ? JSON.parse(r.life) : null, rep: r.rep ? JSON.parse(r.rep) : null, matter: r.matter ? JSON.parse(r.matter) : null })).filter(r => rawBasis || (liveSource(r.known, chatKey, check) && (!r.source_basis || !check || check(r.source_basis))));
         const notThere = absentMembers(chatKey);
         if (notThere) for (const r of out) if (r.job_id != null) r.audience = r.audience.filter(n => n === r.holder_name || !notThere(n, r.pos));
         if (status !== 'ok') return out;
@@ -398,18 +384,19 @@ export function openRecords(db) {
     function linksOf(chatKey, rawBasis = false, through = null) { return memo('links', `${chatKey}|${rawBasis ? 1 : 0}|${through ?? ''}`, () => readLinks(chatKey, rawBasis, through)); }
     function readLinks(chatKey, rawBasis = false, through = null) {
         const closed = new Map(), answered = new Map(), superseded = new Map(), outgoing = new Map();
-        const seen = q(`select r.id, r.type, r.idea_ref, r.outcome, r.known, l.to_id, l.kind, target.todo_kind target_kind,
-                        target.promise target_promise, target.matter target_matter, min(s.pos) pos from records r
-                        join chats c on c.key = ? and c.story_id = r.story_id
-                        join chat_seq s on s.chat_key = c.key and s.fp = r.fp
-                        left join record_links l on l.from_id = r.id
-                        left join records target on target.id = coalesce(r.idea_ref, l.to_id)
-                        where r.status = 'ok' and (r.type = '了结' or l.id is not null)
-                        ${through == null ? '' : `and s.pos <= ? and (target.id is null or exists (
-                            select 1 from chat_seq ts where ts.chat_key = c.key and ts.fp = target.fp and ts.pos <= ?))`}
-                        group by r.id, l.id order by pos, r.id`).all(...(through == null ? [chatKey] : [chatKey, through, through]));
+        const candidates = sourceRows(db, chatKey, { through: through ?? Infinity, rawBasis }).rows;
         const check = !rawBasis && sourceReader ? memo('sourceReader', chatKey, () => sourceReader(chatKey)) : null;
-        const live = seen.filter(x => rawBasis || liveSource(x.known ? JSON.parse(x.known) : [], chatKey, check));
+        const rows = candidates.filter(r => rawBasis || (liveSource(r.known ? JSON.parse(r.known) : [], chatKey, check)
+            && (!r.source_basis || !check || check(r.source_basis))));
+        const byId = new Map(rows.map(r => [r.id, r]));
+        const live = rows.flatMap(r => {
+            const links = q('select to_id, kind from record_links where from_id = ?').all(r.id);
+            return (links.length ? links : r.type === '了结' ? [{ to_id: r.idea_ref, kind: null }] : []).flatMap(link => {
+                const target = byId.get(r.idea_ref ?? link.to_id);
+                if (!target) return [];
+                return [{ ...r, ...link, target_kind: target.todo_kind, target_promise: target.promise, target_matter: target.matter }];
+            });
+        });
         for (const x of live) {
             if ((x.kind === '改掉' || x.kind === '否定') && !superseded.has(x.to_id)) superseded.set(x.to_id, { id: x.id, pos: x.pos, kind: x.kind });
             if (x.kind) outgoing.set(x.id, [...(outgoing.get(x.id) ?? []), { to: x.to_id, kind: x.kind }]);
@@ -525,8 +512,8 @@ export function openRecords(db) {
     // 程序替人补的记录（局势推演里传到他耳朵里的"听说"）：不属于哪次记账，重核不会删它；挂在给的那条消息上，删到它之前就看不见。
     // 程序记的"了结"（约定过了好几天没人再提，promises.mjs）：带上对应哪条、结果。
     // links：[{to, kind}]，这条接上的旧账（跨天收尾判"不再算数"的，用"改掉"把那条换下）
-    function addDerived({ storyId, fp, type, text, holder, holderName = null, audience = [], about = null, quotes = [], keys = [], ideaRef = null, outcome = null, life = null, duration = null, money = null, rep = null, matter = null, promise = null, known = null, lasting = false, links = [] }) {
-        const id = Number(insertRecord().run(...valuesOf(storyId, null, { fp, type, text, holder, holderName, audience, about, quotes, keys, ideaRef, outcome, life, duration, money, rep, matter, promise, known, lasting }, 'ok', null)).lastInsertRowid);
+    function addDerived({ storyId, fp, type, text, holder, holderName = null, audience = [], about = null, quotes = [], keys = [], ideaRef = null, outcome = null, life = null, duration = null, money = null, rep = null, matter = null, promise = null, known = null, lasting = false, links = [], source_basis = null }) {
+        const id = Number(insertRecord().run(...valuesOf(storyId, null, { fp, type, text, holder, holderName, audience, about, quotes, keys, ideaRef, outcome, life, duration, money, rep, matter, promise, known, lasting, source_basis }, 'ok', null)).lastInsertRowid);
         if (links.length) putLinks(storyId, id, links);
         return id;
     }
@@ -581,5 +568,5 @@ export function openRecords(db) {
         q('update chats set extract = ? where key = ?').run(on ? 1 : 0, chatKey);
     }
 
-    return { sourceRecord, setSourceLive, setPromise, correct, isDone, startJob, setServed, failJob, finishJob, replaceJobRecords, spentToday, spentTodayOn, logAssemble, assembleCalls, visible, openIdeas, openTodos, jobs, failures, recentFailures, skipped, unskip, skip, retireDerived, setKeys, setWide, setExtract, addDerived, seedsAt, retire, moveDerived };
+    return { sourceDiagnostics: chatKey => sourceRows(db, chatKey).rejected, sourceRecord, setSourceLive, setPromise, correct, isDone, startJob, setServed, failJob, finishJob, replaceJobRecords, spentToday, spentTodayOn, logAssemble, assembleCalls, visible, openIdeas, openTodos, jobs, failures, recentFailures, skipped, unskip, skip, retireDerived, setKeys, setWide, setExtract, addDerived, seedsAt, retire, moveDerived };
 }

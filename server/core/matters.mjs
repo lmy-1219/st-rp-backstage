@@ -80,7 +80,7 @@ export function talksOf(r, text) {
 // placeAt(pos)：那条消息时镜头在哪（场面表）
 // remoteAt(pos)：那条消息时隔着电话、消息的人（场面表的 remote；场记章程第 2 条）——他看不见玩家屏幕上的、身边的，不算碰上了；
 // 他自己把它拿出来的（settled_by 是他）照样算他知道
-// arrivedAt(pos, 名字)：他是不是从这条之后进的场——是就返回进场记录里"怎么来的"（电话、消息、上门……，没写是空串），不是返回 null。
+// arrivedAt(pos, 名字)：返回选中进场的 { how, source_basis }，不是则为 null；旧人工区间的字符串回调仍兼容。
 // 他牵头的消息、电话类口袋在他当面进场那一下用掉（场记章程第 11 条，试玩 10/10）：那条消息没发出去过，人直接来了——
 // 不记成"他发来过消息"的牵头，改记成他这回的来意（只他知道；说了、办了由记账了结，离场就过去了）
 export function settleMatters({ store, records, chatKey, storyId, messages, presentAt = () => [], remoteAt = () => [], placeAt = () => null, arrivedAt = () => null, holderOf = n => `name:${n}`, userName = null, player = [], camera = null, same = (a, b) => a === b }) {
@@ -129,12 +129,13 @@ export function settleMatters({ store, records, chatKey, storyId, messages, pres
         // 他自己当面进场那一下用掉的（进场记录不是电话、消息，那一刻他也不在电话那头）：记成他的来意（还没说出口的打算，只他知道）——
         // 那条消息没发生过，这件事还在他嘴里没说；说出来以后记账会记。规划写的知情不当成他那时知道的事实
         if (lead && !own && m.status === 'used' && m.settled_by && same(m.settled_by, lead)) {
-            const how = arrivedAt(at.pos, lead);
+            const arrival = arrivedAt(at.pos, lead);
+            const how = typeof arrival === 'string' ? arrival : arrival?.how;
             if (how != null && !REMOTE_WAY.test(how) && !(remoteAt(at.pos + 1) ?? []).some(n => same(n, lead))) {
                 if (!all.some(r => r.matter?.menu === m.id && r.matter.kind === INTENT)) {
                     const said = String(m.respond || m.surface || m.title || '').trim().replace(/[。．.]+$/, '');
                     const id = records.addDerived({ storyId, fp: at.fp, type: '心里', text: `${lead}本来要跟${userName ?? '对方'}说的：${said}`.slice(0, 300),
-                        holder: holderOf(lead), holderName: lead, audience: [lead], about: lead, keys: matterKeys(m, [promiseText(m)]),
+                        holder: holderOf(lead), holderName: lead, audience: [lead], about: lead, keys: matterKeys(m, [promiseText(m)]), source_basis: arrival?.source_basis ?? null,
                         matter: { menu: m.id, title: m.title ?? '', entry: entryOf(m), who: m.who, kind: INTENT, ...(m.origin ? { origin: m.origin } : {}) } });
                     made.push({ id, menu: m.id, pos: at.pos, holderName: lead, audience: [lead], intent: true });
                 }

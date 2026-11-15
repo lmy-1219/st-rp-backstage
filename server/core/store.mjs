@@ -4,10 +4,30 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { liveEpisodes } from './episodes.mjs';
-import { liveAnchors } from './landing.mjs';
+import { arrivalBasis, sourceProjection, sourceRows, liveAnchors, setSourceContext } from './landing.mjs';
 import { identifyNode, createMenuVerifier } from './held.mjs';
 import { currentMenuRecords, menuRecordVersion, shownMenuProofLive } from './menu-evidence.mjs';
 import { absentRecordMembers, legacyMenuCopies } from './records.mjs';
+
+// 按函数对象登记，不导出；只有正式绑定和统一派生 API 能创建合法的来源读口。
+const KNOCK_READERS = new WeakSet();
+export function assertKnockReader(reader, caller) {
+    if (process.env.RP_STRICT_PHASE !== '1' || reader == null) return;
+    if (KNOCK_READERS.has(reader)) return;
+    readerError(caller, '收到未带正式记号的读口；请用 store.knockLiveFor / store.deriveReader');
+}
+function readerError(caller, message) {
+    const error = new Error(`${caller.name} ${message}`);
+    Error.captureStackTrace(error, caller);
+    error.message += `；调用位置：${error.stack.split('\n')[1]?.trim() ?? caller.name}`;
+    throw error;
+}
+function requirePhase(options, caller) {
+    if (process.env.RP_STRICT_PHASE !== '1') return;
+    if (options && Object.hasOwn(options, 'phase') && ['prepare', 'fact'].includes(options.phase)) return;
+    readerError(caller, "必须显式传入 phase: 'prepare' 或 'fact'");
+}
+const registerReader = reader => { KNOCK_READERS.add(reader); return reader; };
 
 // 这几种重新规划（玩家转向、弄断、局面变了）交回以后，旧节点里还在口袋里的事一并撤下（menuOf），要用的规划者重写进新的事件（用户 10/4）。
 export const RETIRES_POCKET = new Set(['turn', 'broken', 'shift']);
@@ -385,6 +405,8 @@ export function openStore(file) {
                 .run(chat.members, chat.anchors, chat.test_slot, chat.extract_from ?? null, branchKey);
             // 记账跟着上一个窗口（D-100）：它开着，分支也开着。
             try { q('update chats set extract = ? where key = ?').run(chat.extract ?? 0, branchKey); } catch {}
+            const drafts = getRawMeta(`door_handoffs:${chatKey}`);
+            if (drafts) setMeta(`door_handoffs:${branchKey}`, drafts);
             log(branchKey, 'branch', { parent: chatKey, stChatId });
             return { status: 'branch', chatKey: branchKey, storyId: chat.story_id, enabled: true };
         });
@@ -497,7 +519,7 @@ export function openStore(file) {
             const insert = q('insert into chat_seq(chat_key, pos, fp, hidden, sent_at, mark, sw, swipes, board_mark) values (?, ?, ?, ?, ?, ?, ?, ?, ?)');
             seq.forEach((x, pos) => {
                 const old = oldRows[pos], unchanged = old?.fp === x.f;
-                const sw = unchanged && !x.swipes && old?.sw != null ? old.sw : Number.isInteger(x.w) ? x.w : null;
+                const sw = Number.isInteger(x.w) && (x.swipes || !old?.swipes || x.w < old.swipes.length) ? x.w : unchanged && old?.sw != null ? old.sw : null;
                 const swipes = x.swipes ?? (unchanged ? old?.swipes : null);
                 insert.run(chatKey, pos, x.f, x.h ? 1 : 0, x.d ?? null, validMark(x.k) ? x.k : null, sw, swipes ? JSON.stringify(swipes) : null, typeof x.b === 'string' ? x.b : null);
             });
@@ -519,9 +541,9 @@ export function openStore(file) {
             const renamed = [];
             for (let k = 0; k < Math.min(oldRows.length, seq.length); k++) if (!swipeAt(k) && oldRows[k].fp !== seq[k].f && sameMessage(seq[k].f, oldRows[k].fp)) renamed.push([oldRows[k].fp, seq[k].f]);
             if (renamed.length) {
-                const rows = q('select key, value from meta where key in (?, ?, ?) or key like ? or key like ?').all(`arrived:${chatKey}`, `arrivals:${chatKey}`, `away_plan:${chatKey}`, `settled_contact:${chatKey}:%`, `settled:${chatKey}:%`);
+                const rows = q('select key, value from meta where key in (?, ?, ?) or key like ? or key like ?').all(`away_plan:${chatKey}`, `away_plan:${chatKey}`, `away_plan:${chatKey}`, `settled_contact:${chatKey}:%`, `settled:${chatKey}:%`);
                 const relink = (value, source = false, keepStep = false) => typeof value === 'string' ? source ? value : renamed.reduce((s, [a, b]) => s.split(a).join(b), value)
-                    : Array.isArray(value) ? value.map(v => relink(v, source, keepStep)) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, relink(v, source || k === 'timeBasis' || (keepStep && k === 'sourceStep'), keepStep)])) : value;
+                    : Array.isArray(value) ? value.map(v => relink(v, source, keepStep)) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, relink(v, source || k === 'timeBasis' || k === 'source_basis' || (keepStep && k === 'sourceStep'), keepStep)])) : value;
                 for (const { key, value } of rows) {
                     let v = String(value ?? '');
                     if (/^(arrived|arrivals):/.test(key)) { try { v = JSON.stringify(relink(JSON.parse(v), false, true)); } catch {} }
@@ -693,11 +715,13 @@ export function openStore(file) {
     // 窗口当前可见的消息（按位置）。后续的抽取、选料都从这里取。
     function currentMessages(chatKey) { return memo('messages', chatKey, () => readMessages(chatKey), copyArr); }
     function readMessages(chatKey) {
-        return q(`select s.pos, s.fp, s.hidden, s.sent_at, s.mark, s.board_mark as boardMark, m.is_user, m.speaker, m.name, m.text, m.lore, m.vis
+        const drafts = fromJson(getRawMeta(`door_handoffs:${chatKey}`)) ?? [];
+        return q(`select s.pos, s.fp, s.hidden, s.sent_at, s.mark, s.sw, s.swipes, s.board_mark as boardMark, m.is_user, m.speaker, m.name, m.text, m.lore, m.vis
                   from chat_seq s join chats c on c.key = s.chat_key
                   join messages m on m.story_id = c.story_id and m.fp = s.fp
                   where s.chat_key = ? order by s.pos`).all(chatKey).map(r => {
             // 谁看得见的记号照 ST 消息的样子放回 extra.rp_vis（visibility.visOf 读这儿）
+            r.doorRevision = drafts.find(d => d.pos === r.pos && d.fp === r.fp)?.revision ?? null;
             if (!r.vis) return r;
             try { return { ...r, extra: { rp_vis: JSON.parse(r.vis) } }; } catch { return r; }
         });
@@ -866,8 +890,38 @@ export function openStore(file) {
         setMeta(`act:${chatKey}`, JSON.stringify({ last: at }));
     }
     const getRawMeta = key => memo('meta', key, () => q('select value from meta where key = ?').get(key)?.value ?? null);
-    function knockLive(chatKey, entry) {
+    // 读口绑定当前窗口和可选截点；调用方的阶段及其余来源上下文完整送入组合器。
+    function knockLiveFor(chatKey, { through = Infinity } = {}) {
+        return registerReader(function boundKnockLive(entry, options = {}) {
+            requirePhase(options, boundKnockLive);
+            return knockLive(chatKey, entry, { ...options, through: Math.min(through, options.through ?? Infinity) });
+        });
+    }
+    // 唯一合法派生：先校验原始 options，再合并，最后才查缓存。
+    // 调用方 phase 优先，through 取较严者，其余上下文完整透传。
+    function deriveReader(reader, extra = {}, { cache = null } = {}) {
+        assertKnockReader(reader, deriveReader);
+        return registerReader(function derivedKnockLive(entry, options = {}) {
+            requirePhase(options, derivedKnockLive);
+            const effective = { ...extra, ...options, through: Math.min(extra.through ?? Infinity, options?.through ?? Infinity) };
+            if (effective.phase === undefined) effective.phase = 'prepare';
+            if (!cache || !entry || typeof entry !== 'object') return reader(entry, effective);
+            // 普通对象保留跨锚点预检缓存；阶段和其余上下文仍独立。
+            const { through, ...context } = effective;
+            const explicit = entry.source_basis || entry.recs?.length || entry.menus?.length;
+            const key = JSON.stringify(explicit ? { ...context, through: String(through) } : context);
+            if (!cache.has(entry)) cache.set(entry, new Map());
+            const values = cache.get(entry);
+            if (!values.has(key)) values.set(key, reader(entry, effective));
+            return values.get(key);
+        });
+    }
+    function knockLive(chatKey, entry, options = {}) {
+        requirePhase(options, knockLive);
+        const { through = Infinity, phase = 'prepare', ...context } = options;
         if (!entry) return false;
+        if (entry.source_basis || entry.recs?.length || entry.menus?.length)
+            return sourceProjection(db, chatKey).arrival(entry, { ...context, phase, through }).state === 'live';
         const s = entry.sourceStep;
         const key = `${chatKey}|${entry.who ?? ''}|${entry.at ?? ''}|${entry.fp ?? ''}|${entry.basisDay ?? ''}|${s ? `${s.kind}:${s.id}:${s.pos}:${s.fp}:${s.day}:${s.step ?? ''}` : ''}`;
         return memo('knock_live', key, () => readKnockLive(chatKey, entry));
@@ -889,6 +943,54 @@ export function openStore(file) {
         }
         return true;
     }
+    const checkingArrivalDependencies = new Set();
+    function arrivalDependencies(chatKey, basis, { rawBasis = false, through = Infinity } = {}) {
+        const key = JSON.stringify([chatKey, basis.id, rawBasis, through]);
+        if (checkingArrivalDependencies.has(key)) return {}; // 循环来源缺证明，不能互相认回。
+        checkingArrivalDependencies.add(key);
+        try {
+            const source = basis.sourceStep;
+            // 一次当前窗口的确认时间读口供所有来源复用，避免逐条重建同一时间线。
+            const dayLive = (pos, day, part = null) => {
+                if (part != null || !Number.isFinite(day) || !confirmedDaysOf) return basisLive(chatKey, pos, day, part);
+                const at = memo('arrival_days', chatKey, () => confirmedDaysOf(chatKey));
+                return Number.isInteger(pos) && at(pos) >= day;
+            };
+            const time = rawBasis || (dayLive(basis.trigger?.pos, basis.basisDay)
+                && (!source || dayLive(source.pos, source.day, source.part)));
+            let step = true;
+            if (source?.kind === 'contact') {
+                const person = getCast(requireChat(chatKey).story_id).find(p => p.avatar === basis.avatar);
+                const current = person && fromJson(getRawMeta(`settled_contact:${chatKey}:${person.name}`));
+                step = source.step == null ? null : !!current && current.at === source.pos && sameMessage(current.fp, source.fp)
+                    && (current.basisDay ?? source.day) === source.day && current.step === source.step
+                    && (rawBasis || !current.timeBasis || timeProofLive(chatKey, current.timeBasis));
+            } else if (source?.kind === 'pocket') {
+                const h = historyOf(chatKey), plans = plansOf(chatKey, h).filter(p => p.status === 'ready');
+                const live = new Set(plans.map(p => p.id)), replaced = new Set();
+                for (const p of plans) for (const old of rerollChain(Number(getMeta(`replan_of:${p.id}`)), live)) replaced.add(old);
+                const item = q('select * from menu where id = ?').get(source.id);
+                const itemBasis = item && (fromJson(getRawMeta(`event_source:${item.id}`)) ?? sourceProjection(db, chatKey).legacyMenus.get(item.id));
+                const itemLive = item && live.has(item.plan_id) && (itemBasis?.kind === 'arrival'
+                    ? sourceProjection(db, chatKey).evaluate(itemBasis, { rawBasis, through }).state === 'live'
+                    : (item.anchor_pos == null || h.sees(item.chat_key, item.anchor_pos, item.anchor_fp)) && (!itemBasis || (rawBasis ? h.sees(chatKey, itemBasis.pos, itemBasis.fp) : sourceLive(chatKey, itemBasis))));
+                if (!itemLive || !Number.isInteger(source.step)) step = false;
+                else {
+                    readCells(item);
+                    readMenuCondition(chatKey, item, planById(item.plan_id));
+                    const steps = sourceMenuSteps(chatKey, [item], plans, { rawBasis }, h, live, replaced).steps.filter(s => s.item_id === item.id && s.pos <= through);
+                    let pocket = null, settled = null;
+                    for (const s of steps) {
+                        if (s.status === 'waiting') { pocket = null; settled = null; }
+                        if (s.status === 'pocket') pocket = s;
+                        if (!settled && ['shown', 'used', 'sunk', 'void', 'expired'].includes(s.status)) settled = s;
+                    }
+                    step = [pocket, settled].some(s => s?.id === source.step && s.pos === source.pos);
+                }
+            }
+            return { time, step };
+        } finally { checkingArrivalDependencies.delete(key); }
+    }
     function getMeta(key) {
         return memo('meta_live', key, () => readMeta(key));
     }
@@ -898,7 +1000,12 @@ export function openStore(file) {
         if (knock && value) {
             try {
                 const data = JSON.parse(value);
-                const filtered = Array.isArray(data) ? data.filter(e => knockLive(knock[2], e)) : knockLive(knock[2], data) ? data : null;
+                // 旧 arrived 是同次进场的简报镜像，本身可能没有 recs/menus。
+                // 关联及唯一性由同一个来源适配器处理，镜像不另选首项、末项或按重复数量拒绝。
+                const basis = knock[1] === 'arrived' && data && !data.source_basis
+                    ? sourceProjection(db, knock[2]).arrivalBasis(data) : null;
+                const filtered = Array.isArray(data) ? data.filter(e => knockLive(knock[2], e, { phase: 'prepare' }))
+                    : knockLive(knock[2], basis ? { ...data, source_basis: basis } : data, { phase: 'prepare' }) ? data : null;
                 return JSON.stringify(filtered);
             } catch { return value; }
         }
@@ -996,7 +1103,7 @@ export function openStore(file) {
             // 分叉的那条本身是共有的：记在它上面的（比如在它之后要的规划）也带过去（D-100 改 D-67②：从最新一条分支，不必再花一份规划钱）。
             return cut === Infinity || pos < cut;
         };
-        return { last, lastFp: seq[last] ?? null, keys: [...limits.keys()], sees };
+        return { last, lastFp: seq[last] ?? null, keys: [...limits.keys()], limits, sees };
     }
     function sourceReader(chatKey) {
         const history = historyOf(chatKey), currentFps = currentMessages(chatKey).map(m => m.fp), days = new Map();
@@ -1004,6 +1111,7 @@ export function openStore(file) {
         const dayLive = (pos, day, part = null) => part != null ? basisLive(chatKey, pos, day, part)
             : !Number.isFinite(day) || !confirmedDayOf || (Number.isInteger(pos) && (days.has(pos) ? days.get(pos) : (days.set(pos, (confirmed ??= confirmedDaysOf?.(chatKey) ?? null) ? confirmed(pos) : confirmedDayOf(chatKey, pos)), days.get(pos))) >= day);
         return source => {
+        if (source?.kind === 'arrival') return sourceProjection(db, chatKey).evaluate(source).state === 'live';
         if (!history.sees(chatKey, source.pos, source.fp) || !dayLive(source.pos, source.day, source.part)) return false;
         const current = currentFps[source.pos];
         if (source.exact && current !== source.fp) return false;
@@ -1201,14 +1309,11 @@ export function openStore(file) {
         if (!q("select 1 from sqlite_master where type = 'table' and name = 'records'").get()) return [];
         return memo('menu_evidence', `${chatKey}|${through}`, () => {
             const messages = currentMessages(chatKey).filter(m => m.pos <= through), check = sourceReader(chatKey);
-            const rows = q(`select r.*, min(s.pos) pos from records r
-                join chats c on c.key = ? and c.story_id = r.story_id
-                join chat_seq s on s.chat_key = c.key and s.fp = r.fp
-                where r.status = 'ok' and s.pos <= ? group by r.id order by pos, r.id`).all(chatKey, Number.isFinite(through) ? through : Number.MAX_SAFE_INTEGER)
+            const rows = sourceRows(db, chatKey, { through }).rows
                 .map(r => ({ ...r, quotes: fromJson(r.quotes) ?? [], audience: fromJson(r.audience) ?? [],
                     known: fromJson(r.known) ?? [], matter: fromJson(r.matter), life: fromJson(r.life), promise: fromJson(r.promise) }));
             const copies = legacyMenuCopies(db, chatKey);
-            const visible = rows.filter(r => !copies.has(r.id) && !r.known.some(k => k?.basis && !check(k.basis)));
+            const visible = rows.filter(r => !copies.has(r.id) && (!r.source_basis || check(r.source_basis)) && !r.known.some(k => k?.basis && !check(k.basis)));
             const notThere = absentRecordMembers(db, chatKey);
             if (notThere) for (const r of visible) if (r.job_id != null) r.audience = r.audience.filter(n => n === r.holder_name || !notThere(n, r.pos));
             const links = q(`select l.* from record_links l join chats c on c.story_id = l.story_id where c.key = ?`).all(chatKey);
@@ -1387,13 +1492,8 @@ export function openStore(file) {
         while (live.has(id) && !chain.has(id)) { chain.add(id); id = Number(getMeta(`replan_of:${id}`)); }
         return chain;
     }
-    function menuOf(chatKey, { speaker = null, settledOnly = false, logUpTo = null, all = false, replacing = null } = {}) {
-        const opts = { speaker, settledOnly, logUpTo, all, replacing };
-        const key = `${chatKey}|${speaker ?? ''}|${settledOnly ? 1 : 0}|${logUpTo ?? ''}|${all ? 1 : 0}|${replacing ?? ''}`;
-        return memo('menu', key, () => readMenuOf(chatKey, opts), list => list.map(m => ({ ...m })));
-    }
-    function readMenuOf(chatKey, { speaker = null, settledOnly = false, logUpTo = null, all = false, replacing = null } = {}) {
-        const h = historyOf(chatKey);
+    // 来源步骤与菜单折叠共用同一份日志存续判断，不递归读取 menuOf/visible。
+    function sourceMenuSteps(chatKey, items, plans, { speaker = null, settledOnly = false, logUpTo = null, rawBasis = false } = {}, h = historyOf(chatKey), live = new Set(plans.map(p => p.id)), replaced = new Set()) {
         const info = q(`select s.pos, m.is_user, m.speaker, m.name from chat_seq s join chats c on c.key = s.chat_key
                          join messages m on m.story_id = c.story_id and m.fp = s.fp where s.chat_key = ? order by s.pos`).all(chatKey);
         const his = hisReply;
@@ -1403,6 +1503,29 @@ export function openStore(file) {
             if (!next) return !settledOnly && (!speaker || speaker === s.by_name);
             return his(next, s.by_name);
         };
+        const ids = plans.map(p => p.id), marks = ids.map(() => '?').join(', ');
+        const messages = currentMessages(chatKey);
+        const logs = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids);
+        const proofs = new Map(logs.map(s => [s.id, fromJson(getMeta(`menu_proof:${s.id}`))]));
+        const baseLive = s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && (rawBasis || (proofs.get(s.id)?.timeBasis ? timeProofLive(chatKey, proofs.get(s.id).timeBasis) : basisLive(chatKey, s.pos, s.story_day, s.basis_part))) && replied(s);
+        const shownLive = (s, p) => shownMenuProofLive(items.find(m => m.id === s.item_id), s, p, messages);
+        const steps = logs.filter(s => {
+            if (!baseLive(s)) return false;
+            const proof = proofs.get(s.id);
+            if (!proof || (!Object.hasOwn(proof, 'condition') && !proof.conditionStep)) return true;
+            if (Object.hasOwn(proof, 'condition')) return shownLive(s, proof);
+            const parent = logs.find(p => p.id === proof.conditionStep && p.item_id === s.item_id && p.id < s.id);
+            return !!parent && baseLive(parent) && shownLive(parent, proofs.get(parent.id));
+        });
+        return { steps, logs, proofs };
+    }
+    function menuOf(chatKey, { speaker = null, settledOnly = false, logUpTo = null, all = false, replacing = null } = {}) {
+        const opts = { speaker, settledOnly, logUpTo, all, replacing };
+        const key = `${chatKey}|${speaker ?? ''}|${settledOnly ? 1 : 0}|${logUpTo ?? ''}|${all ? 1 : 0}|${replacing ?? ''}`;
+        return memo('menu', key, () => readMenuOf(chatKey, opts), list => list.map(m => ({ ...m })));
+    }
+    function readMenuOf(chatKey, { speaker = null, settledOnly = false, logUpTo = null, all = false, replacing = null } = {}) {
+        const h = historyOf(chatKey);
         const plans = plansOf(chatKey, h).filter(p => p.status === 'ready');
         if (!plans.length) return [];
         const live = new Set(plans.map(p => p.id)), replaced = new Set();
@@ -1420,19 +1543,7 @@ export function openStore(file) {
             m.cause = causeFor(chatKey, fromJson(m.cause_ref)) ? fromJson(m.cause_ref) : null;
             m.entryBasis = fromJson(m.entry_basis);
         }
-        const messages = currentMessages(chatKey);
-        const logs = q(`select l.* from menu_log l join menu m on m.id = l.item_id where m.plan_id in (${marks}) order by l.id`).all(...ids);
-        const proofs = new Map(logs.map(s => [s.id, fromJson(getMeta(`menu_proof:${s.id}`))]));
-        const baseLive = s => (s.by_plan == null || (live.has(s.by_plan) && !replaced.has(s.by_plan))) && (logUpTo == null || s.id <= logUpTo) && h.sees(s.chat_key, s.pos, s.fp) && (proofs.get(s.id)?.timeBasis ? timeProofLive(chatKey, proofs.get(s.id).timeBasis) : basisLive(chatKey, s.pos, s.story_day, s.basis_part)) && replied(s);
-        const shownLive = (s, p) => shownMenuProofLive(items.find(m => m.id === s.item_id), s, p, messages);
-        const steps = logs.filter(s => {
-            if (!baseLive(s)) return false;
-            const proof = proofs.get(s.id);
-            if (!proof || (!Object.hasOwn(proof, 'condition') && !proof.conditionStep)) return true;
-            if (Object.hasOwn(proof, 'condition')) return shownLive(s, proof);
-            const parent = logs.find(p => p.id === proof.conditionStep && p.item_id === s.item_id && p.id < s.id);
-            return !!parent && baseLive(parent) && shownLive(parent, proofs.get(parent.id));
-        });
+        const { steps, logs, proofs } = sourceMenuSteps(chatKey, items, plans, { speaker, settledOnly, logUpTo }, h, live, replaced);
         const active = plans.filter(p => !replaced.has(p.id)).at(-1);
         const current = active?.id;
         // 转向、弄断、局面变了以后的新规划：旧节点里还在口袋里的也撤下（新规划里要用的已经重写进去了）
@@ -1469,6 +1580,8 @@ export function openStore(file) {
     // 后来补进来的几件照样看它挂的那条消息还在不在
     function menuItemLive(chatKey, m, h = historyOf(chatKey)) {
         const source = getMeta(`event_source:${m.id}`);
+        const basis = fromJson(source) ?? sourceProjection(db, chatKey).legacyMenus.get(m.id);
+        if (basis?.kind === 'arrival') return sourceLive(chatKey, basis);
         return (m.anchor_pos == null || h.sees(m.chat_key, m.anchor_pos, m.anchor_fp)) && (!source || sourceLive(chatKey, fromJson(source)));
     }
     function readMenuCondition(chatKey, m, plan) {
@@ -1620,5 +1733,6 @@ export function openStore(file) {
         };
     }
 
-    return { menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    setSourceContext(db, chatKey => ({ limits: historyOf(chatKey).limits, dependencies: (basis, options) => memo('arrival_dependencies', JSON.stringify([chatKey, basis, options.rawBasis ?? false, options.through ?? null]), () => arrivalDependencies(chatKey, basis, options)) }));
+    return { deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

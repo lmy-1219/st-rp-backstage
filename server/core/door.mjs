@@ -1,5 +1,6 @@
 // 门只列人选，不替旁白或玩家决定谁此刻进场。
 import { createHash } from 'node:crypto';
+import { assertKnockReader } from './store.mjs';
 import { sameIdentity, resolveIdentity } from './cast.mjs';
 import { hasCard, callsFor, wayOf, partsBetween } from './arrival.mjs';
 import { boardFor } from './board.mjs';
@@ -125,6 +126,7 @@ const surfaceSaysWay = (surface, who, entry, label) => {
 
 // input：board、pending、roster、menu、relations、userName、recentUser、holds、timeline、messages、reach、request、anchors（隔离区间）、arrivals（进场记录）、members（群里的卡）。
 export function doorAt(input = {}) {
+    assertKnockReader(input.knockLive, doorAt);
     const { board = {}, pending = {}, roster = [], userName = '玩家', recentUser = '', timeline = {}, messages = [], reach = null, request = null } = input;
     const memory = input.playMode === 'memory';
     const names = roster.map(e => e.name);
@@ -253,7 +255,8 @@ export function capFresh(store, records, chatKey, { present = [], recentUser = '
     const now = rowAt(last), came = [];
     for (const e of entries) {
         if (!Number.isFinite(Number(e?.at)) || Number(e.at) > last + 1 || partsBetween(rowAt(Number(e.at)), now, parts) !== 0
-            || !arrivalLive(e, messages, entries, anchors) || !e.who || came.some(w => same(w, e.who))) continue;
+            // 已到场次数是交付事实；本人首回的 prepare 不能提前占掉另一人的供给名额。
+            || !arrivalLive(e, messages, entries, anchors, store.knockLiveFor?.(chatKey), 'fact') || !e.who || came.some(w => same(w, e.who))) continue;
         came.push(e.who);
     }
     const paceValue = paceFor(store, chatKey);
@@ -312,7 +315,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const justBack = store.absences?.(chatKey)?.at(-1)?.from_pos;
     const reach = contacts?.enabled === false || !recentUser || (justBack != null && lastPos - justBack <= 8) ? null
         : already ? reachable.find(p => p.person === already.person) : pickContact({ people: reachable, dayOf, lastPos, offers, minGap: contacts?.minGap ?? 16 });
-    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, visible, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, arrivalHistory, knockLive: e => store.knockLive?.(chatKey, e), knocks, members, pace: paceFor(store, chatKey) };
+    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, visible, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, arrivalHistory, knockLive: store.knockLiveFor?.(chatKey), knocks, members, pace: paceFor(store, chatKey) };
     const key = `${chatKey}:${createHash('sha1').update(JSON.stringify(input)).digest('hex')}`;
     let cache = caches.get(store);
     if (!cache) caches.set(store, cache = new Map());

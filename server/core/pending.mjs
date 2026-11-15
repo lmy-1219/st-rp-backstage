@@ -1,6 +1,7 @@
 // 事账：把约定、要求、规矩、钱、口袋、去办和等回音折成一处。
 // 八条规则分别对应约定、要求、规矩、钱、口袋、去办、等回音和来源关系。
 import { createHash } from 'node:crypto';
+import { assertKnockReader } from './store.mjs';
 import { validAwayPlan } from './arrival.mjs';
 import { promiseOf, stageOf, settledTwins, settledByDoing, relatedTo, sameOccasion, LAPSED } from './promises.mjs';
 import { expiredTodo, timedOut, askedOther, answeredTodo, recordKnownTo } from './recall.mjs';
@@ -187,6 +188,7 @@ function matterItems(records) {
 // 时间结算替在外头的人写下的"要联系"（D-174 第 4 步乙）：排着等旁白递；他接上了（或被"先不"了两回）就用掉；结算那条消息删了就没这回事
 // 写下以后他自己进了场（landing.enteredSince：隔离区间、进场记录）也算用掉：anchors、arrivals 不给就只认点了门
 function contactItems(contacts, messages, { anchors = null, arrivals = [], knockLive = null } = {}) {
+    assertKnockReader(knockLive, contactItems);
     const out = [];
     for (const c of arr(contacts)) {
         // 用掉那一下挂在哪条上（landing.contactUsed）：那条删了、进场后他那条回复没了，这条联系回来
@@ -201,6 +203,7 @@ function contactItems(contacts, messages, { anchors = null, arrivals = [], knock
 }
 
 export function foldPending(input = {}) {
+    assertKnockReader(input.knockLive, foldPending);
     const same = input.same ?? ((a, b) => a === b);
     const records = [...(input.records ?? [])].sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
     const items = [...promiseItems(records, input.timeline ?? {}, same), ...todoItems(records, input.messages ?? [], input.board ?? {}, input.timeline ?? {}, input.userName, same, input.boardAt ?? null, input.rosterNames ?? []), ...ruleItems(records, input.timeline ?? {}), ...moneyItems(records, input.named ?? []), ...menuItems(input.menu), ...errandItems(input.awayPlans, input.board), ...contactItems(input.contacts, input.messages ?? [], { anchors: input.anchors ?? null, arrivals: input.arrivals ?? [], knockLive: input.knockLive }), ...matterItems(records)];
@@ -254,7 +257,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     const rel = store.relationsOf?.(chat.story_id);
     const relation = rel ? normalizeRelations(rel) : null;
     const same = (a, b) => sameName(a, b, rosterNames) || (!!relation && !!personOf(relation, a, rosterNames) && personOf(relation, a, rosterNames) === personOf(relation, b, rosterNames));
-    awayPlans = Object.values(awayPlans).map(p => validAwayPlan(p, messages, source => store.sourceLive?.(chatKey, source) !== false)).filter(Boolean);
+    awayPlans = Object.values(awayPlans).map(p => validAwayPlan(p, messages, source => store.sourceLive?.(chatKey, source) !== false, store.knockLiveFor?.(chatKey))).filter(Boolean);
     // 结算写下的"要来联系"：按名册认人——以前有用别名记下的（试玩 10/12：等着没人接那条路写成了短名，名册里是全名，
     // 认不出"他后来自己进了场""这条用掉了"，一条早该作废的消息每轮都挂着）；同一个人有几笔，留最新那笔
     const contacts = [];
@@ -275,7 +278,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     let anchors = null, arrivals = [];
     try { anchors = meta.anchors ? JSON.parse(meta.anchors) : null; } catch {}
     try { arrivals = JSON.parse(meta.arrivals || '[]') ?? []; } catch {}
-    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, knockLive: e => store.knockLive?.(chatKey, e), board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, named: namedParties(store.getCast?.(chat.story_id) ?? [], userName), same, homes: lifeSheet(visible).homes });
+    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, named: namedParties(store.getCast?.(chat.story_id) ?? [], userName), same, homes: lifeSheet(visible).homes });
     pendingCache.set(key, value);
     while (pendingCache.size > 32) pendingCache.delete(pendingCache.keys().next().value);
     return value;

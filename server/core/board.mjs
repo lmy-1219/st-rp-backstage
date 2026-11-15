@@ -9,6 +9,7 @@ import { arrivalLive, emptySegment } from './landing.mjs';
 import { foldState } from './state.mjs';
 import { sameIdentity, resolveIdentity } from './cast.mjs';
 import { knockState } from './knock.mjs';
+import { assertKnockReader } from './store.mjs';
 
 const CAMERA_NAME = '旁白';   // 镜头那张卡的名字（slot.mjs 也是这个）
 const MOVE_WORDS = '走进|走到|进了|进入|来到|到了|回到|下楼到|下楼找到|上楼到|推门进|拐进|踏进|钻进|跟着[^，。；！？,;!?]{0,12}进了';
@@ -79,12 +80,14 @@ function homeFor(homes, place) {
 }
 
 // inGroup：他在群里开着口——扩展带来的名单里有他；没带名单（后台同步那次）就看隔离区间开着没有
-function validRemote(arrived, messages, inGroup, notes = [], others = []) {
+function validRemote(arrived, messages, inGroup, notes = [], others = [], sourceLive = null) {
+    assertKnockReader(sourceLive, validRemote);
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? null;
     return !!arrived && inGroup
         && isRemote(arrived.how) && arrived.fp
         && Number.isInteger(Number(arrived.at))
-        && messages[Number(arrived.at) - 1]?.fp === arrived.fp
+        && (arrived.source_basis || arrived.recs?.length || arrived.menus?.length
+            ? arrivalLive(arrived, messages, [arrived], null, sourceLive) : messages[Number(arrived.at) - 1]?.fp === arrived.fp)
         // 接通以后两人当面碰上了：从那条起他就在这儿（那条删了又回到远程）；正文里的样子，或"此刻的样子"读出来的位置
         && !metInPerson(messages.filter(m => (m.pos ?? 0) >= Number(arrived.at)), { who: arrived.who ?? arrived.name, userName, since: Number(arrived.at), others,
             notes: notes.filter(n => messages.some(m => m.pos === n.pos)) });
@@ -99,6 +102,7 @@ function wayOf(arrived) {
  * 输入是 boardAt 的数据对象，输出包含 time、camera、people、fast 四段。
  */
 export function boardAt(input = {}) {
+    assertKnockReader(input.knockLive, boardAt);
     const messages = [...(input.messages ?? [])].sort((a, b) => (number(a.pos) ?? 0) - (number(b.pos) ?? 0));
     const last = messages.at(-1) ?? {};
     const pos = number(input.pos) ?? number(last.pos) ?? 0;
@@ -164,7 +168,7 @@ export function boardAt(input = {}) {
     // 叩门作废了的（他发来消息、到了门口，玩家没理，knock.mjs）：那次进场不算——他没进过场，开的区间也不算在场（方案 自动进离场与调度）
     const lapsedKnocks = values(input.knocks).filter(k => k?.lapsed && k.who);
     // 进场挂在他进场后那条回复上（landing.arrivalLive）：他那条删了、后面换成了别人在说，这次进场就不算
-    const liveEntry = e => input.knockLive?.(e) !== false && !(e?.knock && lapsedKnocks.some(k=>matches(k,e) && number(k.at)===number(e.at))) && arrivalLive(e, messages, entries, input.anchors);
+    const liveEntry = e => input.knockLive?.(e, { phase: 'prepare' }) !== false && !(e?.knock && lapsedKnocks.some(k=>matches(k,e) && number(k.at)===number(e.at))) && arrivalLive(e, messages, entries, input.anchors, input.knockLive);
     const liveSegment = (segment, person) => {
         if (!segment) return null;
         const mine = entries.filter(e => matches(e, person));
@@ -192,7 +196,7 @@ export function boardAt(input = {}) {
         const arrived = meta && (!mineIn || (Number(meta.at) === Number(mineIn.at) && meta.fp === mineIn.fp)) ? meta : mineIn?.how ? { ...mineIn, who: mineIn.who ?? person.name } : null;
         // 开局单里开场不在场的那份去向（opening.mjs）：名单里有他（人就在这儿）就不算
         const planned = planFor(input.awayPlans, person, scope);
-        const plan = planned?.seed ? (messages.some(m => m.fp === planned.fp) ? planned : null) : validAwayPlan(planned, messages, input.sourceLive);
+        const plan = planned?.seed ? (messages.some(m => m.fp === planned.fp) ? planned : null) : validAwayPlan(planned, messages, input.sourceLive, input.knockLive);
         const leave = lastLeave(own, avatar, pos + 1);
         const soloHere = solo?.avatar === avatar && solo.name === person.name;
         // 单聊身份只为仍有效的这次联系补参与资格；较新的去向或离场已经结束它。
@@ -202,7 +206,7 @@ export function boardAt(input = {}) {
         const inGroup = !!segment || soloRemote || (!!arrived && liveEntry(arrived)
             && (leave == null || leave < Number(arrived.at))
             && (!plan || plan.seed || (plan.at != null && Number(plan.at) < Number(arrived.at))));
-        const remote = validRemote(arrived, messages, inGroup && (leave == null || Number(arrived?.at) > leave) && (!plan || plan.seed || Number(plan.at) < Number(arrived?.at)), input.stateNotes ?? [], roster.map(p => p.name));
+        const remote = validRemote(arrived, messages, inGroup && (leave == null || Number(arrived?.at) > leave) && (!plan || plan.seed || Number(plan.at) < Number(arrived?.at)), input.stateNotes ?? [], roster.map(p => p.name), input.knockLive);
         let status = 'never';
         let since = null;
         let way = null;
@@ -247,7 +251,7 @@ export function boardAt(input = {}) {
         }
         const waiting = values(input.knocks).filter(k => matches(k, person) && !k.entered && !k.lapsed && !k.forced).at(-1);
         if (waiting && waiting.way === '上门' && (since == null || Number(since) <= Number(waiting.at))) {
-            const state = knockState(waiting, { messages, knocks: values(input.knocks), roster, relations: input.relations, rowAt: p => rowAt(timeline,p,fallbackRow) });
+            const state = knockState(waiting, { sourceLive: input.knockLive, messages, knocks: values(input.knocks), roster, relations: input.relations, rowAt: p => rowAt(timeline,p,fallbackRow) });
             if (state.state === '候着' && state.message) { status = 'remote'; way = '上门'; since = waiting.at; }
         }
         const departure = number(since);
@@ -406,15 +410,13 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
     const sourceCurrent=e=>factCurrent(e,{messages:all,roster,identityChoices});
     const done = new Map();
     const liveByEntry = new WeakMap();
-    const knockLive = e => {
-        if (!e || typeof e !== 'object') return store.knockLive?.(chatKey, e);
-        if (!liveByEntry.has(e)) liveByEntry.set(e, store.knockLive?.(chatKey, e));
-        return liveByEntry.get(e);
-    };
     const at = (anchor = null) => {
         const messages = uptoAnchor(all, anchor);
         const key = `${messages.length}|${messages.at(-1)?.fp ?? ''}`;
         if (done.has(key)) return done.get(key);
+        const through = messages.at(-1)?.pos ?? -1;
+        const readKnock = store.knockLiveFor?.(chatKey, { through });
+        const knockLive = readKnock == null ? null : store.deriveReader(readKnock, { through }, { cache: liveByEntry });
         const value = boardAt({ messages, marks: messageMarks(messages), stateNotes, anchors, roster, relations, solo, identityChoices, group: !!chat.group_id, arrived, arrivals, knocks, knockLive, came, departures, sourceCurrent, awayPlans, sourceLive: source => store.sourceLive?.(chatKey, source) !== false, recentUser, timeline: timeline ?? {}, homes });
         done.set(key, value);
         return value;

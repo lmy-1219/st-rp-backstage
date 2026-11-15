@@ -1773,7 +1773,9 @@ async function syncOnce(force = false, light = false) {
             const payload = {
                 chatKey: state.chatKey, seq, force, members: members(c),
                 anchors: c.chatMetadata?.contextIsolation?.anchors ?? null,
-                doorHandoffs,
+                // 历史交接稿本也同步；执行亮门仍使用后台原有四楼窗口。
+                doorHandoffs: c.chat.flatMap((m, pos) => (buildSequence([m], fallbackAvatar(c), null, state.boardCast ?? []).doorHandoffs ?? []).map(d => ({ ...d, pos }))),
+                arrivalReceipts: c.chat.flatMap((m, pos) => m.extra?.rpeArrival ? [{ ...m.extra.rpeArrival, pos }] : []),
             };
             setStage(state, 'sync', '进行中', '提交消息');
             let result = await api('sync', payload);
@@ -3524,14 +3526,21 @@ async function runScheduled(q, prepare) {
         if(!settings().enabled||state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==chat||snapshot()!==prefix)throw Error('来源或聊天已改变，请重新核对');
         if(roles!==undefined&&roleSnapshot()!==roles)throw Error('卡身份或档位已改变，请重新核对');
     };
-    const landed=()=>chat.slice(length).find(m=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()&&(q.avatar?speakerOf(m,fallbackAvatar(c))===q.avatar:m.name===q.who));
+    const landed=()=>{const m=chat[length];return m&&!m.is_user&&!m.is_system&&String(m.mes??'').trim()&&(q.avatar?speakerOf(m,fallbackAvatar(c))===q.avatar:m.name===q.who)?m:null;};
     const report=async(result,reason)=>{
         guard();auto.executionStatus={who:q.who,result,reason,id};
+        const saved = result === 'delivered' ? landed() : null;
+        const reply = saved ? { pos: length, fp: fingerprintMessage(saved, speakerOf(saved, fallbackAvatar(c))), sw: saved.swipe_id ?? 0, sentAt: saved.send_date ?? null } : null;
+        if (saved && q.execution?.arrivalId) {
+            (saved.extra ??= {}).rpeArrival = { ...reply, id: q.execution.arrivalId, avatar: q.avatar, execution: q.execution.id };
+            await c.saveChat?.(); guard();
+        }
+
         journal[id]={...journal[id],result,reason,avatar:q.avatar,at:length,q};
         await c.saveMetadata();guard();
         if(q.execution){
             if(await syncNow(true)===false)throw Error('执行结果尚未同步，请先核对消息');guard();
-            const r=await api('turn-result',{chatKey,id:q.execution.id,result,reason});guard();
+            const r=await api('turn-result',{chatKey,id:q.execution.id,result,reason,reply});guard();
             if(!r.ok)throw Error(r.why||'执行回执未确认');
         }
         render();
@@ -4143,7 +4152,7 @@ async function enterChar(who, avatar = null, opts = {}) {
     const anchor=()=>c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]??null;
     const before=copy(anchor()),wasMember=group.members.includes(ch.avatar),wasDisabled=!!group.disabled_members?.includes(ch.avatar);
     const manualMute=copy(c.chatMetadata.rpeManualMuted?.[ch.avatar]),length=chat.length;
-    let prepared=null,preparedMute=null,failed=true;
+    let prepared=null,preparedMute=null,arrivalId=null,failed=true;
     const release=acquireMemberChange(ch.avatar);
     try {
         if (!group.members.includes(ch.avatar)) await run(`/member-add ${ch.avatar}`);
@@ -4162,12 +4171,22 @@ async function enterChar(who, avatar = null, opts = {}) {
         const arrived=await arriveNow(ch, opts);
         if(!here())return false;
         if(!arrived||arrived.ok===false)throw Error(arrived?.why||'后台未确认进场，请重新核对身份与来源后重试');
+        arrivalId=arrived.source_basis?.id??null;
         g = currentGroup(ctx()); at = g?.members.indexOf(ch.avatar) ?? -1;
         if (at >= 0) await run(`/trigger await=true ${at}`);
+        if (here() && arrivalId) {
+            const m = chat[length];
+            if (!m || m.is_user || m.is_system || !String(m.mes??'').trim() || speakerOf(m, fallbackAvatar(c)) !== ch.avatar) throw Error('没有保存本次本人回复，请重新核对后再试');
+            (m.extra ??= {}).rpeArrival = { id: arrivalId, avatar: ch.avatar,
+                fp: fingerprintMessage(m, ch.avatar), sw: m.swipe_id ?? 0, sentAt: m.send_date ?? null };
+            await c.saveChat?.();
+            await syncNow(true);
+        }
         failed=false;
         return true;
     } catch(error) {
         if(here()){state.note=`进场未完成：${String(error.message).slice(0,120)}；可重新认卡或同步后再试。`;globalThis.toastr?.warning(state.note,'RP：幕后');render();}
+        if(here()&&arrivalId)try { await api('arrive',{chatKey,cancel:arrivalId}); } catch(cancelError) { console.warn('进场准备撤销未确认',cancelError); }
         return false;
     } finally {
         // 区间和消息仍属本次准备时才能撤回；静音只比较当前结果与准备结果。

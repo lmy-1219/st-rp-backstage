@@ -5,6 +5,7 @@ import { personWord, renderPronouns } from './pronoun.mjs';
 // 进场时便宜模型替他理一次"怎么来的、为什么来、到场那一刻看得见什么"→ 他头一回开口的那一格里带上（之前说的话他没听见）。
 // 题材无关：人名、地方都来自聊天和名册。
 import { arrivalLive, emptySegment } from './landing.mjs';
+import { assertKnockReader } from './store.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
 
 // 名册里有卡的人（头像是图片文件；"face:"开头的是没卡的新面孔；镜头那张卡不算）
@@ -206,11 +207,14 @@ export function metInPerson(messages, { who, names = [], userName = null, notes 
 // 返回名字集合；要分电话还是消息用 remoteWayAt
 export function remoteAt(pos, opts = {}) { return new Set(remoteWayAt(pos, opts).keys()); }
 // 同上，返回 Map：名字 → '电话' | '消息'（隔着电话的，话筒收得到那头所有说出口的话；隔着消息的只收得到玩家对他说的、他自己说的）
-export function remoteWayAt(pos, { arrivals = [], anchors = null, members = [], messages = null, userName = null, notes = [] } = {}) {
+export function remoteWayAt(pos, { arrivals = [], anchors = null, members = [], messages = null, userName = null, notes = [], knockLive = null } = {}) {
+    assertKnockReader(knockLive, remoteWayAt);
     const out = new Map();
     const entries = (Array.isArray(arrivals) ? arrivals : Object.values(arrivals ?? {})).filter(e => e && Number.isFinite(Number(e.at)));
     const list = messages ? [...messages].sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0)) : null;
-    const fpOk = e => !list || list.find(m => m.pos === Number(e.at) - 1)?.fp === e.fp;
+    const fpOk = e => e.source_basis || e.recs?.length || e.menus?.length
+        ? arrivalLive(e, list ?? [], entries, anchors, knockLive)
+        : !list || list.find(m => m.pos === Number(e.at) - 1)?.fp === e.fp;
     const user = userName ?? (list ? [...list].reverse().find(m => m.is_user && m.name)?.name ?? null : null);
     const marks = (list ?? []).filter(m => m.pos <= pos && m.boardMark).map(m => {
         try { const v = typeof m.boardMark === 'string' ? JSON.parse(m.boardMark) : m.boardMark; return v?.people ? { pos: Number.isFinite(Number(v.pos)) ? Number(v.pos) : m.pos, people: v.people } : null; } catch { return null; }
@@ -271,11 +275,12 @@ export function awaySpan(a, b, timeScale = DAY) {
 }
 
 // 完成标记也认结算那条的指纹：删改后恢复成原来的去办，不让旧结果留在事账里。
-export function validAwayPlan(plan, messages, sourceLive = null) {
+export function validAwayPlan(plan, messages, sourceLive = null, knockLive = null) {
+    assertKnockReader(knockLive, validAwayPlan);
     // 记这份去向时的最后一条删了：这份去向就没了（试玩 10/7：删掉的那一版里记的"回去喝汤"一直挂着，进场那份照它写了"还没顾上去喝热汤"）
     if (plan?.fp && Number.isFinite(Number(plan.at)) && !messages.some(m => m.pos === Number(plan.at) - 1 && m.fp === plan.fp)) return null;
     // 他人到场、用掉了这份去向的那次进场还算数（他那条回复还在、或者正在写）：没了；那次进场不算了，去向回来（方案 删消息等于没发生过）
-    if (plan?.dropped && arrivalLive(plan.dropped, [...messages].sort((a, b) => a.pos - b.pos))) return null;
+    if (plan?.dropped && arrivalLive(plan.dropped, [...messages].sort((a, b) => a.pos - b.pos), [], null, knockLive)) return null;
     if (!plan?.errands) return plan;
     return { ...plan, errands: plan.errands.map(e => e?.settled && (!messages.some(m => m.pos === e.settled.pos && m.fp === e.settled.fp)
         || sourceLive?.(e.settled) === false) ? (e.text ?? { ...e, done: undefined, note: undefined, settled: undefined }) : e) };

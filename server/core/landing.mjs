@@ -3,7 +3,11 @@
 // 那条还在就算数，删了、换掉了就撤。这里是进场那份、"要联系"用掉的那一下、他后来自己进了场（enteredSince）；口袋那几步在 store.menuOf（pending），隔离区间在 liveAnchors。
 // 题材无关。
 
+import { randomUUID, createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { projectSource, sourceIndex, sourceMessage } from './source-basis.mjs';
 import { sameIdentity, messageIsPerson, resolveIdentity } from './cast.mjs';
+import { assertKnockReader } from './store.mjs';
 const num = v => (Number.isFinite(Number(v)) ? Number(v) : null);
 const scopeOf = (messages, entries) => [...entries.map(e => ({ name: e.who ?? e.name, avatar: e.avatar })),
     ...messages.filter(m => !m.is_user && /\.(png|webp|jpe?g|gif)$/i.test(m.speaker ?? '')).map(m => ({ name: m.name, avatar: m.speaker }))].filter(p => p.avatar && p.name);
@@ -25,41 +29,187 @@ export const emptySegment = s => s?.to != null && num(s.to) != null && num(s?.fr
 // 人移出去，进场记录还挂在进场前那条上，门上就再也不挂他了
 const leftSilent = (e, anchors) => { const segs = (e?.avatar ? anchors?.[e.avatar]?.segments ?? [] : []).filter(s => num(s?.from) === num(e.at)); return segs.length > 0 && emptySegment(segs.at(-1)); };
 
-// 进场还算不算：挂的那条（进场前最后一条）还在；而且他进场以后还没有别的消息（他正在写）、或者后面有他开口的。
-// 他那条删了、后面换成了别人在说：这次进场就不算（场面表不认这次进场开的区间）；他一句没说就被移出去了（anchors 给了才认）：也不算
-export function arrivalLive(e, messages, entries = [], anchors = null) {
+// 新来源只认本次保存版本。旧的纯消息/人工区间仍保留各自契约。
+export function arrivalLive(e, messages, entries = [], anchors = null, sourceLive = null, phase = 'prepare') {
+    assertKnockReader(sourceLive, arrivalLive);
+    // 明确的进场产物必须拿到当前窗口的完整结论；缺上下文不能自造无限分支，
+    // unknown 也不能落回“后来本人说过话”。独立人工区间保留原契约。
+    if (e?.source_basis || e?.recs?.length || e?.menus?.length)
+        return sourceLive?.(e, { through: messages.at(-1)?.pos ?? -1, phase }) === true && !leftSilent(e, anchors);
     const at = num(e?.at);
     if (at == null || messages[at - 1]?.fp !== e.fp) return false;
     if (replyOf(e, messages, entries)) return true;
     return messages.length <= at && !leftSilent(e, anchors);
 }
 
-// 进场时替他记的那几笔（来由、这段时间、换了住处）挂到他那条回复上：回复删了、换了，它们跟着看不见；他又开口了，跟着回来。
-// 每次同步跑一遍（只动 arrivals 里记了 recs 的那几次）。没有回复、他正在写：挂在进场前那条上；后面换成了别人在说：挂到一个看不见的指纹上
-export const GONE = 'gone:';
-export function relinkArrivals(store, records, chatKey) {
-    if (!records?.moveDerived && !store.moveMenu) return 0;
-    let entries = [];
-    try { entries = JSON.parse((store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch { return 0; }
-    if (!Array.isArray(entries) || !entries.some(e => e?.recs?.length || e?.menus?.length)) return 0;
-    const messages = store.currentMessages(chatKey);
-    const chat = store.requireChat(chatKey), storyId = chat.story_id;
-    let anchors = null; try { anchors = JSON.parse(chat.anchors ?? 'null'); } catch {}
-    let moved = 0;
-    entries.forEach((e, i) => {
-        if (!(e?.recs?.length || e?.menus?.length) || !e.fp) return;
-        const at = num(e.at);
-        // 同一条上又进了一次场（他那条删了重来）：前一次替他记的不再算，只留最后一次的
-        const again = entries.slice(i + 1).some(x => x && isSame(x, e, scopeOf(messages, entries)) && num(x.at) === at && x.fp === e.fp);
-        const anchored = !again && store.knockLive?.(chatKey, e) !== false && at != null && messages[at - 1]?.fp === e.fp;
-        const reply = anchored ? replyOf(e, messages, entries) : null;
-        const target = reply?.fp ?? (anchored && messages.length <= at && !leftSilent(e, anchors) ? e.fp : `${GONE}${e.fp}`);
-        if (e.recs?.length) moved += records.moveDerived({ storyId, ids: e.recs, fp: target });
-        // 进场时顺带排给别人的那件（main.arrive 的"提前"）：同样挂在他那条回复上
-        if (e.menus?.length && store.moveMenu) moved += store.moveMenu({ ids: e.menus, pos: reply?.pos ?? at - 1, fp: target });
-    });
-    return moved;
+const json = (v, fallback = null) => { try { return JSON.parse(v ?? 'null') ?? fallback; } catch { return fallback; } };
+// 存储适配器只取原始数据；判定交给纯模块，不回调 menuOf/visible/时间线。
+const projections = new WeakMap();
+const contexts = new WeakMap();
+export function setSourceContext(db, context) { contexts.set(db, context); projections.delete(db); }
+export function sourceProjection(db, chatKey) {
+    const version = db.prepare('select total_changes() n').get().n;
+    let cache = projections.get(db);
+    if (!cache || cache.version !== version) projections.set(db, cache = { version, values: new Map() });
+    if (!cache.values.has(chatKey)) cache.values.set(chatKey, readSourceProjection(db, chatKey));
+    return cache.values.get(chatKey);
 }
+function readSourceProjection(db, chatKey) {
+    const q = sql => db.prepare(sql);
+    const chat = q('select * from chats where key = ?').get(chatKey);
+    const chats = q('select key, parent_key, branch_len from chats where story_id = ?').all(chat.story_id);
+    const context = contexts.get(db)?.(chatKey);
+    const limits = context?.limits ?? new Map();
+    const meta = key => json(q('select value from meta where key = ?').get(key)?.value);
+    const drafts = meta(`door_handoffs:${chatKey}`) ?? [];
+    const messages = q(`select s.pos, s.fp, s.hidden, s.sw, s.sent_at, m.is_user, m.speaker from chat_seq s
+        join chats c on c.key = s.chat_key join messages m on m.story_id = c.story_id and m.fp = s.fp where s.chat_key = ? order by s.pos`).all(chatKey)
+        .map(m => ({ ...m, doorRevision: drafts.find(d => d.pos === m.pos && d.fp === m.fp)?.revision ?? null }));
+    const entries = chats.flatMap(c => (meta(`arrivals:${c.key}`) ?? []).map(e => ({ ...e, origin: c.key })));
+    const legacy = new Map(), legacyMenus = new Map(), legacyEntries = new Map(), groups = new Map();
+    const entryKey = e => JSON.stringify([e.origin ?? chatKey, e.avatar, Number(e.at), e.fp]);
+    for (const e of entries) {
+        if (e.source_basis || !(e.recs?.length || e.menus?.length)) continue;
+        const key = entryKey(e), group = groups.get(key) ?? [];
+        if (!group.some(x => isDeepStrictEqual(x, e))) group.push(e);
+        groups.set(key, group);
+    }
+    const ambiguous = e => ({ version: 1, kind: 'arrival', id: `legacy:${entryKey(e)}`, origin: e.origin ?? chatKey,
+        avatar: e.avatar, trigger: { pos: Number(e.at) - 1, fp: e.fp }, incomplete: '旧进场关联不唯一' });
+    for (const [key, group] of groups) {
+        const e = group[0];
+        const executions = meta(`auto_execution:${e.origin}`) ?? [];
+        const candidates = executions.filter(x => x.avatar === e.avatar && x.through + 1 === Number(e.at) && x.reply && x.state === 'delivered' && x.handoff);
+        const exec = candidates.length === 1 ? candidates[0] : null;
+        const handoff = exec?.handoff;
+        const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+        const sourceMatches = exec?.source && (exec.source.startsWith('v2:')
+            ? exec.source === 'v2:' + digest([exec.through, messages.filter(m => m.pos <= exec.through).map(m => [m.pos, m.fp, !!m.hidden])])
+            : exec.source === digest([exec.through, e.fp]));
+        const incomplete = candidates.length > 1 ? '旧执行关联不唯一'
+            : !sourceMatches || handoff?.pos !== Number(e.at) - 1 || handoff?.fp !== e.fp || handoff?.avatar !== e.avatar ? '旧执行与进场来源不一致或缺证明'
+            : !handoff?.revision || !Number.isInteger(exec?.reply?.sw) ? '旧关联缺原交接稿本或回复稿本凭据' : null;
+        const basis = group.length > 1 ? ambiguous(e) : { version: 1, kind: 'arrival', id: exec?.id ?? `legacy:${e.origin}:${e.at}:${e.fp}`, origin: e.origin, avatar: e.avatar,
+            trigger: { pos: Number(e.at) - 1, fp: e.fp }, sourceStep: e.sourceStep ?? null, handoff: handoff ?? null,
+            basisDay: e.basisDay ?? null, delivery: exec?.reply ?? null, incomplete };
+        legacyEntries.set(key, basis);
+        // 一个旧产物也只能关联一个来源。冲突使涉及的整次来源一起 unknown，不能各口挑首项或末项。
+        for (const [map, field] of [[legacy, 'recs'], [legacyMenus, 'menus']]) for (const id of new Set(group.flatMap(x => x[field] ?? []))) {
+            const previous = map.get(id);
+            if (previous && previous !== basis) previous.incomplete = basis.incomplete = '旧产物关联不唯一';
+            map.set(id, previous ?? basis);
+        }
+    }
+    const seen = new Set();
+    const adapted = entries.filter(e => {
+        if (!limits.has(e.origin)) return false;
+        if (e.source_basis) return true;
+        const key = entryKey(e);
+        if (seen.has(key)) return false;
+        seen.add(key); return true;
+    }).map(e => ({ ...e, source_basis: e.source_basis ?? legacyEntries.get(entryKey(e)) }));
+    const linkedBases = new Map();
+    for (const e of entries) {
+        const basis = e.source_basis ?? legacyEntries.get(entryKey(e));
+        if (!basis) continue;
+        const key = entryKey(e), previous = linkedBases.get(key);
+        linkedBases.set(key, !previous || isDeepStrictEqual(previous, basis) ? basis : ambiguous(e));
+    }
+    const arrivalBasis = entry => entry.source_basis ?? ((entry.recs?.length || entry.menus?.length)
+        ? legacyEntries.get(entryKey(entry)) : linkedBases.get(entryKey(entry))) ?? null;
+    const index = sourceIndex({ messages, chatKey, limits, arrivals: adapted });
+    const evaluate = (basis, options = {}) => {
+        const dependencies = new Map();
+        const related = adapted.filter(e => e.source_basis?.origin === basis?.origin && e.avatar === basis?.avatar
+            && e.source_basis?.trigger?.pos === basis?.trigger?.pos && e.source_basis?.trigger?.fp === basis?.trigger?.fp);
+        for (const b of [basis, ...related.map(e => e.source_basis)].filter(Boolean))
+            if (!b.incomplete && !dependencies.has(b.id)) dependencies.set(b.id, context?.dependencies(b, options));
+        return projectSource(basis, { ...index, dependencies }, options);
+    };
+    const arrival = (entry, options) => {
+        const basis = arrivalBasis(entry);
+        return basis ? evaluate(basis, options) : { state: 'unknown', reason: '缺唯一进场来源', pos: null };
+    };
+    const record = (row, options) => {
+        const basis = typeof row.source_basis === 'string' ? json(row.source_basis) : row.source_basis;
+        if (row.source_basis != null && !basis) return { state: 'unknown', reason: '来源 JSON 无效', pos: null };
+        const source = basis ?? legacy.get(row.id);
+        return source ? evaluate(source, options) : { state: 'live', reason: '普通正文来源', pos: row.pos };
+    };
+    return { index, entries, legacy, legacyMenus, arrivalBasis, evaluate, arrival, record };
+}
+
+// 基础候选先补入有明确旧关联的 ID；gone: / 被搬过的 fp 不能在 SQL join 时丢失。
+export function sourceRows(db, chatKey, { status = 'ok', type = null, through = Infinity, rawBasis = false } = {}) {
+    const projection = sourceProjection(db, chatKey), ids = [...projection.legacy.keys()];
+    const rows = db.prepare(`select r.*, min(s.pos) pos from records r join chats c on c.key = ? and c.story_id = r.story_id
+        left join chat_seq s on s.chat_key = c.key and s.fp = r.fp
+        where r.status = ? ${type ? 'and r.type = ?' : ''}
+        and (s.pos is not null or r.source_basis is not null ${ids.length ? `or r.id in (${ids.map(() => '?').join(',')})` : ''})
+        group by r.id`).all(chatKey, status, ...(type ? [type] : []), ...ids);
+    const visible = [], rejected = [];
+    for (const row of rows) {
+        const state = projection.record(row, { through, rawBasis });
+        if (state.state !== 'live') { rejected.push({ id: row.id, fp: row.fp, status: row.status, ...state, recoverable: state.state !== 'unknown' }); continue; }
+        if (state.pos == null || state.pos > through) continue;
+        const source_basis = json(row.source_basis) ?? projection.legacy.get(row.id) ?? null;
+        visible.push({ ...row, original_fp: row.fp, fp: source_basis?.delivery?.fp ?? row.fp, pos: state.pos, source_basis });
+    }
+    visible.sort((a, b) => a.pos - b.pos || a.id - b.id);
+    return { rows: visible, rejected, projection };
+}
+
+export function arrivalBasis(store, chatKey, { avatar, trigger, sourceStep = null, handoff = null, basisDay = null }) {
+    const messages = store.currentMessages(chatKey);
+    const step = sourceStep ? { ...sourceStep, ...sourceMessage(messages.find(m => m.pos === sourceStep.pos && m.fp === sourceStep.fp)) } : null;
+    return { version: 1, kind: 'arrival', id: randomUUID(), origin: chatKey, avatar,
+        trigger: sourceMessage(trigger), sourceStep: step,
+        handoff: handoff ? { ...sourceMessage(messages.find(m => m.pos === handoff.pos && m.fp === handoff.fp)),
+            pos: handoff.pos, fp: handoff.fp, revision: handoff.revision, avatar: handoff.avatar, way: handoff.way } : null,
+        basisDay, delivery: null };
+}
+
+export function cancelArrival(store, chatKey, id) {
+    const entries = json(store.getRawMeta(`arrivals:${chatKey}`), []);
+    const entry = entries.find(e => e.source_basis?.id === id);
+    if (!entry || entry.source_basis.delivery) return false;
+    store.setMeta(`arrivals:${chatKey}`, JSON.stringify(entries.filter(e => e !== entry)));
+    const arrived = json(store.getRawMeta(`arrived:${chatKey}`));
+    if (arrived?.source_basis?.id === id) store.setMeta(`arrived:${chatKey}`, null);
+    return true;
+}
+
+// 保存回执只绑定一次；改稿/后来的本人发言绝不重新绑定。
+export function bindArrivalReceipts(store, records, chatKey, receipts = []) {
+    if (!Array.isArray(receipts) || !receipts.length) return 0;
+    let bound = 0;
+    for (const receipt of receipts) {
+        const entries = json(store.getRawMeta(`arrivals:${chatKey}`), []);
+        const entry = entries.find(e => e.source_basis?.id === receipt.id && e.avatar === receipt.avatar);
+        if (!entry || entry.source_basis.delivery || entry.source_basis.origin !== chatKey) continue;
+        const message = store.currentMessages(chatKey).find(m => m.pos === receipt.pos && m.fp === receipt.fp && !m.hidden
+            && !m.is_user && m.speaker === receipt.avatar && (m.sw ?? null) === (receipt.sw ?? null) && (m.sent_at ?? null) === (receipt.sentAt ?? null));
+        if (!message || message.pos !== Number(entry.at)) continue;
+        const basis = { ...entry.source_basis, delivery: { ...sourceMessage(message), execution: receipt.execution ?? null } };
+        if (sourceProjection(store.db, chatKey).evaluate(basis).state !== 'live') continue;
+        entry.source_basis = basis;
+        store.setMeta(`arrivals:${chatKey}`, JSON.stringify(entries));
+        const arrived = json(store.getRawMeta(`arrived:${chatKey}`));
+        if (arrived?.source_basis?.id === basis.id) store.setMeta(`arrived:${chatKey}`, JSON.stringify({ ...arrived, source_basis: basis }));
+        // 只补交付元数据，原始 fp/status/id 保持原样。
+        if (entry.recs?.length) {
+            const update = store.db.prepare('update records set source_basis = ? where id = ? and story_id = ? and source_basis is not null');
+            for (const id of entry.recs) update.run(JSON.stringify(basis), id, store.requireChat(chatKey).story_id);
+        }
+        for (const id of entry.menus ?? []) store.setMeta(`event_source:${id}`, JSON.stringify(basis));
+        bound++;
+    }
+    return bound;
+}
+
+// 保留旧导出供下游显式迁移；同步已不调用，也不再搬动任何记录。
+export const GONE = 'gone:';
+export const relinkArrivals = () => 0;
 
 // 隔离扩展记的在场区间，按两头那条消息的时间认回这条序列里的位置（后台按条号认的话，删回去以后新写在同样条号上的消息也会被当成他在场）：
 // - 起点那条（他进场前那条）没了：照条号认起点（左滑重来过的那条日期会变；整段删回去重写的，结尾那一步截完是空的）；
@@ -104,12 +254,15 @@ export function liveAnchors(anchors, dates = []) {
 // - 或者进场记录里有他一次 at 在 pos 以后、而且这次进场还算数（arrivalLive）。
 // 远程（电话、消息）进来的也算：他已经亲自出面说过话了，后台替他挂的那一下就过时了
 export function enteredSince(pos, { who = null, avatar = null, messages = [], anchors = null, arrivals = [], knockLive = null } = {}) {
+    assertKnockReader(knockLive, enteredSince);
     const p = num(pos);
     if (p == null || (!who && !avatar)) return false;
     const entries = Array.isArray(arrivals) ? arrivals.filter(Boolean) : [];
     const me = { who, avatar };
     const mine = entries.filter(e => isSame(e, me, scopeOf(messages, entries)));
-    const live = e => knockLive?.(e) !== false && arrivalLive(e, messages, entries, anchors);
+    // 明确来源只查一次事实结论；普通对象保留原来源预检和消息/人工区间契约。
+    const live = e => (e.source_basis || e.recs?.length || e.menus?.length || knockLive?.(e, { phase: 'prepare' }) !== false)
+        && arrivalLive(e, messages, entries, anchors, knockLive, 'fact');
     const segs = avatar ? anchors?.[avatar]?.segments : null;
     const segLive = s => { const atStart = mine.filter(e => num(e.at) === s.from); return !atStart.length || atStart.some(live); };
     if (Array.isArray(segs) && segs.some(s => Number.isFinite(s?.from) && s.from > p && s.from <= messages.length && !emptySegment(s) && segLive(s))) return true;
@@ -120,10 +273,10 @@ export function enteredSince(pos, { who = null, avatar = null, messages = [], an
 // 返回的编号由调用的人放进这次进场的 recs，relinkArrivals 把它挂到他那条回复上——以后他也想得起是自己发的）；
 // 那件口袋标用掉：这一步挂在进场前那条上、等他那条回复（store.menuOf 的 pending），他那条删了、换了别人在说，就回到"拿出来了"、门上又挂他。
 // sent：门上那一项的 sent（{ id, way, surface, respond }）；at：他从哪条起在场；fp：进场前那条的指纹
-export function landSent(store, records, { chatKey, storyId, who, avatar = null, userName = '玩家', sent, at, fp }) {
+export function landSent(store, records, { chatKey, storyId, who, avatar = null, userName = '玩家', sent, at, fp, source_basis = null }) {
     if (!sent?.surface || !fp || !Number.isInteger(at)) return null;
     const verb = sent.way === '电话' ? '打过电话' : '发过消息';
-    const rec = records?.addDerived ? records.addDerived({ storyId, fp, type: '做', text: `${who}刚给${userName}${verb}：${sent.surface}`.slice(0, 200), holder: avatar ?? `name:${who}`, holderName: who, audience: [who, userName], about: who }) : null;
+    const rec = records?.addDerived ? records.addDerived({ storyId, fp, type: '做', text: `${who}刚给${userName}${verb}：${sent.surface}`.slice(0, 200), holder: avatar ?? `name:${who}`, holderName: who, audience: [who, userName], about: who, source_basis }) : null;
     if (Number.isInteger(sent.id) && store?.updateMenu) store.updateMenu(chatKey, sent.id, { status: 'used', by: who, pending: true, at: { pos: at - 1, fp } });
     return rec;
 }
@@ -132,11 +285,16 @@ export function landSent(store, records, { chatKey, storyId, who, avatar = null,
 // 写下它以后他自己进了场（enteredSince）也算用掉——他人都来过了，这条不用再等人点。entries：进场记录（arrivals）；
 // opts：{ anchors, who, avatar }（不给就只认 usedAt，老调用照旧）。老数据只有 used: true，照旧算用掉
 export function contactUsed(c, messages, entries = [], opts = {}) {
+    assertKnockReader(opts.knockLive, contactUsed);
     if (!c) return false;
     const who = opts.who ?? c.who ?? null, avatar = opts.avatar ?? c.avatar ?? null;
     if (c.at != null && enteredSince(c.at, { who, avatar, messages, anchors: opts.anchors ?? null, arrivals: entries, knockLive: opts.knockLive })) return true;
     if (!c.usedAt) return !!c.used;
     const u = c.usedAt;
+    if (u.arrivalId) { const e = entries.find(e => e.source_basis?.id === u.arrivalId); return !!e && arrivalLive(e, messages, entries, opts.anchors, opts.knockLive, 'fact'); }
+    const linked = entries.filter(e => Number(e.at) === u.pos + 1 && e.fp === u.fp
+        && isSame(e, { who: u.who, avatar: u.avatar }, scopeOf(messages, entries)));
+    if (linked.length) return linked.some(e => arrivalLive(e, messages, entries, opts.anchors, opts.knockLive, 'fact'));
     if (messages[u.pos]?.fp !== u.fp) return false;
     if (!u.who) return true;
     return messages.length <= u.pos + 1 || messages.slice(u.pos + 1).some(m => isHis(m, { who: u.who, avatar: u.avatar ?? null }, scopeOf(messages, entries)));

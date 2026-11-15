@@ -46,7 +46,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
         const messages = store.currentMessages(chat.key);
         const notes = store.stateNotesOf?.(chat.key) ?? [];
         const memo = new Map();
-        return pos => { if (!memo.has(pos)) memo.set(pos, remoteWayAt(pos, { arrivals, anchors, members, messages, notes })); return memo.get(pos); };
+        return pos => { if (!memo.has(pos)) memo.set(pos, remoteWayAt(pos, { arrivals, anchors, members, messages, notes, knockLive: store.knockLiveFor?.(chat.key) })); return memo.get(pos); };
     };
     // 口袋里和还排着的事（记账顺带认：角色把哪件拿出来了，D-100；哪件已经不成立了，D-107）；认出来的记在那条消息上，删了那条就回来。
     const pocketOf = chatKey => (store.menuOf?.(chatKey) ?? []).filter(m => m.status === 'pocket' || m.status === 'waiting');
