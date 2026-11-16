@@ -2388,8 +2388,16 @@ export function handoffLabel(h) {
 export function panelHelp(key) {
     return ({playMode:'选择全局默认玩法，每局可以单独改。',"fresh-settings":"分两档去重复，建议先用免费第一档。","drift-clear":"清除变化预览，建议核对后再用。","extract-retry":"重试失败总结，建议先检查错误。","extract-retry-skipped":"补回跳过消息，建议核对后用。","handoff-cancel":"收起未交回答，建议暂不交时用。","handoff-copy":"复制完整题目，建议交给其他AI。","handoff-paste":"粘贴AI回答，建议核对后交回。","handoff-retry":"重调原模型，建议先检查连接。","handoff-submit":"提交并核对回答，建议保留完整内容。","pending-tab":"打开待办详情，建议按需查看。",'board-edit':'改正谁在哪，识别有误时用。','camera-now':'让旁白接一段，建议需要时用。','plan-reroll':'重排未用候选，建议失败或跑偏时用。','plan-reveal':'查看已排事件，介意剧透别打开。',setup:'填写本局设定，建议开局先核对。',cast:'管理本局人物，建议开局核对。',relations:'管理初始关系，建议开局核对。',presets:'保存或套用局设定，建议新局用。','opening-pack':'整套导入并建新群，建议先预览。',lore:'修改世界书知情，建议判错时用。',records:'看每条总结的来源，建议疑错时查。',ledger:'查看钱与家当，建议涉及交易时查。',pending:'查看约定的进展，建议按需查。',episodes:'按场回看经过，建议回顾时用。',talk:'问事或提改动，点记才写入。',stages:'选择钥匙和型号，建议先配好。',advanced:'打开更多选项，建议需要时再改。','advanced-back':'回到常用设置，建议平时用。','prompt-pack':'调整口味文字，建议先导出备份。','prompt-preview':'查看规划题目，建议先核对。',camera:'配置旁白载体，建议群聊需要时用。','plan-request':'请求下一份规划，建议确有需要再用。',places:'调整场记位置，建议先用默认。',tuning:'调整开关和参数，建议先用默认。',extract:'控制每条总结，建议保持开启。',backfill:'补总结接入前消息，建议先看估算。',sync:'同步当前采用稿，建议状态落后时用。',update:'检查代码版本，建议提示更新时用。',preview:'查看角色拿到的场记，建议排错时用。',timings:'查看本轮耗时，建议卡顿时用。','plan-attempts':'查看规划尝试，建议失败时查。',rejected:'查看被拦的内容，建议排错时查。',confirm:'确认大量删稿，建议核对后再点。',absencePaused:'暂停离开计时，建议离线不推进时开。',windowConnected:'让本窗口使用系统，建议按局开。',dailyBudget:'设置后台预算，建议先设上限。',pack:'选择本局素材，建议没有就留空。',awayMode:'选择离开怎么算，建议按玩法选。',speakFirst:'回来让角色先说，建议按需开。',cameraJoin:'让旁白接没卡人物，建议群聊开。',historyRounds:'限制送出的历史，建议先用默认。',digestOld:'把旧回复换成大意，建议按需开。',digestKeep:'保留近期原文，建议先用默认。',loreFilter:'按人物筛世界书，建议需要隔离时开。',newChats:'设置新窗口接入方式，建议先问。',testSlot:'检查注入接线，建议平时关闭。',enabled:'控制系统供料，建议按需启用。'})[key] ?? '';
 }
+export function contactTroubleText(trouble) {
+    const names = [['line', '线路没响应'], ['setup', '没配好'], ['format', '回答格式不对'], ['quote', '引文对不上'], ['unique', '一句话里有两个人'], ['unsure', '模型自己拿不准']];
+    const shown = names.filter(([k]) => trouble?.byKind?.[k] > 0), total = shown.reduce((s, [k]) => s + trouble.byKind[k], 0);
+    if (!total) return '';
+    const setup = trouble.byKind.setup > 0, others = shown.some(([k]) => k !== 'setup');
+    const advice = [...(others ? ['多了就换线路或换型号'] : []), ...(setup ? ['预算或路线没设好，去设置里看看'] : [])].join('；');
+    return `最近有 ${total} 次联系没判定成功（${shown.map(([k, label]) => `${label} ${trouble.byKind[k]} 次`).join('、')}），${advice}`;
+}
 export function stageHelp(id) {
-    return ({extract:'逐条总结事实与知情，推荐可靠模型。',keys:'为旧事配检索词，推荐快速模型。',assemble:'把旧事串成回忆，建议按需开启。',judge:'判断转向与节点，推荐快速可靠模型。',plan:'安排下个节点，推荐较强创作模型。',away:'推离开后的动向，推荐较强模型。',advisor:'查资料作参谋，推荐阅读可靠模型。',setup:'拆分开局大纲，推荐长文可靠模型。',talk:'问事或提改动，推荐可靠模型。',setupKeys:'给前史配词，推荐快速模型。',fresh:'换掉重复写法，推荐快速模型。',profile:'读角色资料，推荐阅读可靠模型。',scene:'看场面起头，推荐快速模型。',prep:'整理规划备料，推荐阅读可靠模型。',lore:'判断世界书知情，推荐可靠模型。',situation:'推各方动向，有资料再启用。',embed:'按含义找旧事，需要嵌入模型。'})[id] ?? '';
+    return ({extract:'逐条总结事实与知情，推荐可靠模型。',keys:'为旧事配检索词，推荐快速模型。',assemble:'把旧事串成回忆，建议按需开启。',judge:'判断转向、节点，以及玩家是否在联系某人，推荐快速可靠模型。',plan:'安排下个节点，推荐较强创作模型。',away:'推离开后的动向，推荐较强模型。',advisor:'查资料作参谋，推荐阅读可靠模型。',setup:'拆分开局大纲，推荐长文可靠模型。',talk:'问事或提改动，推荐可靠模型。',setupKeys:'给前史配词，推荐快速模型。',fresh:'换掉重复写法，推荐快速模型。',profile:'读角色资料，推荐阅读可靠模型。',scene:'看场面起头，推荐快速模型。',prep:'整理规划备料，推荐阅读可靠模型。',lore:'判断世界书知情，推荐可靠模型。',situation:'推各方动向，有资料再启用。',embed:'按含义找旧事，需要嵌入模型。'})[id] ?? '';
 }
 export function onboardingHtml({ hasChat = false, joined = false } = {}) {
     if (joined) return '';
@@ -2568,6 +2576,7 @@ function mountPanel() {
             // 后台的回答写到上限或被中转掐断（用户 9/30：不许静默截断）：放大重来写完的也说一声，没写完的按失败算、会再试
             cut?.gaveUp ? `后台有 ${cut.gaveUp} 次回答没写完（写到上限或被中转掐断，按失败算、会再试；最近一次：${cut.last?.model ?? ''}）` : '',
             cut?.stretched ? `${cut.stretched} 次写到上限，放大重来写完了` : '',
+            contactTroubleText(state.status?.contactTrouble),
         ].filter(Boolean).join('；');
         const waiting = state.status?.handoffs ?? 0;
         const hu = state.handoffUi;

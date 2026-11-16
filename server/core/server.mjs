@@ -8,6 +8,7 @@ import path from 'node:path';
 import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, timeStateFor, menuDays, scaleFor, renderEntry, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
 import { labelsOf, sinceWord, dateIn, dayNumber, timelineLabel } from './timeline.mjs';
 import { validMark, validSwipeEvidence, planFailure } from './store.mjs';
+import { contactTroubleOf } from './contact-verdict.mjs';
 import { digests } from './digest.mjs';
 import { parsePlan, nearPlace, verifiedPlanSourceIds } from './planner.mjs';
 import { guideFor, markShown, recordPick } from './guide.mjs';
@@ -1144,7 +1145,7 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         'POST /v1/status': b => {
             const chatKey = str(b.chatKey, 'chatKey');
             const extract = worker ? worker.plan({ chatKey }) : null;
-            return { ...store.status({ chatKey }), playMode:playModeOf(store,chatKey), playReason:playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), intimateStopped: intimateStopped(store, records, chatKey), secretNotice: JSON.parse(store.getMeta(`secret_notice:${chatKey}`) ?? 'null'), secretCheckReason: secretCandidates(store, chatKey, records).length ? settings().secretCheckReason ?? (!settings().planner ? '规划没开，暂不检测秘密是否漏了' : null) : null, extract, leaveUnjudged: settings?.().auto?.unjudged?.({ chatKey }) ?? 0, handoffs: handoffs?.list({ chatKey })?.pending?.length ?? 0, notice: JSON.parse(store.getMeta(`notice:${chatKey}`) ?? 'null'), drift: JSON.parse(store.getMeta(`drift:${chatKey}`) ?? 'null'), cut: settings?.().modelTally?.() ?? null };
+            return { ...store.status({ chatKey }), playMode:playModeOf(store,chatKey), playReason:playStop(store,chatKey)?.reason ?? '', planning: store.planningState(chatKey), intimateStopped: intimateStopped(store, records, chatKey), secretNotice: JSON.parse(store.getMeta(`secret_notice:${chatKey}`) ?? 'null'), secretCheckReason: secretCandidates(store, chatKey, records).length ? settings().secretCheckReason ?? (!settings().planner ? '规划没开，暂不检测秘密是否漏了' : null) : null, extract, leaveUnjudged: settings?.().auto?.unjudged?.({ chatKey }) ?? 0, handoffs: handoffs?.list({ chatKey })?.pending?.length ?? 0, notice: JSON.parse(store.getMeta(`notice:${chatKey}`) ?? 'null'), drift: JSON.parse(store.getMeta(`drift:${chatKey}`) ?? 'null'), cut: settings?.().modelTally?.() ?? null, contactTrouble: contactTroubleOf(store, chatKey) };
         },
         // 外援队列面板：复制题目、贴回答案、再试 API、自动重试开关。列表和开关按窗口（N-441/D-260）。
         'POST /v1/handoff-ui': async b => {

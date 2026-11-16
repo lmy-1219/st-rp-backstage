@@ -13,6 +13,8 @@ const keyOf = snapshot => `contact_verdict:${snapshot.chatKey}:${snapshot.versio
 
 // 引文超过此长度直接判无效，避免同步回溯被长引文拖慢（P2-2）。
 export const MAX_QUOTE_LENGTH = 600;
+// 面板“联系没判定成功”只回看最近这么多条未隐藏的玩家消息（T141b 返修）。
+export const CONTACT_TROUBLE_MESSAGES = 50;
 const QUOTES = new Set('“”‘’「」『』"\'');
 const OPEN_QUOTES = new Set('“‘「『');
 const CLOSE_QUOTES = new Set('”’」』');
@@ -122,10 +124,9 @@ function quoteMatcher(text) {
 
 export const matchContactQuote = (text, quote) => quoteMatcher(text)(quote);
 
-export function contactSnapshot(store, chatKey, message = null) {
+// 与具体消息无关的部分（名册、别名、身份解析）；批量读多条消息时算一次复用。
+export function contactContext(store, chatKey) {
     const chat = store.requireChat(chatKey), messages = store.currentMessages(chatKey);
-    const source = message ? messages.find(m => m.pos === message.pos) : messages.filter(m => !m.hidden).findLast(m => m.is_user);
-    if (!source?.is_user || source.hidden) return null;
     const fullRoster = store.getCast(chat.story_id) ?? [], roster = fullRoster.filter(hasCard);
     const choices = read(store, `card_choices:${chatKey}`, {}), members = read({ getMeta: () => chat.members }, '', []);
     const raw = store.relationsOf?.(chat.story_id), rel = raw ? normalizeRelations(raw) : null;
@@ -133,6 +134,13 @@ export function contactSnapshot(store, chatKey, message = null) {
     const scanRoster = identityRoster(fullRoster, { cardChoices: choices });
     const people = scanRoster.map(p => ({ name: p.name, avatar: p.avatar, aliases: rel ? personOf(rel, p.name, scanRoster.map(x => x.name))?.又名 ?? [] : [] }));
     const eligible = people.filter(p => resolveIdentity(roster, { name: p.name }, { members: roster.filter(q => q.name === p.name).length > 1 ? members : null, identityChoices: choices }).person?.avatar === p.avatar);
+    return { messages, roster, choices, members, people, eligible };
+}
+
+export function contactSnapshot(store, chatKey, message = null, ctx = null) {
+    const { messages, roster, choices, members, people, eligible } = ctx ?? contactContext(store, chatKey);
+    const source = message ? messages.find(m => m.pos === message.pos) : messages.filter(m => !m.hidden).findLast(m => m.is_user);
+    if (!source?.is_user || source.hidden) return null;
     const candidates = contactCandidates(source.text, eligible).map((c, i) => ({ ...c, id: i + 1 }));
     // 身份版本只看原文里实际出现的名字和别名、以及候选目标本人，在 identityRoster 里的解析结果；不含全员 role，也不含与原文无关的人。
     const mentioned = people.filter(p => [p.name, ...p.aliases].some(n => n && source.text.includes(n)) || candidates.some(c => c.target.avatar === p.avatar));
@@ -209,10 +217,39 @@ export function parseContactVerdict(text, snapshot) {
     });
 }
 
+// ---- 联系判定“没成功”的可见性（T141b）：从现有 contact_verdict 事件的 reason 合成给玩家看的几大类，不新增存储 ----
+const CONTACT_SETUP_REASONS = new Set(['联系判定预算不足', '未配置联系判定快速路线']);
+const CONTACT_FORMAT_REASONS = new Set(['判定 JSON 无效', '判定不是数组', '候选编号无效', '尾随结构化内容冲突', '候选编号重复', '缺少候选结果', '状态无效', '方式无效']);
+// reason 的实际来源：parseContactVerdict 的 invalid 字符串与“模型未确认”；complete()/超预算等抛出的 error.message 一律归线路类。
+export function contactReasonKind(reason) {
+    if (reason === '模型未确认') return 'unsure';
+    if (CONTACT_SETUP_REASONS.has(reason)) return 'setup';
+    if (CONTACT_FORMAT_REASONS.has(reason)) return 'format';
+    if (reason === '引文无效' || reason === '引文未包含目标') return 'quote';
+    if (reason === '引文目标不唯一') return 'unique';
+    return 'line';
+}
+// 眼下还没解决的失败：只看最近 CONTACT_TROUBLE_MESSAGES 条现行（未隐藏、未删除）玩家消息，
+// 用下游实际在用的 contactVerdictFor（meta 里当前身份版本的结论）读，只认“未确认”的候选；
+// 旧稿的失败、已删消息的失败、改稿后已成功的，天然读不到。不扫 events。
+export function contactTroubleOf(store, chatKey) {
+    const byKind = { line: 0, setup: 0, format: 0, quote: 0, unique: 0, unsure: 0 };
+    let versions = 0;
+    const ctx = contactContext(store, chatKey);
+    const recent = ctx.messages.filter(m => m.is_user && !m.hidden).slice(-CONTACT_TROUBLE_MESSAGES);
+    for (const m of recent) {
+        const saved = contactVerdictFor(store, chatKey, m, { phase: 'fact' }, ctx);
+        if (!saved) continue;
+        versions++;
+        const results = Array.isArray(saved.results) ? saved.results : [];
+        for (const r of results) if (r?.state === '未确认') byKind[contactReasonKind(r.reason)]++;
+    }
+    return { total: Object.values(byKind).reduce((a, b) => a + b, 0), byKind, versions };
+}
 // 同步读口从不请求模型；每次读取都重核当前身份和原稿版本。
-export function contactVerdictFor(store, chatKey, message, { phase }) {
+export function contactVerdictFor(store, chatKey, message, { phase }, ctx = null) {
     if (!['fact', 'prepare'].includes(phase)) throw new Error('联系确认读口需要 phase');
-    const snapshot = contactSnapshot(store, chatKey, message);
+    const snapshot = contactSnapshot(store, chatKey, message, ctx);
     if (!snapshot) return null;
     const saved = read(store, keyOf(snapshot));
     return saved?.version === snapshot.version ? saved : null;
