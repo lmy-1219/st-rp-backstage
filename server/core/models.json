@@ -74,7 +74,8 @@
         "key": "Gemini"
       },
       "judge": {
-        "key": "Gemini"
+        "key": "Claude",
+        "model": "claude-haiku-5-5"
       },
       "advisor": {
         "key": "Gemini"
@@ -185,7 +186,6 @@
       "name": "快活",
       "ids": [
         "assemble",
-        "judge",
         "profile",
         "scene",
         "prep",
@@ -194,6 +194,12 @@
         "advisor"
       ],
       "help": "一轮里要快的检查和整理。推荐 Gemini 3.8 Flash 或其他快模型。"
+    },
+    {
+      "id": "judge",
+      "name": "短判断",
+      "ids": ["judge"],
+      "help": "联系判定、转向与节点检查等短判断要快，不需要思考。推荐 Claude Haiku 5.5；效果取决于线路，未确认偏多时，换线路或换型号。"
     },
     {
       "id": "small",

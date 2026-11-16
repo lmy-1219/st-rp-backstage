@@ -137,7 +137,7 @@ export function knockState(knock, { messages = [], knocks = [], userName = null,
  * 空当——玩家这句只是承接、刚换了时段、旁白刚写完一段；玩家正和在场的人一来一回紧着说，先等。
  * opts：knockState 的那些，再加 pace、present（在场的有卡的人；给了空名单就不用等"一来一回"）、gap、perPart；summoned 跳过间隔和时段次数
  */
-export function knockTiming({ messages = [], knocks = [], pace = null, present = null, gap = null, perPart = null, occasion = true, summoned = false, ...rest } = {}) {
+export function knockTiming({ messages = [], knocks = [], pace = null, present = null, gap = null, perPart = null, occasion = true, summoned = false, requested = false, ...rest } = {}) {
     const last = messages.at(-1);
     if (!last) return { ok: false, why: '还没有消息' };
     // 场合（occasion.mjs）：正写着亲密戏、正打着——外头的人先别来
@@ -158,6 +158,7 @@ export function knockTiming({ messages = [], knocks = [], pace = null, present =
         const n = live.filter(x => partsBetween(rowAt(num(x.k.at)), now, parts) === 0).length;
         if (n >= (perPart ?? PER_PART[p])) return { ok: false, why: `这个时段已经叩过 ${n} 次门` };
     }
+    if (requested) return { ok: true, why: '玩家已经主动联系' };
     const prev = messages.at(-2);
     if (rowAt && prev && partsBetween(rowAt(prev.pos), rowAt(last.pos), parts) >= 1) return { ok: true, why: '刚换了时段' };
     if (isNarrator(last)) return { ok: true, why: '旁白刚写完一段' };

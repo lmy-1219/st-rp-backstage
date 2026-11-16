@@ -2,7 +2,8 @@
 import { createHash } from 'node:crypto';
 import { assertKnockReader } from './store.mjs';
 import { sameIdentity, resolveIdentity } from './cast.mjs';
-import { hasCard, callsFor, wayOf, partsBetween } from './arrival.mjs';
+import { hasCard, wayOf, partsBetween } from './arrival.mjs';
+import { confirmedContacts } from './contact-verdict.mjs';
 import { boardFor } from './board.mjs';
 import { pendingFor } from './pending.mjs';
 import { entryOf, awaitingExtract, afterBlocked } from './planner.mjs';
@@ -113,6 +114,16 @@ const priority = { contact: 0, named: 1, promise: 2, errand: 3, pocket: 4, reach
 // 旁白替他递过的消息、来电（sent）：排在结算的联系之后、玩家点名之前——他刚找过玩家，进来就接着这件说（场记章程 B1）
 const rank = c => (c.sent ? 0.5 : priority[c.source.type]);
 
+// 调度只认已同步玩家原稿；草稿仅供展示/预跑，不写请求账。
+export function contactRequests(store, chatKey, messages = store.currentMessages(chatKey)) {
+    const visible = messages.filter(m => !m.hidden), message = visible.findLast(m => m.is_user);
+    if (!message || visible.at(-1).pos - message.pos > 8) return [];
+    const roster = store.getCast(store.requireChat(chatKey).story_id) ?? [];
+    const history = read({ getMeta: store.getRawMeta ?? store.getMeta }, `knocks:${chatKey}`, []);
+    return confirmedContacts(store, chatKey, [message], { phase: 'prepare' }).filter(proof => !history.some(k => k.playerRequest
+        && sameIdentity(k, proof, roster) && ['pos', 'fp', 'sw', 'sentAt'].every(key => k.playerRequest[key] === proof[key])));
+}
+
 // 只有当前人的句首动作确实是门上这一项的联系方式，才省掉“方式：内容”。
 const surfaceSaysWay = (surface, who, entry, label) => {
     if (!['消息', '电话', '找上门'].includes(entry)) return false;
@@ -156,12 +167,15 @@ export function doorAt(input = {}) {
         const pockets = (memory ? [] : menu).filter(m => ownIdentity(m) && !m.exhausted && (m.status === 'pocket' || m.status === 'shown') && (m.status === 'shown' || !afterBlocked(m, menu, x => x.status, { visible: input.visible, messages })) && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
             && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivalHistory ?? input.arrivals ?? [], knockLive: input.knockLive }));
         const reached = !memory && reach && ownIdentity({...reach,who:reach.person ?? reach.who});
-        const called = uniqueName(who) && callsFor(narrationOf(recentUser), [who, ...(rel ? personOf(rel, who, names)?.又名 ?? [] : [])]);
+        let playerRequest = (input.playerRequests ?? []).find(r => ownIdentity(r));
+        const called = playerRequest ? playerRequest.way === '电话' ? '打来电话' : playerRequest.way === '上门' ? '叫他过来' : '发来消息'
+            : '';
         const requestMessage = request && messages.find(m => m.pos === request.at);
         const follower = rel && leaderOf(rel, who, names);
         // 依附者的按钮请求须能核实原指纹；其他人的旧请求行为保留。
         const requestLive = requestMessage && (Object.hasOwn(request, 'fp') ? !!request.fp && requestMessage.fp === request.fp : !follower && !!requestMessage.is_user);
         const requested = request && ownIdentity(request) && requestLive && last >= request.at && last - request.at <= 8;
+        if (!playerRequest && requested && request.fp) playerRequest = { ...request, type: 'button', avatar: card.avatar };
         // 只跟着别人出现的人（关系表"跟着"）：门上不单独挂他——他不单独上门、发消息、打电话，跟着的那人来了他才在（T135）。玩家点名叫他的照旧
         if (follower && !called && !requested) continue;
         const promises = list(pending.items).filter(p => p.kind === '约定' && ['到了', '排着'].includes(p.status)
@@ -208,11 +222,13 @@ export function doorAt(input = {}) {
             const displayWay = label === '来电' ? '想打电话' : label === '发来短讯' ? '想发消息' : label === '上门' ? '可能上门' : '可能来联系';
             const surface = m.surface || m.title || '';
             const alreadySaysWay = surfaceSaysWay(surface, who, m.entry, label);
-            add('pocket', m.id, !m.early && !m.awaiting && !earlyPart(m), false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m), { display: alreadySaysWay ? surface : `${displayWay}：${surface}` });
+            add('pocket', m.id, !m.early && !m.awaiting && !earlyPart(m), false, label, [m.title, m.surface].filter(Boolean).join('：'), way, m.surface, pocketAt(m), { ...(!way && m.entry === '找上门' ? { preferredWay: '上门' } : {}), display: alreadySaysWay ? surface : `${displayWay}：${surface}` });
         }
         if (reached) add('reach', reach.id ?? who, true, false, reach.matter ? `可能来联系：${reach.matter}` : '可能来联系', [...new Set([reach.matterText, reach.hook, ...(reach.threads ?? []).map(r => r.text)].filter(Boolean))].join('；'));
         candidates.sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b));
-        if (candidates[0]) items.push(candidates[0]);
+        // 在压成每人一条之前保留请求，既有来意不改来源，联系方式以玩家这次动作优先。
+        const withRequest = c => playerRequest ? { ...c, playerRequest, ...(['电话', '消息', '上门'].includes(playerRequest.way) ? { ways: [playerRequest.way] } : {}) } : c;
+        if (candidates[0]) items.push({ ...withRequest(candidates[0]), alternatives: candidates.slice(1).map(withRequest) });
     }
     // 一人一条（试玩 10/10：名册里同一个人有旧卡、现卡两张，门上挂了两条）：按关系表认成同一个人的几张卡只留一条——
     // 能接上的优先；再是在群里的那张、最近进过场的那张；再按由头的先后
@@ -236,10 +252,10 @@ export function doorAt(input = {}) {
 }
 
 // 只在门对外展示与自动叩门挑人时限量；组格和等待记录仍读 doorFor 的原始 items。
-export function capFresh(store, records, chatKey, { present = [], recentUser = '', timeline = null, litWho = null, litPerson = null } = {}) {
+export function capFresh(store, records, chatKey, { present = [], recentUser = '', timeline = null, litWho = null, litPerson = null, automatic = false, eligible = null } = {}) {
     const messages = store.currentMessages(chatKey);
     timeline ??= timelineFor(store, records, chatKey, messages);
-    const { items, allReady = items } = doorFor(store, records, chatKey, { present, recentUser, timeline });
+    const { items, allReady = items } = doorFor(store, records, chatKey, { present, recentUser, timeline, automatic });
     const chat = store.requireChat(chatKey), roster = store.getCast?.(chat.story_id) ?? [];
     const names = roster.map(c => c.name), relations = store.relationsOf?.(chat.story_id);
     const scope = roster.filter(p => p.role !== '不用');
@@ -263,15 +279,19 @@ export function capFresh(store, records, chatKey, { present = [], recentUser = '
     const pace = paceName(paceValue?.name ?? paceValue) ?? MID;
     const limit = PER_PART[pace];
     let used = came.length;
-    return allReady.map(i => {
-        if (!['pocket', 'contact', 'reach'].includes(i.source.type) || i.sent || sameIdentity(i, litIdentity, scope) || came.some(w => same(w, i.who))) return i;
+    const selected = eligible ? allReady.flatMap(i => {
+        const allowed = [i, ...(i.alternatives ?? [])].find(c => c.ready && eligible(c));
+        return allowed ? [allowed] : [];
+    }) : allReady;
+    return selected.map(i => {
+        if (!['pocket', 'contact', 'reach'].includes(i.source.type) || i.playerRequest || i.sent || sameIdentity(i, litIdentity, scope) || came.some(w => same(w, i.who))) return i;
         if (used >= limit) return { ...i, ready: false };
         used++; return i;
     }).sort((a, b) => Number(b.ready) - Number(a.ready) || rank(a) - rank(b) || (a.at ?? 0) - (b.at ?? 0));
 }
 
 const caches = new WeakMap();
-export function doorFor(store, records, chatKey, { present = [], recentUser = '', timeline = null, anchor = null, contacts = null, planner = null, exhausted = null } = {}) {
+export function doorFor(store, records, chatKey, { present = [], recentUser = '', timeline = null, anchor = null, contacts = null, planner = null, exhausted = null, automatic = false } = {}) {
     const chat = store.requireChat(chatKey);
     const all = store.currentMessages(chatKey);
     const match = /^(\d+):(.+)$/.exec(anchor ?? '');
@@ -315,7 +335,8 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const justBack = store.absences?.(chatKey)?.at(-1)?.from_pos;
     const reach = contacts?.enabled === false || !recentUser || (justBack != null && lastPos - justBack <= 8) ? null
         : already ? reachable.find(p => p.person === already.person) : pickContact({ people: reachable, dayOf, lastPos, offers, minGap: contacts?.minGap ?? 16 });
-    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, visible, holds, request, messages, userName, recentUser, timeline: timeline ?? {}, present, reach, anchors, arrivals, arrivalHistory, knockLive: store.knockLiveFor?.(chatKey), knocks, members, pace: paceFor(store, chatKey) };
+    const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, visible, holds, request, messages, userName, recentUser,
+        playerRequests: contactRequests(store, chatKey, messages), timeline: timeline ?? {}, present, reach, anchors, arrivals, arrivalHistory, knockLive: store.knockLiveFor?.(chatKey), knocks, members, pace: paceFor(store, chatKey) };
     const key = `${chatKey}:${createHash('sha1').update(JSON.stringify(input)).digest('hex')}`;
     let cache = caches.get(store);
     if (!cache) caches.set(store, cache = new Map());

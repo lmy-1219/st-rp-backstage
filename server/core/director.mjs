@@ -228,6 +228,12 @@ export function turnDetail(input = {}) {
     const chosen=name=>identify({ name });
     const ambiguous = [...duplicates].find(name => !chosen(name)&&(text.includes(name) || (last && !last.is_user && String(last.text ?? '').includes(name))));
     if (ambiguous) return { queue: [], paused:true, why: `${ambiguous}对应多张卡，请按卡文件确认：${folks.filter(p=>p.name===ambiguous).map(p=>p.avatar).join('、')}` };
+    const request = (input.contactRequests ?? []).find(r => {
+        const person = identify(r);
+        return person && !['present', 'remote'].includes(person.status);
+    });
+    if (request) return { queue: [], pendingContact: { who: request.who, avatar: request.avatar, way: request.way,
+        reason: 'player-contact', request }, why: `正在联系${request.who}，等待建立${request.way}联系` };
     const label = p => duplicates.has(p.name) ? `${p.name}〔${p.avatar}〕` : p.name;
     const namedText=value=>[...duplicates].reduce((line,name)=>chosen(name)?line.split(name).join(label(chosen(name))):line,String(value??''));
     const mapMessage = m => {

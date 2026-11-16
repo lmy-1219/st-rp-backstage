@@ -8,7 +8,7 @@ import { personWord, renderPronouns } from './pronoun.mjs';
 // ③ 在场的人隔着消息、电话问不在场的人（"给某某发了条消息问……"）：后台替那个人照他知道的回一句，问和答两边都知道
 //    （"我跟他撒了谎，扭曲了某人的原话，那么他其实可以自己和某人求证，并双方都对此求证过程知情"）。
 // 题材无关：人名都来自名册和聊天。
-import { hasCard, callsFor } from './arrival.mjs';
+import { hasCard, contactChannelHint } from './arrival.mjs';
 import { sameName } from './setup.mjs';
 import { personOf } from './relations.mjs';
 import { rankByOverlap } from './recall.mjs';
@@ -170,7 +170,7 @@ export function asksAway(messages = [], { roster = [], absent = () => false, use
             if (e === asker || !absent(e.name)) continue;
             const block = blocks.find(b => b.includes(e.name) && hasContact(b, e.name, asker.name, names));
             if (!block) continue;
-            const way = callsFor(block, [e.name]) === '打来电话' || /电话|拨|打给|打通|致电|去电|通话|语音|扩音|免提/.test(block) ? '电话' : '消息';
+            const way = contactChannelHint(block, [e.name]) === '打来电话' || /电话|拨|打给|打通|致电|去电|通话|语音|扩音|免提/.test(block) ? '电话' : '消息';
             const asked = (spoken || tidy(block.slice(1, -1))).slice(0, 300);
             if (asked.length < 2) continue;
             out.push({ pos: m.pos, fp: m.fp, asker: asker.name, askerAvatar: asker.avatar, target: e.name, targetAvatar: e.avatar, way, text: asked, block: tidy(block.slice(1, -1)).slice(0, 200) });

@@ -13,17 +13,19 @@ import { createHash } from 'node:crypto';
 // 存的都挂在消息上（条号＋指纹），删消息＝没发生过（D-185）。题材无关（D-37）。
 import { turnDetail } from './director.mjs';
 import { knockState, knockTiming, wayOf as knockWayOf } from './knock.mjs';
+import { occasionStrict } from './occasion.mjs';
 import { leftAt, completedDeparture, qualifiedAt } from './leaving.mjs';
 import { callsOf } from './camera-turn.mjs';
 import { normalizeRelations, leaderOf, personOf } from './relations.mjs';
 import { boardFor, sourceVersion, factBasis, factCurrent, factInput } from './board.mjs';
-import { capFresh, narratorHandoff } from './door.mjs';
+import { capFresh, narratorHandoff, contactRequests } from './door.mjs';
 import { pendingFor } from './pending.mjs';
-import { timelineFor, paceFor, playModeOf } from './slot.mjs';
+import { timelineFor, paceFor, playModeOf, intimateSetup, intimateStopped } from './slot.mjs';
 import { isOpenMatter, INTENT, closeIntents } from './matters.mjs';
-import { sameName } from './setup.mjs';
-import { hasCard, callsFor } from './arrival.mjs';
+import { sameName, activeIntimate } from './setup.mjs';
+import { hasCard } from './arrival.mjs';
 import { narrationOf } from './timeline.mjs';
+import { confirmedContacts } from './contact-verdict.mjs';
 import { resolveIdentity, sameIdentity, messageIsPerson } from './cast.mjs';
 import { isPrivate } from './visibility.mjs';
 
@@ -258,17 +260,15 @@ const blockedKnock = (store, chatKey, k) => playModeOf(store, chatKey) === 'memo
 // 请求证据绑定请求本身，不能借普通来源的 sameMessage 改稿兼容续命。
 function playerRequestFor(store, chatKey, person, { through = Infinity } = {}) {
     const chat = store.requireChat(chatKey), roster = store.getCast(chat.story_id) ?? [];
-    const raw = store.relationsOf?.(chat.story_id), rel = raw ? normalizeRelations(raw) : null;
-    const names = roster.map(p => p.name);
     const messages = store.currentMessages(chatKey).filter(m => m.pos <= through);
     const last = messages.at(-1)?.pos ?? -1;
-    const unique = resolveIdentity(roster.filter(hasCard), person.who).person?.avatar === person.avatar;
-    const called = m => m?.is_user && unique && callsFor(narrationOf(m.text), [person.who, ...(rel ? personOf(rel, person.who, names)?.又名 ?? [] : [])]);
+    const called = m => confirmedContacts(store, chatKey, m ? [m] : [], { phase: 'prepare' }).find(r => sameIdentity(r, person, roster));
     const valid = proof => {
         if (!proof || !sameIdentity(proof, person, roster)) return false;
         const message = messages.find(m => m.pos === proof.at);
         if (!message) return false;
-        if (proof.type === 'message') return !!proof.fp && message.fp === proof.fp && !!called(message);
+        if (proof.type === 'message') return !!proof.fp && message.fp === proof.fp && !message.hidden
+            && (proof.sw == null || proof.sw === message.sw) && (proof.sentAt == null || proof.sentAt === message.sent_at) && called(message)?.contactVersion === proof.contactVersion && called(message)?.way === proof.way;
         if (proof.type !== 'button') return false;
         // 无指纹不能证明请求未改稿，不单独豁免依附者；需当前点名或重新点按钮。
         return !!proof.fp && message.fp === proof.fp;
@@ -279,7 +279,7 @@ function playerRequestFor(store, chatKey, person, { through = Infinity } = {}) {
     const button = request && { ...request, type: 'button' };
     if (button && last >= button.at && last - button.at <= 8 && valid(button)) return { ...button, who: person.who, avatar: person.avatar };
     const recent = [...messages].reverse().find(m => m.is_user);
-    return called(recent) ? { type: 'message', who: person.who, avatar: person.avatar, at: recent.pos, fp: recent.fp } : null;
+    return last - (recent?.pos ?? -Infinity) <= 8 ? called(recent) ?? null : null;
 }
 // 旧 pending 和直接远程进场也要守门；只有可辨认的玩家点名/请求能让依附者单独来。
 export function unrequestedFollower(store, chatKey, person, { through = Infinity } = {}) {
@@ -310,7 +310,7 @@ export const pendingKnock = (store, chatKey) => {
         });
     }
     const follower = k && unrequestedFollower(store, chatKey, k);
-    if(k&&(!valid||follower)){store.logEvent?.(chatKey,'auto_stale_result',{avatar:k.avatar,reason:follower?'依附角色没有玩家请求，旧叩门失效':'叩门来源版本已改变'});write(store,PENDING(chatKey),null);dropKnockArrival(store,chatKey,k);return null;}
+    if(k&&(!valid||follower||k.playerRequest&&!playerRequestFor(store,chatKey,k))){store.logEvent?.(chatKey,'auto_stale_result',{avatar:k.avatar,reason:follower?'依附角色没有玩家请求，旧叩门失效':'叩门来源版本已改变'});write(store,PENDING(chatKey),null);dropKnockArrival(store,chatKey,k);return null;}
     return blockedKnock(store,chatKey,k) ? null : k;
 };
 export const writeKnocks = (store, chatKey, knocks) => {
@@ -343,6 +343,7 @@ export function sourceStep(store, chatKey, k) {
 
 // 门上那一项他怎么来：说好了消息、电话的照说的；约好的、结算写的"他过来"、玩家叫的上门；在外头办事的照他去向里说的回法；其余发消息（最不扰人）
 export function wayFor(item, plan = null) {
+    if (['电话', '消息', '上门'].includes(item?.playerRequest?.way)) return item.playerRequest.way;
     // 门上只给了一种方式的才是说好的（doorAt：说好了消息、电话的 ways 只有那一个；默认的那一串里也有消息、电话，不算）
     const ways = item?.ways ?? [];
     if (ways.length === 1 && /消息|电话/.test(ways[0])) return /电话/.test(ways[0]) ? '电话' : '消息';
@@ -371,6 +372,12 @@ export function avatarFor(ctx, who, fallback = null) {
 }
 const sameFor = (store, chatKey, a, b) => sameIdentity(a, b, store.getCast(store.requireChat(chatKey).story_id).filter(e => e.role !== '不用'));
 const candidates = list => list.map((d,i) => ({ ...d, candidateId: `候选${i+1}` }));
+function intimateContacts(store, records, chatKey, ctx) {
+    if (intimateStopped(store, records, chatKey, { present: ctx.present })) return new Set();
+    const scope = ctx.roster.filter(p => hasCard(p) && p.name !== '旁白' && p.name !== ctx.userName);
+    return new Set(activeIntimate(intimateSetup(store, chatKey)).flatMap(line => [...line.谁, ...line.可加入])
+        .map(name => resolveIdentity(scope, { name }, { members: ctx.members, identityChoices: ctx.identityChoices }).person?.avatar).filter(Boolean));
+}
 function verdictFor(store, chatKey, doubts, d, verdicts) {
     const scope = store.getCast(store.requireChat(chatKey).story_id).filter(e => e.role !== '不用');
     const key = [d.candidateId, d.avatar].find(k => k && Object.hasOwn(verdicts ?? {}, k));
@@ -408,23 +415,31 @@ export function knockCandidate(store, records, chatKey, { present = [], timeline
     };
     if (handoff?.reason) return reject(handoff.reason);
     if (handoff?.consumed) return { who: null, why: '原旁白交接已经准备进场', handoff };
-    const items = capFresh(store, records, chatKey, { present, timeline: tl, litPerson }).filter(i => i.ready);
+    const recentUser = messages.at(-1)?.is_user ? messages.at(-1).text : '';
+    const occasion = occasionStrict(messages, { roster: ctx.roster, relations: ctx.relations, userName: ctx.userName, names: present });
+    const intimate = occasion ? intimateContacts(store, records, chatKey, ctx) : new Set();
+    const eligible = item => !occasion || !!item.playerRequest || item.source.type === 'named'
+        || !!handoff && item.avatar === handoff.avatar
+        || intimate.has(item.avatar);
+    const items = capFresh(store, records, chatKey, { present, recentUser, timeline: tl, litPerson, automatic: true, eligible }).filter(i => i.ready);
     const lapsed = new Set(knocks.filter(k => k.lapsed && k.source).map(k => `${k.source.type}:${k.source.id}`));
     const fresh = items.filter(i => !(i.source && lapsed.has(`${i.source.type}:${i.source.id}`)));
     const item = handoff ? fresh.find(i => sameIdentity(i, litPerson, scope)) : (litPerson ? fresh.find(i => sameIdentity(i, litPerson, scope)) : null) ?? fresh[0] ?? null;
     if (handoff && !item) return reject('旁白点名的人没有合法且到时候的门候选');
-    if (!item) return { who: null, why: items.length ? '门上的都叩过了、没人接' : '门上没人到时候' };
+    if (!item) return { who: null, why: occasion ? '场合不合适：没有可在此场合联系的候选' : items.length ? '门上的都叩过了、没人接' : '门上没人到时候' };
     let plan = null;
     try { plan = ctx.board().people.find(p => sameIdentity(p, item, ctx.roster))?.plan ?? null; } catch {}
     const chosen = handoff?.way === '他过来' ? '上门' : handoff?.way;
     const allowed = (item.ways ?? []).map(w => w === '他过来' ? '上门' : w);
     if (chosen && !allowed.includes(chosen)) return reject('旁白指定的联系方式与门候选冲突');
-    const way = chosen || wayFor(item, plan);
+    const way = chosen || (intimate.has(item.avatar) && item.preferredWay === '上门' ? '上门' : wayFor(item, plan));
     const origin = ['promise', 'reach'].includes(item.source?.type) ? records?.visible?.(chatKey)?.find(r => r.id === item.source.id) : null;
     const sourceAt = origin ? { pos: origin.pos, fp: origin.fp } : item.source?.type === 'errand' && plan?.fp ? { pos: messages.find(m => m.fp === plan.fp)?.pos, fp: plan.fp } : null;
     const avatar = avatarFor(ctx, item.who, item.avatar);
     if (!avatar) return { who: null, why: `${item.who}的卡身份未能唯一匹配，请确认卡文件` };
-    return { who: item.who, avatar, way, mode: modeOf(way), source: item.source ?? null, sourceAt, label: item.label ?? '', ...(handoff ? { handoff } : {}) };
+    return { who: item.who, avatar, way, mode: modeOf(way), source: item.source ?? null, sourceAt, label: item.label ?? '',
+        ...(item.playerRequest ? { playerRequest: item.playerRequest } : {}),
+        occasionExempt: intimate.has(avatar), ...(handoff ? { handoff } : {}) };
 }
 
 export function knockNow(store, records, chatKey, { present = [], timeline = null, config = null } = {}) {
@@ -437,10 +452,10 @@ export function knockNow(store, records, chatKey, { present = [], timeline = nul
     if (pendingKnock(store, chatKey)) return { ok: false, why: pendingKnock(store,chatKey).error || '有一条候着的还没写出来' };
     const knocks = knocksOf(store, chatKey);
     const c = knockCandidate(store, records, chatKey, { present, timeline: tl });
-    const summoned = !!c?.who && (c.source?.type === 'named' || !!c.handoff && c.avatar === c.handoff.avatar);
+    const summoned = !!c?.who && (!!c.playerRequest || c.source?.type === 'named' || !!c.handoff && c.avatar === c.handoff.avatar);
     if (c?.handoff && !c.who) return { ok: false, why: c.why };
     const cards = ctx.board().people.filter(p=>p.card && ['present','remote'].includes(p.status)).map(p=>p.name);
-    const timing = knockTiming({ messages, knocks, pace: paceFor(store, chatKey), present: cards, rowAt, parts: tl.parts, roster, relations, userName, maxTurns: auto.maxTurns, summoned, occasion: !summoned });
+    const timing = knockTiming({ messages, knocks, pace: paceFor(store, chatKey), present: cards, rowAt, parts: tl.parts, roster, relations, userName, maxTurns: auto.maxTurns, summoned, requested: !!c?.playerRequest, occasion: !summoned && !c?.occasionExempt });
     if (!timing.ok) return { ok: false, why: timing.why };
     if (!c?.who) return { ok: false, why: c?.why ?? '门上没人到时候' };
     return { ok: true, ...c, at: last.pos + 1, fp: last.fp, basisDay: tl.firmToday ?? tl.today };
@@ -478,7 +493,7 @@ export function beginKnock(store, chatKey, k) {
     const chat = store.requireChat(chatKey), raw = store.relationsOf?.(chat.story_id);
     const names = (store.getCast(chat.story_id) ?? []).map(p => p.name);
     // 联系候选可能排在 named 前面；进场会消费 arrival_request，先把可核实的请求随这次叩门留下。
-    if (raw && leaderOf(normalizeRelations(raw), k.who, names)) {
+    if (k.playerRequest || raw && leaderOf(normalizeRelations(raw), k.who, names)) {
         const request = playerRequestFor(store, chatKey, k, { through: k.at - 1 });
         if (request) pending.playerRequest = request;
     }
@@ -635,6 +650,7 @@ export function turnFor(store, records, chatKey, { present = [], recentUser = ''
     if (waiting && waiting.at === messages.at(-1)?.pos) return { queue: [], complete:true, why: `${waiting.who}刚来联系，等玩家回他` };
     present = (board?.people ?? []).filter(p => ['present','remote'].includes(p.status)).map(p => p.name);
     const d = turnDetail({ text: recentUser || null, messages, board, roster, relations, members:ctx.members, identityChoices:ctx.identityChoices, wants: wantsFor(store, records, chatKey, { messages, timeline: tl, present }), pace: paceFor(store, chatKey), userName, present,
+        contactRequests: contactRequests(store, chatKey, messages),
         stateNotes: store.stateNotesOf?.(chatKey) ?? [], cap: Number(auto.cap) > 0 ? Number(auto.cap) : null, chain: auto.chain ?? null });   // 没填（null）按节奏档，别算成 0；chain 没填按默认
     // 只有 director 已核实明确召回和可达性，才允许扩展开区间。
     const queue = d.queue.map(q => ({ who: q.who, avatar: q.who === '旁白' ? null : avatarFor(ctx, q.who, q.avatar), role: q.role, why: q.why, noRepeat: !!q.noRepeat,
@@ -642,7 +658,7 @@ export function turnFor(store, records, chatKey, { present = [], recentUser = ''
         ...(q.back === true ? { back: true } : {}) }));
     const unresolved = queue.find(q => q.who !== '旁白' && !hasCard(q));
     if (unresolved) return { queue: [], complete:false, why: `${unresolved.who}的卡身份未对上，请认卡确认后重新排队` };
-    return { queue, why: d.why, complete: !d.paused };
+    return { queue, why: d.why, complete: !d.paused && !d.pendingContact, ...(d.pendingContact ? { pendingContact: d.pendingContact } : {}) };
 }
 
 /**

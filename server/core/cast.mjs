@@ -78,6 +78,13 @@ export function mentionedIn(text) {
     };
 }
 
+// 联系判定认身份用的名册：去掉"不用"的旧版本卡——本局明确选了的（card_choices）除外；新面孔（face:）照留。
+// cardChoices 是 { 名字: 头像 | { avatar } }，由联系判定读取后传入。
+export function identityRoster(cast, { cardChoices = {} } = {}) {
+    const chosen = new Set(Object.values(cardChoices ?? {}).map(c => typeof c === 'object' ? c?.avatar : c).filter(Boolean));
+    return (cast ?? []).filter(p => p.role !== '不用' || chosen.has(p.avatar));
+}
+
 // 按唯一的精确身份找档，不按包含关系或档位猜人。
 export function roleOf(roster, name) {
     if (!name || !roster?.length) return null;

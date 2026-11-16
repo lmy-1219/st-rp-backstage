@@ -1,7 +1,8 @@
 // 场面表的唯一读口：开场 avatar、隔离区间、进离场记录、开局依据与人工纠正在这里统一裁决。
 // 调用方的 present 只供诊断，不能改变事实；住处与时间沿用现有读口。
 import { createHash } from 'node:crypto';
-import { hasCard, validAwayPlan, lastLeave, awayStage, callsFor, isRemote, metInPerson } from './arrival.mjs';
+import { confirmedContacts } from './contact-verdict.mjs';
+import { hasCard, validAwayPlan, lastLeave, awayStage, isRemote, metInPerson } from './arrival.mjs';
 import { narrationOf, dateOf, calendarOf, weatherOn, PARTS } from './timeline.mjs';
 import { lifeSheet } from './life.mjs';
 import { awayPlansOf } from './opening.mjs';
@@ -299,14 +300,8 @@ export function boardAt(input = {}) {
         };
     });
 
-    const called = [];
-    for (const source of [...messages.slice(-2).map(message => narrationOf(message.text)), narrationOf(recent)]) {
-        if (!source) continue;
-        for (const person of roster) {
-            const way = callsFor(source, [person.name]);
-            if (way && resolveIdentity(scope,person.name).person?.avatar === person.avatar && !called.some(c => c.avatar === person.avatar)) called.push({ who: person.name, avatar: person.avatar, way });
-        }
-    }
+    const called = (input.confirmedContacts ?? []).map(r => ({ who: r.who, avatar: r.avatar,
+        way: r.way === '电话' ? '打来电话' : r.way === '上门' ? '上门' : '发来消息' }));
     const identityWarnings = marks.flatMap(mark => Object.keys(mark.people ?? {}).flatMap(key => {
         if (roster.some(p=>p.avatar===key)) return [];
         const result=resolveIdentity(scope,key);
@@ -373,6 +368,7 @@ function cacheVersion(store, chat, chatKey, present, recentUser, marks) {
         plans,
         correctionRev: store.getMeta?.(`correction_rev:${chat.story_id}`) ?? '',
         identityChoices: store.getMeta?.(`card_choices:${chatKey}`) ?? '',
+        contacts: store.getMeta?.(`contact_verdict_revision:${chatKey}`) ?? '',
         setup: store.setupOf?.(chat.story_id)?.id ?? null,
         recentUser: recentUser ?? '',
         // 纠正是存在各条上的 JSON 文本：哪几条有、写了什么，都进版本（试玩 10/7：只数条数，改了纠正还拿到旧表）
@@ -408,6 +404,7 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
     const solo = soloMember(chat, roster);
     let identityChoices={};try{identityChoices=JSON.parse(store.getMeta?.(`card_choices:${chatKey}`)??'{}');}catch{}
     const sourceCurrent=e=>factCurrent(e,{messages:all,roster,identityChoices});
+    const contactStore = { ...store, currentMessages: () => all, requireChat: () => chat, getCast: () => roster, relationsOf: () => relations };
     const done = new Map();
     const liveByEntry = new WeakMap();
     const at = (anchor = null) => {
@@ -417,7 +414,7 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
         const through = messages.at(-1)?.pos ?? -1;
         const readKnock = store.knockLiveFor?.(chatKey, { through });
         const knockLive = readKnock == null ? null : store.deriveReader(readKnock, { through }, { cache: liveByEntry });
-        const value = boardAt({ messages, marks: messageMarks(messages), stateNotes, anchors, roster, relations, solo, identityChoices, group: !!chat.group_id, arrived, arrivals, knocks, knockLive, came, departures, sourceCurrent, awayPlans, sourceLive: source => store.sourceLive?.(chatKey, source) !== false, recentUser, timeline: timeline ?? {}, homes });
+        const value = boardAt({ confirmedContacts: confirmedContacts(contactStore, chatKey, messages.slice(-2), { phase: 'fact' }), messages, marks: messageMarks(messages), stateNotes, anchors, roster, relations, solo, identityChoices, group: !!chat.group_id, arrived, arrivals, knocks, knockLive, came, departures, sourceCurrent, awayPlans, sourceLive: source => store.sourceLive?.(chatKey, source) !== false, recentUser, timeline: timeline ?? {}, homes });
         done.set(key, value);
         return value;
     };

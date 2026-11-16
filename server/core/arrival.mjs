@@ -242,26 +242,30 @@ export function remoteWayAt(pos, { arrivals = [], anchors = null, members = [], 
     return out;
 }
 
-// 玩家这句里叫他（N-297：发消息、打电话给他，或者直接叫他过来）：叙述（括号里）点了他的名，又写着玩家主动去发、打、拨、回他。
-// 一小句一小句认（场记章程第 11 条，试玩 10/10："没回他的消息"被当成玩家在联系他）：
-// 带"没回、没接、不回、没理、没看"的那句不算；"他的消息、他发来、他打来"是收到的，不算；只有"给他发、回他、打给他、拨"才算
-const NOT_CALLING = /没回|没接|不回|不接|没理|不理|没搭理|不搭理|没看|不看|未回|未接|懒得回/;
-const esc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const B = '[^，。！？；,!?;]';
-const HIT = '打(?![听算量扮扰字开探])';
-export function callsFor(narration, names) {
-    const t = String(narration ?? '');
-    const ns = (names ?? []).filter(Boolean).map(String);
-    if (!ns.some(n => t.includes(n))) return '';
-    for (const part of t.split(/[，。！？；,!?;\n]/)) {
-        const hit = ns.filter(n => part.includes(n));
-        if (!hit.length || NOT_CALLING.test(part)) continue;
-        for (const n of hit.map(esc)) {
-            if (new RegExp(`(?:打给|拨给|拨通了?|打通了?|拨了?)${B}{0,2}${n}|给${n}${B}{0,6}(?:${HIT}|拨)|给${n}${B}{0,6}回${B}{0,4}电话|(?:${HIT}|拨|回)了?${B}{0,2}${n}的?${B}{0,4}(?:电话|号码|号)|(?:给|和|跟)${n}${B}{0,4}视频`).test(part)) return '打来电话';
-            if (new RegExp(`给${n}${B}{0,8}(?:发|回)|发给${n}|回(?:复|了|复了)?${n}${B}{0,6}(?:消息|短讯|短信|信息)|回复了?${n}`).test(part)) return '发来消息';
-        }
-    }
-    return '';
+// 宽筛只提供目标和通道线索，不判断意向、否定、现实性或实际施事。
+export function contactCandidates(text, names = []) {
+    const source = String(text ?? '');
+    const hints = [ ['电话', /电话|号码|视频|语音|拨|打给|致电|去电|通话|免提/],
+        ['消息', /消息|短讯|短信|信息|微信|聊天窗口|发送/], ['上门', /喊|叫|过来|进来|来这里|来这儿/] ];
+    const ways = hints.filter(([, re]) => re.test(source)).map(([way]) => way);
+    const recalled = ways.length > 0 || /联系/.test(source);
+    const clauses = source.split(/[，,。；;！？!?\r\n]+/);
+    const people = names.filter(Boolean).map(p => typeof p === 'string' ? { name: p, aliases: [] } : p);
+    return people.flatMap(p => {
+        const names = [p.name, ...(p.aliases ?? [])].filter(n => n && source.includes(n)
+            && people.filter(q => [q.name, ...(q.aliases ?? [])].includes(n)).length === 1);
+        if (!names.length) return [];
+        // 保留原有全句宽召回；新增发送动作只在同分句与唯一人名配对，不收窄旧通道线索。
+        const sent = clauses.some(clause => names.some(n => clause.includes(n)) && /发(?:了|出|送|过去|过来|给|向|往)/.test(clause));
+        return recalled || sent
+            ? [{ target: { name: p.name, ...(p.avatar ? { avatar: p.avatar } : {}) }, aliases: p.aliases ?? [], way: ways.length === 1 ? ways[0] : ways.length ? '未知' : sent ? '消息' : '未知' }] : [];
+    });
+}
+
+// 仅供结算推断通信渠道，不能作为玩家已实施联系的证据。
+export function contactChannelHint(text, names) {
+    const candidate = contactCandidates(text, names)[0];
+    return candidate?.way === '电话' ? '打来电话' : candidate?.way === '消息' ? '发来消息' : candidate?.way === '上门' ? '上门' : '';
 }
 
 // 离开到现在过了多久（剧情日、时段；a、b＝那两条的 { day, part }）。timeScale：这一局的尺度，"过了 3 年""同一年"（章程 G2）。

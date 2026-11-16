@@ -26,7 +26,7 @@ export function projectSource(basis, index, { phase = 'fact', through = Infinity
     const cut = index.limits.get(basis.origin);
     if (cut == null) return result('not-live', '来源属于另一分支');
     if (basis.incomplete) return result('unknown', basis.incomplete);
-    for (const ref of [basis.trigger, basis.sourceStep, basis.handoff].filter(Boolean)) {
+    for (const ref of [basis.trigger, basis.sourceStep, basis.handoff, basis.playerRequest].filter(Boolean)) {
         const live = messageBasis(ref, index, through);
         if (live.state !== 'live') return live;
         if (ref === basis.handoff && (!ref.revision || ref.avatar !== basis.avatar)) return result('unknown', '交接缺稿本或精确身份');

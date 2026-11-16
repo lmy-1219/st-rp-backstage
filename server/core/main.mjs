@@ -1,3 +1,4 @@
+import { createContactVerifier } from './contact-verdict.mjs';
 import { effectivePlanNode } from './held.mjs';
 import { renderPronouns, playerContext } from './pronoun.mjs';
 // 启动本机后台：node --disable-warning=ExperimentalWarning core/main.mjs [--home 目录] [--port 端口]
@@ -1288,6 +1289,10 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     const step = linked?.sourceStep ?? (offer?.source ? sourceStep(store, chatKey, { source: offer.source, who, at, fp: tip?.fp }) : null);
     const groundedWhy = offer?.from === 'settle' && offer?.why ? `他这回来是为了说：${offer.why}` : offer?.why || offer?.sent?.surface || '';
     const source_basis = store.arrivalBasis(chatKey, { avatar, trigger: tip, sourceStep: step, handoff: handoff ?? linked?.handoff, basisDay });
+    if (linked?.playerRequest?.type === 'message') {
+        const request = linked.playerRequest;
+        source_basis.playerRequest = { pos: request.at, fp: request.fp, sw: request.sw ?? null, sentAt: request.sentAt ?? null };
+    }
     const arr = { source_basis, who, avatar, at, fp: tip?.fp ?? null, basisDay, sourceStep: step, how: offeredHow || got?.how || '', why: groundedArrivalReason(got, groundedWhy), saw: got?.saw ?? '', meanwhile: away && !fullySettled ? got?.meanwhile ?? '' : '', where: got?.where ?? '', from: offer?.from ?? 'user',
         // 他刚发过、打过的那条（场记章程 B1）：他头两回开口那一格带上（arrivedLines），接着这件说、不重发
         ...(offer?.sent?.surface ? { sent: { way: offer.sent.way, surface: offer.sent.surface, respond: offer.sent.respond ?? '' } } : {}),
@@ -2177,13 +2182,35 @@ async function judgeKnock({ chatKey, who, way, knock, text }) {
         return null;
     }
 }
+// 快速 judge 路线上的独立短任务，不受规划 judge 开关控制。
+async function judgeContact(prompt, snapshot) {
+    const cfg = getConfig(), stage = cfg.stages.judge;
+    if (!stage?.baseUrl || !stage.apiKey || !stage.model) throw new Error('未配置联系判定快速路线');
+    if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) throw new Error('联系判定预算不足');
+    const started = Date.now(); let telemetry = null, result, failure;
+    try {
+        result = await createModelClient({ ...stage, extraBody: null, maxOutputTokens: 512, maxCap: 1024 }).complete(prompt, { onMeta: value => { telemetry = value; } });
+        return result;
+    } catch (error) { failure = error; throw error; }
+    finally {
+        const usage = result?.usage ?? failure?.usage ?? null;
+        const costUsd = usage ? ((usage.input ?? 0) * stage.priceInPerM + (usage.output ?? 0) * stage.priceOutPerM) / 1e6 : null;
+        records.logAssemble({ chatKey: snapshot.chatKey, speaker: '(联系判定)', anchor: snapshot.version, model: stage.model, servedModel: result?.servedModel,
+            status: failure ? 'failed' : 'done', usage, costUsd, ms: Date.now() - started, error: failure?.message, raw: result?.text });
+        store.logEvent(snapshot.chatKey, 'contact_model', { version: snapshot.version, usage, costUsd, ms: Date.now() - started,
+            internalRetries: telemetry?.internalRetries ?? 0, requestTimings: telemetry?.requestTimings ?? [] });
+    }
+}
+const contactVerifier = createContactVerifier({ store, complete: judgeContact });
 // 同步之后：候着的那条写出来了没有、每次叩门走到哪一步（进场／作废）
 const pendingLeftLog = new Map();
 const autoBusy = new Map();   // chatKey → 正在跑的那一次（同步钩子起的；扩展问"谁接"时先等它跑完，别拿到作废前的旧账）
 async function autoRun({ chatKey }) {
     const cfg = getConfig();
+    const confirmation = contactVerifier.ensure(chatKey);
     if (!cfg.auto?.enabled) {
         // sync 已提交稿本后后台理好手动进场那份；不把这次工作串到发送前。
+        await confirmation;
         const handoff = narratorHandoff(store, chatKey);
         if (!handoff || handoff.reason || handoff.consumed) return { ok: true, skipped: true };
         const c = knockCandidate(store, records, chatKey, { prepare: true });
@@ -2197,6 +2224,7 @@ async function autoRun({ chatKey }) {
 }
 async function autoRunNow({ chatKey, cfg }) {
     try {
+        await contactVerifier.ensure(chatKey);
         const r = await knockAdvance(store, records, chatKey, { arrive, judge: judgeKnock, config: cfg });
         if (r.finalized || r.entered.length || r.lapsed.length) log(`auto ${chatKey}: ${[r.finalized ? `${r.finalized.who} 叩门（${r.finalized.way}）` : '', ...r.entered.map(k => `${k.who} 进场`), ...r.lapsed.map(k => `${k.who} 作废（${k.lapsed.why}）`)].filter(Boolean).join('、')}`);
         // 门上到时候了的那一位：进场那份先理好（几条内理过的不重理），时机到了直接叩、不用等几十秒
@@ -2223,6 +2251,7 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
     const tail = () => ({ enabled: true, turnEnabled:cfg.auto.turn!==false, buttons:cfg.auto.buttons!==false, waiting: waitingKnock(store, records, chatKey), lapsed: recentLapsed(store, chatKey), remote: remoteNow() });
     if (peek) return { ...off, ...tail(), left:takePendingLeft(store,chatKey) };
     if (autoBusy.has(chatKey)) await autoBusy.get(chatKey).catch(() => {});   // 同步那一下还在理叩门：等它
+    await contactVerifier.ensure(chatKey);
     const source=sourceVersion(store,chatKey);
     const found = autoLeave(store,records,chatKey,{present,config:cfg});
     if(found.length) markLeft(store,chatKey,found);
@@ -2243,15 +2272,18 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
             // 进场那份按叩门那条接上（提前理过的几秒就回；没理过的这里等模型几十秒）：他那条写出来时怎么来的、为什么来已经在他那一格里
             try {
                 const result = await arrive({ chatKey, who: k.who, avatar: k.avatar, mode: k.mode, way: k.way, anchor: { at: k.at, fp: k.fp }, knock: true, handoff: k.handoff ?? null });
-                if (!result.ok) { knock = null; t.why = result.why; }
-            } catch (error) { knock = null; log(`auto ${chatKey}: arrive for knock failed ${error.message}`); }
+                if (!result.ok) { knock = null; t.complete = false; t.why = result.why; }
+                else if (t.pendingContact?.avatar === k.avatar && k.playerRequest?.fp === t.pendingContact.request.fp) {
+                    t.pendingContact = null; t.complete = true; t.why = '';
+                }
+            } catch (error) { knock = null; t.complete = false; t.why = `建立联系失败：${error.message}`; log(`auto ${chatKey}: arrive for knock failed ${error.message}`); }
         } else t.why = t.why ? `${t.why}；${k.why}` : k.why;
     }
     // 调度式预跑：排在头一个的，这句的那一格先组装起来（打字时的草稿和发出去的不一样时，草稿那份用不上）
     if(sourceVersion(store,chatKey)!==source)return {queue:[],complete:false,knock:null,left,why:'来源已改变，停下重新核对',...tail()};
     const first = t.queue.find(q => q.avatar);
     if (first && recentUser) try { prefetchFor(store, records, { assembler, keyMaker }, { chatKey, recentUser, present, only: [first.avatar] }); } catch {}
-    const out = { queue: t.queue.map(q=>executionFor(store,chatKey,q)), complete:t.complete, why: t.why, knock: knock ? executionFor(store,chatKey,{ who: knock.who, avatar: knock.avatar, way: knock.way, at: knock.at, fp: knock.fp, label: knock.label ?? '', ...(knock.handoff ? { handoff: knock.handoff } : {}) },'knock') : null, left, ...tail() };
+    const out = { queue: t.queue.map(q=>executionFor(store,chatKey,q)), complete:t.complete, why: t.why, ...(t.pendingContact ? { pendingContact: t.pendingContact } : {}), knock: knock ? executionFor(store,chatKey,{ who: knock.who, avatar: knock.avatar, way: knock.way, at: knock.at, fp: knock.fp, label: knock.label ?? '', ...(knock.handoff ? { handoff: knock.handoff } : {}) },'knock') : null, left, ...tail() };
     log(`turn ${chatKey}: [${out.queue.map(q => `${q.who}·${q.role}${q.back ? '·叫回来' : ''}`).join(' ')}]${out.knock ? ` 叩门 ${out.knock.who}（${out.knock.way}）` : ''}${out.waiting ? ` 候着 ${out.waiting.who}` : ''}${out.lapsed.length ? ` 作废 ${out.lapsed.map(l => l.who).join(' ')}` : ''}${found.length ? ` 新判定走了 ${found.map(l => l.who).join(' ')}` : ''}${!out.queue.length ? ` — ${out.why}` : ''}`);
     return out;
 }
