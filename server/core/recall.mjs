@@ -7,6 +7,7 @@ import { personWord, renderPronouns } from './pronoun.mjs';
 
 import { elapsedUnits, relativeUnit, scaleOf, DAY, timeEvidence } from './timescale.mjs';
 import { similar } from './records.mjs';
+import { uniqueSentences } from './mood.mjs';
 
 const RECENT_WINDOW = 30;      // 最近这么多条消息里的事前台自己看得见，不再重复
 const MAX_RECALL = 8;
@@ -626,7 +627,7 @@ export const lessonLines = ({ name, lessons = [], when }) => (lessons.length
     ? [`眼下的情形，让${name}想起自己以前的一回（${personWord(name)}记得；这回怎么做由${personWord(name)}，不用特意提起）：`, ...lessons.map(r => lessonText(r, when))] : []);
 
 // 纯程序版的一格：按时间顺序给，同一天的并成一行（读着像一段话，不像清单）；原话只挂在最相关的两条上。
-export function renderPlain({ name, entry, hits, plainHits = null, quoted = null, state, open, when, who, lessons = [] }) {
+export function renderPlain({ name, entry, hits, plainHits = null, quoted = null, state, open, when, historyWhen = when, who, lessons = [] }) {
     const lines = [];
     if (entry) lines.push(entry);
     lines.push(...lessonLines({ name, lessons, when }));
@@ -635,10 +636,21 @@ export function renderPlain({ name, entry, hits, plainHits = null, quoted = null
         lines.push(`${name}记得的、和眼下有关的旧事：`);
         const groups = [];
         for (const r of shown) {
-            const w = when(r), g = groups.at(-1);
+            const w = historyWhen(r), g = groups.at(-1);
             if (g && g.when === w) g.items.push(r); else groups.push({ when: w, items: [r] });
         }
-        for (const g of groups) lines.push(`· ${g.when}：${g.items.map(r => `${String(r.text).replace(/[。．.]+$/, '')}${who(r)}${!quoted || quoted.has(r.id) ? quote(r) : ''}`).join('；')}。`);
+        for (const g of groups) {
+            const earlier = new Map();
+            const items = g.items.map(r => {
+                const owner = who(r), tail = `${owner}${!quoted || quoted.has(r.id) ? quote(r) : ''}`;
+                let text = uniqueSentences(String(r.text), earlier.get(owner) ?? '');
+                if (!text && tail) text = String(r.text);
+                if (!text) return '';
+                earlier.set(owner, `${earlier.get(owner) ?? ''}\n${text}`);
+                return `${text.replace(/[。．.]+$/, '')}${tail}`;
+            }).filter(Boolean);
+            if (items.length) lines.push(`· ${g.when}：${items.join('；')}。`);
+        }
     }
     if (state.length) {
         lines.push(`${name}知道的、一直算数的现状：`);

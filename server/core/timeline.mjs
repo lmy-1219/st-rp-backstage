@@ -19,6 +19,20 @@ export function timelineLabel(timeline, pos) {
     const row = timeline.rows.find(r => r.pos === pos);
     return row ? [dateIn(timeline.start, row.day)?.ymd, timeline.scale.ordinal(dayNumber(timeline.start, row.day)), row.part].filter(Boolean).join(' · ') : '';
 }
+
+// 送旧事/背景用的显示层：日历与起算偏移照旧，时段只取事件位置那一行。
+// 半格是离开以后，没有消息行，不能借用离开前的时段。
+export function historyTime(timeline, pos, { day = timeline.dayOf(pos), today = timeline.today } = {}) {
+    const ts = timeline.scale ?? scaleOf(timeline.start);
+    const row = timeline.rows.find(r => r.pos === pos);
+    const part = row && !row.unsure ? row.part ?? row.coarsePart : null;
+    const provisional = row?.provisional || timeline.rows.at(-1)?.provisional
+        || (timeline.firmToday != null && today !== timeline.firmToday)
+        || (timeline.firmDayOf && day !== timeline.firmDayOf(pos));
+    let label = timeTag(day, { start: timeline.start, today, timeScale: ts });
+    if (dateIn(timeline.start, day) || String(timeline.start?.从哪天算 ?? '').trim()) label = label.replace('早些时候', '');
+    return [label, part].filter(Boolean).join(' · ') + (provisional ? '（暂定）' : '');
+}
 const PART_WORDS = [
     [/凌晨|黎明|破晓/, '凌晨'],
     // 晚上十二点、午夜、零点是深夜那一格（试玩 10/11："到了晚上十二点"标成了晚上）；中午十二点不算

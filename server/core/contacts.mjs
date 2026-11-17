@@ -30,7 +30,7 @@ export function absentPeople({ records, messages, present, userName = null, open
         const entry = roleOf(roster, person);
         if (entry && QUIET.has(entry.role)) continue;
         const seen = records.filter(r => knows(r, person));
-        const ledger = buildLedger(records, { knower: person, named: namedParties(roster, userName) });
+        const ledger = buildLedger(records, { knower: person, named: namedParties(roster, userName), roster: roster.map(e => e.name) });
         const openMoney = new Set([...ledger.debts, ...ledger.deals, ...ledger.quotes].map(r => r.id));
         // 碰上了、还没下文的事，他和在场的人（玩家）都知道的，也算他那边挂着的事（章程 #2：来联系得有这样的由头）
         const sharedOpen = r => isOpenMatter(r) && r.matter.kind !== LEAD && r.matter.kind !== INTENT && (r.audience ?? []).some(a => here.has(a));

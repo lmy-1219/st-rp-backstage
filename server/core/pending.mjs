@@ -133,9 +133,10 @@ function ruleItems(records, timeline) {
     return out;
 }
 
-function moneyItems(records, named = []) {
+function moneyItems(records, named = [], roster = named, relation = null) {
+    const identity = { roster, relation };
     const rows = records.filter(r => r.type === '钱' && r.money).sort((a, b) => a.pos - b.pos);
-    const ledger = buildLedger(rows, { named });
+    const ledger = buildLedger(rows, { named, ...identity });
     const out = [];
     for (const r of rows) {
         const m = r.money;
@@ -144,16 +145,16 @@ function moneyItems(records, named = []) {
         else if (m.stage === '说定') {
             // 付了就关说定：同两方、数目一样当然关；说定没写数目、或者两条说的是同一件事（去掉人名后有两字以上实词重合）也关
             // （试玩 10/6 的门："寻思等会儿把修门的钱划给维修工"没数目，下面"付了三百给修门的师傅"，账本按数目一样才关，永远关不上）
-            const sameParties = x => sameParty(x.money.from, m.from, named) && sameParty(x.money.to, m.to, named);
+            const sameParties = x => sameParty(x.money.from, m.from, named, identity) && sameParty(x.money.to, m.to, named, identity);
             const sameMatter = x => sameOccasion(x.text, r.text, [m.from, m.to, x.money.from, x.money.to]);
             // 数目一样就关；数目对不上（或说定没写数目）要说的是同一件事才关——同两方之间别的一笔付款不算（买鞋的钱不因为付了外卖钱就关）
             const paid = ledger.moves.find(x => ['付了', '花了'].includes(x.money?.stage) && x.pos > r.pos
-                && ((sameParties(x) && (x.money.amount === m.amount || sameMatter(x))) || (m.amount == null && samePerson(x.money.from, m.from) && sameMatter(x))));
+                && ((sameParties(x) && (x.money.amount === m.amount || sameMatter(x))) || (m.amount == null && samePerson(x.money.from, m.from, identity) && sameMatter(x))));
             out.push(base({ id: `money:${r.id}`, kind: '钱', text: r.text, who: [m.from], with: [m.to], owner: m.from, since: r.pos, source: { type: r.type, id: r.id }, status: paid ? '办了' : '等着', statusAt: paid?.pos ?? null, why: paid ? `付了 ${paid.money.amount}（#${paid.pos}）` : '说定了', settledBy: paid?.id }));
         } else if (m.stage === '欠着') {
             const debt = ledger.debts.find(x => x.id === r.id);
             // 没写数目的欠账账本算不出还剩多少：之后同两方之间有"还了"才算还清，不然一直欠着（试玩 10/7："先赊着"被当成了还清）
-            const repaid = m.amount == null ? ledger.moves.find(x => x.money?.stage === '还了' && x.pos > r.pos && sameParty(x.money.from, m.from, named) && sameParty(x.money.to, m.to, named)) : null;
+            const repaid = m.amount == null ? ledger.moves.find(x => x.money?.stage === '还了' && x.pos > r.pos && sameParty(x.money.from, m.from, named, identity) && sameParty(x.money.to, m.to, named, identity)) : null;
             const open = debt || (m.amount == null && !repaid);
             out.push(base({ id: `money:${r.id}`, kind: '钱', text: r.text, who: [m.from], with: [m.to], owner: m.from, since: r.pos, source: { type: r.type, id: r.id }, status: open ? '等着' : '办了', statusAt: repaid?.pos ?? null, why: debt ? `欠着 ${debt.left}` : open ? '欠着（数目不明）' : '还清', settledBy: repaid?.id }));
         }
@@ -206,7 +207,7 @@ export function foldPending(input = {}) {
     assertKnockReader(input.knockLive, foldPending);
     const same = input.same ?? ((a, b) => a === b);
     const records = [...(input.records ?? [])].sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
-    const items = [...promiseItems(records, input.timeline ?? {}, same), ...todoItems(records, input.messages ?? [], input.board ?? {}, input.timeline ?? {}, input.userName, same, input.boardAt ?? null, input.rosterNames ?? []), ...ruleItems(records, input.timeline ?? {}), ...moneyItems(records, input.named ?? []), ...menuItems(input.menu), ...errandItems(input.awayPlans, input.board), ...contactItems(input.contacts, input.messages ?? [], { anchors: input.anchors ?? null, arrivals: input.arrivals ?? [], knockLive: input.knockLive }), ...matterItems(records)];
+    const items = [...promiseItems(records, input.timeline ?? {}, same), ...todoItems(records, input.messages ?? [], input.board ?? {}, input.timeline ?? {}, input.userName, same, input.boardAt ?? null, input.rosterNames ?? []), ...ruleItems(records, input.timeline ?? {}), ...moneyItems(records, input.named ?? [], input.rosterNames ?? input.named ?? [], input.relation ?? null), ...menuItems(input.menu), ...errandItems(input.awayPlans, input.board), ...contactItems(input.contacts, input.messages ?? [], { anchors: input.anchors ?? null, arrivals: input.arrivals ?? [], knockLive: input.knockLive }), ...matterItems(records)];
     const byId = new Map(items.map(item => [item.id, item]));
     // 同一件几处来源：口袋和约定对得上（规划者写明了跟着哪件，或题目、露面、用在和约定说的是一回事），两边互相记着对方的编号
     for (const p of items.filter(x => x.kind === '约定')) for (const row of arr(input.menu)) {
@@ -238,6 +239,8 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
         // 他后来自己进了场，结算写的联系就作废（landing.enteredSince）：隔离区间、进场记录变了都要重算
         anchors: chat.anchors ?? '',
         arrivals: (store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '',
+        // 钱账认人依赖完整名册及登记又名；只改这些资料也必须重折，不能沿用旧的了结状态。
+        moneyIdentity: JSON.stringify({ cast: (store.getCast?.(chat.story_id) ?? []).map(c => [c.name, c.role]), relation: store.relationsOf?.(chat.story_id) ?? null }),
     };
     // 版本里带上口袋各件的状态（进口袋、用上了是菜单日志变的，条数不变）
     const seqHash = createHash('sha1').update(messages.map(m => `${m.pos}:${m.fp}:${m.boardMark ?? ''}`).join('|')).digest('hex').slice(0, 16);
@@ -278,7 +281,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     let anchors = null, arrivals = [];
     try { anchors = meta.anchors ? JSON.parse(meta.anchors) : null; } catch {}
     try { arrivals = JSON.parse(meta.arrivals || '[]') ?? []; } catch {}
-    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, named: namedParties(store.getCast?.(chat.story_id) ?? [], userName), same, homes: lifeSheet(visible).homes });
+    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, relation, named: namedParties(store.getCast?.(chat.story_id) ?? [], userName), same, homes: lifeSheet(visible).homes });
     pendingCache.set(key, value);
     while (pendingCache.size > 32) pendingCache.delete(pendingCache.keys().next().value);
     return value;

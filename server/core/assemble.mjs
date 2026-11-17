@@ -36,7 +36,7 @@ export const fromThatDay = text => DAY_WORDS.reduce((t, [a, b]) => t.split(a).jo
 // 模型写的一句以"昨天""3 天前"开头，句子里却又冒出"今晚""明天"（照抄了当时的话）：
 // 前台会当成今晚（实测：把前天医生说的"今晚最疼"说成了今晚）。引号外的换成"当晚""第二天"，引号里的原话不动。
 export function pastDayWords(line) {
-    const lead = /^(昨天|前天|约? ?\d+ ?(天|周|个月)前|几天前)/.exec(line)?.[0];
+    const lead = /^(?:(?:昨天|前天|约? ?\d+ ?(?:天|周|个月|年|小时)前|几天前)|(?:(?:(?:\d+年)?\d+月\d+日|\d+年(?:\d+月)?)(?: · 第\d+(?:天|年|个月|个小时))?|第\d+(?:天|年|个月|个小时))(?: · [^（：，。！？]+)?（[^）]*）(?=[：，,\s]|$)|(?:(?:\d+年)?\d+月\d+日|\d+年(?:\d+月)?|第\d+(?:天|年|个月|个小时))(?=[：，,\s]|$))/.exec(line)?.[0];
     if (!lead) return line;
     // 模型把"昨天"和记录里的"前一天"叠在一起写成"昨天前一天"：合成一个说法。
     if (/^昨天(前一天|当天)/.test(line)) return pastDayWords(line.replace(/^昨天前一天/, '前天').replace(/^昨天当天/, '昨天'));
@@ -49,7 +49,7 @@ const QUOTE_CLIP = 30;
 const TYPE_LABEL ={ 说: '说', 做: '做', 想法: '想法', 改变: '变化', 了结: '了结' };
 
 export function buildAssemblerPrompt({ name, present = [], recent = [], recentUser = '', material }) {
-    const { pool, when } = material;
+    const { pool, historyWhen: when = material.when } = material;
     const lines = [`轮到开口的角色：${name}`];
     if (present.length) lines.push(`此刻在场：${present.join('、')}`);
     const said = recent.filter(Boolean).map(t => t.trim()).filter(Boolean);

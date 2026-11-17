@@ -15,6 +15,62 @@ const LINGER_DAYS = { 几天: 3, 几周: 14 };
 const MAX_LINGER = 3;
 const RECENT_WINDOW = 30;        // 最近这么多条里的事前台自己看得见（和 recall 同一个数）
 
+export const HISTORY_CONTEXT = (userName = '对方') => `这是发生过的事，眼下是什么氛围以最新的消息为准；最近几轮已经提过的不用再提，${userName}问起或眼下需要时自然接上。`;
+
+// 只认完整句子相同；引号和括号里的标点不切开，不按相似度或来源位置判同一件事。
+function sentences(text) {
+    const out = [], stack = [], pairs = { '（': '）', '(': ')', '「': '」', '『': '』', '“': '”' };
+    let start = 0;
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (pairs[c]) stack.push(pairs[c]);
+        else if (c === stack.at(-1)) stack.pop();
+        if (!stack.length && /[。！？；;\n]/.test(c)) { out.push(text.slice(start, i + 1)); start = i + 1; }
+    }
+    if (start < text.length) out.push(text.slice(start));
+    return out;
+}
+const sentenceKey = s => s.trim().replace(/[。；;]+$/, '');
+export function uniqueSentences(text, earlier = '') {
+    const seen = new Set(sentences(String(earlier)).map(sentenceKey).filter(Boolean));
+    return sentences(String(text)).filter(s => {
+        const k = sentenceKey(s);
+        if (!k || seen.has(k)) return false;
+        seen.add(k); return true;
+    }).join('');
+}
+
+const historyHead = line => /(?:记得的、和眼下有关的旧事|此刻可能想起的旧事（按时间）|前几次开口时给过的背景（不一定写进了正文，实际发生了什么以正文为准）|和.+有关、发生过的（.+）|这几天发生过、留下了影响的事|当时记下的余波)：$/.test(line);
+// 只在同一行正文里去重；冒号前的标签原样保留，不解析日期、不比对别行或别块。
+export function dedupHistoryLines(lines) {
+    const out = [];
+    for (let i = 0; i < lines.length;) {
+        const head = lines[i++];
+        if (!historyHead(head)) { out.push(head); continue; }
+        const body = [];
+        while (i < lines.length && lines[i].startsWith('· ')) {
+            const line = lines[i++], text = line.slice(2);
+            const at = text.search(/（(?:当时记下的：|原话：|这是另一位「)/);
+            const main = at < 0 ? text : text.slice(0, at), tail = at < 0 ? '' : text.slice(at);
+            const colon = main.indexOf('：'), label = main.slice(0, colon + 1);
+            const kept = uniqueSentences(main.slice(colon + 1));
+            // 附属说明不能脱离正文；删空时整条原样留下。
+            if (kept || tail) {
+                body.push(kept ? `· ${label}${kept}${tail}` : line);
+            }
+        }
+        if (body.length) out.push(head, ...body);
+    }
+    return out;
+}
+export function withHistoryContext(text, userName = '对方') {
+    let added = false;
+    return text.split('\n').map(line => {
+        if (added || !historyHead(line)) return line;
+        added = true; return `${HISTORY_CONTEXT(userName)}\n${line}`;
+    }).join('\n');
+}
+
 // 每条余波带 keep（留多久）：'next'＝他紧接着的下一次开口；'scene'＝这场戏里（CARRY_TURNS 次开口、CARRY_SPAN 条以内、同一个剧情日）；
 // 数字 n＝给到那一天之后第 n 个剧情日（这场戏里照常给；过了这场戏换成"平时压在底下，碰到才冒"的写法）。
 // 老数据：fade＝next，没写的＝scene。about＝这是哪件事（过了这场戏以后用来点名）。from＝第几个剧情日起才给（"慢慢松"那一段）。
@@ -32,7 +88,7 @@ export function carryLines(prior, opts) {
 // resolve(key)：这一项现在该怎么写（离开期间的推演按玩家说的改过了）；undefined＝照原来的，null＝改过后没了、不再给。
 // cut(这一项)：给之前再过一道（她的身子她说了算，body.mjs：说她伤病的那一截切掉）；返回改过的这一项，null＝这回不给。
 // tag(第几天, 今天)：那天怎么写（timeline.mjs timeTag，和这一格别处同一个说法）；没有就照"昨天、前天、几天前"。
-export function carryParts(prior, { name, userName = '对方', now = Infinity, current = [], dayOf = null, resolve = null, timeScale = null, cut = null, tag = null }) {
+export function carryParts(prior, { name, userName = '对方', now = Infinity, current = [], dayOf = null, resolve = null, timeScale = null, cut = null, tag = null, sourcePos = null }) {
     const skip = new Set(current.map(c => c.key));
     const seen = new Set();
     const near = [], later = new Map();
@@ -53,17 +109,19 @@ export function carryParts(prior, { name, userName = '对方', now = Infinity, c
             if (keep === 'next' ? i === 0 && scene : scene) { seen.add(c.key); near.push(c.text); continue; }
             if (typeof keep === 'number' && since <= keep) {
                 seen.add(c.key);
-                const k = c.about ?? '那件事';
-                if (!later.has(k)) later.set(k, { since, items: [] });
+                const pos = sourcePos?.(c) ?? c.pos ?? slot.n - 0.5;
+                const eventDay = dayOf ? dayOf(pos) : today - since;
+                const about = c.about ?? '那件事', k = `${about}\u0000${pos}`;
+                if (!later.has(k)) later.set(k, { about, eventDay, pos, items: [] });
                 later.get(k).items.push(c.text);
             }
         }
     }
-    const head = near.length ? [`${name}前几次开口时心里带着的、还没过去的（刚才已经说了、做了的不用再来一遍；剩下的看${userName}怎么接——接着、加重、松动、转向都行，可以慢慢出来，也可以一直压着不说）：`,
+    const head = near.length ? [`${name}前几次开口时给过的背景（不一定写进了正文，实际发生了什么以正文为准）：`,
         ...near.map(t => `· ${t}`)] : [];
     const tail = [];
-    for (const [about, { since, items }] of later) {
-        tail.push(`${name}心里还挂着${about}${since > 0 ? `（${tag ? tag(today - since, today) : dayWord(since, timeScale)}的事）` : ''}（影响仍在，眼下的分量照新的经历）：`, ...items.map(t => `· ${t}`));
+    for (const { about, eventDay, pos, items } of later.values()) {
+        tail.push(`${name}和${about}有关、发生过的（${tag ? tag(eventDay, today, pos) : dayWord(today - eventDay, timeScale) || scaleOf(timeScale).this}）：`, ...items.map(t => `· ${t}`));
     }
     return { near: head, later: tail };
 }
@@ -81,7 +139,7 @@ export function lingerLines(records, { name, userName = null, dayOf, today, last
         && r.pos < lastPos - RECENT_WINDOW && today - dayOf(r.pos) <= lingerFor(r.duration, timeScale))
         .sort((a, b) => b.pos - a.pos).slice(0, MAX_LINGER).sort((a, b) => a.pos - b.pos);
     if (!picked.length) return [];
-    return [`${name}这几天心里、身上还没过去的（来自已发生的事）：`, ...picked.map(r => `· ${when(today - dayOf(r.pos))}：${r.text}`)];
+    return [`${name}这几天发生过、留下了影响的事：`, ...picked.map(r => `· ${when(today - dayOf(r.pos), r)}：${r.text}`)];
 }
 
 // 余波（方案"场记的分量与连续性"D 层）：记账记下的他心里留下的那股劲（型"余波"，只记给他自己；relation.weight 多重 1～3，relation.until 等到什么才过去）。
@@ -99,16 +157,16 @@ export function afterLines(records, { name, dayOf = () => 0, today = 0, lastPos 
         .filter(x => x.w > 1 && today - x.day <= keep(x.w));
     if (!rows.length) return [];
     const picked = rows.sort((a, b) => b.w - a.w || b.r.pos - a.r.pos).slice(0, AFTER_MAX).sort((a, b) => a.r.pos - b.r.pos);
-    const when = x => (tag ? tag(x.day, today) : dayWord(today - x.day, timeScale) || ts.this + '早些时候');
-    const until = x => (x.r.relation?.until ? `——等到${x.r.relation.until}才过去` : '');
-    return [`${name}心里还没过去的（就这个分量带着，没有新的事不往上加；等到写着的那件事就过去了）：`,
+    const when = x => (tag ? tag(x.day, today, x.r.pos) : dayWord(today - x.day, timeScale) || ts.this);
+    const until = x => (x.r.relation?.until ? `（当时记下的：要等到${x.r.relation.until}）` : '');
+    return [`${name}当时记下的余波：`,
         ...picked.map(x => `· ${when(x)}：${x.r.text}${until(x)}`)];
 }
 
 // 给前台的那一句口味（正着说：Gemini 对"别怎样"不太听）。用户还没说话（由他先开口）时不给。
 export function cueLine({ name, userName = '对方', recentUser = '' }) {
     if (!String(recentUser).trim()) return null;
-    return `（${name}此刻的心情从上一次开口接着来：没过去的还在；这一轮看${userName}这句话把它往哪儿带——接着、加重、松动、转向，或者生出新的，顺着来。）`;
+    return `（${name}眼下的心情，看${userName}这句话和最新的消息自己判断。）`;
 }
 
 // 用户伸手接下的那件事（口袋）：这回一次给全了，他紧接着的下一次开口心里还带着。

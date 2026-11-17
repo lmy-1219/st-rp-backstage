@@ -535,10 +535,13 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             const chatKey = str(b.chatKey, 'chatKey');
             store.requireChat(chatKey);
             const userName = [...store.currentMessages(chatKey)].reverse().find(m => m.is_user)?.name ?? null;
-            const ledger = buildLedger(records.visible(chatKey), { named: namedParties(store.getCast?.(store.requireChat(chatKey).story_id) ?? [], userName) });
+            const storyId = store.requireChat(chatKey).story_id;
+            const cast = store.getCast?.(storyId) ?? [];
+            const identity = { roster: cast.map(e => e.name), relation: normalizeRelations(store.relationsOf?.(storyId)) };
+            const ledger = buildLedger(records.visible(chatKey), { named: namedParties(cast, userName), ...identity });
             const row = r => ({ pos: r.pos, text: r.text, ...r.money, left: r.left ?? null });
             const currency = withPack(chatKey).economy.table?.currency ?? '';
-            const left = balances(records.visible(chatKey), { start: store.setupOf?.(store.requireChat(chatKey).story_id)?.data?.钱 ?? [], people: [userName] }).map(x => balanceText(x, currency)).filter(Boolean);
+            const left = balances(records.visible(chatKey), { start: store.setupOf?.(store.requireChat(chatKey).story_id)?.data?.钱 ?? [], people: [userName], ...identity }).map(x => balanceText(x, currency)).filter(Boolean);
             return { currency, left, debts: ledger.debts.map(row), deals: ledger.deals.map(row), quotes: ledger.quotes.map(row), moves: ledger.moves.map(row) };
         },
         // 名册：cards＝ST 里现有的卡（扩展打开窗口时带来，补默认档）；set＝用户改的档位与钩子。
@@ -739,9 +742,10 @@ export function createRoutes(store, { worker = null, records = null, assembler =
             }
             const table = withPack(chatKey).economy.table;
             if (!q.trim() || talksMoney(q, table)) {
-                const left = balances(s.visible, { start: store.setupOf?.(s.chat.story_id)?.data?.钱 ?? [], people: [s.userName] }).map(x => balanceText(x, table?.currency ?? '')).filter(Boolean);
+                const identity = { roster: s.roster.map(e => e.name), relation: normalizeRelations(store.relationsOf?.(s.chat.story_id)) };
+                const left = balances(s.visible, { start: store.setupOf?.(s.chat.story_id)?.data?.钱 ?? [], people: [s.userName], ...identity }).map(x => balanceText(x, table?.currency ?? '')).filter(Boolean);
                 if (left.length) lines.push('手上的钱（按记下的进出算）：', ...left.map(l => `· ${l}`));
-                lines.push(...moneyLines(buildLedger(s.visible, { named: namedParties(store.getCast?.(s.chat.story_id) ?? [], s.userName) }), { name: '账上', when: s.when, currency: table?.currency ?? '', max: 10 }));
+                lines.push(...moneyLines(buildLedger(s.visible, { named: namedParties(store.getCast?.(s.chat.story_id) ?? [], s.userName), ...identity }), { name: '账上', when: s.when, currency: table?.currency ?? '', max: 10, ...identity }));
             }
             return { lines };
         },

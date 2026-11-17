@@ -17,7 +17,7 @@ import { absentPeople, pickContact, contactLines } from './contacts.mjs';
 import { detectGap, absenceMarks, attemptsDuring, returnLines, returnCarry, phoneCarry, dueReturn } from './absence.mjs';
 import { awayLines, awayBrief, awayCarry } from './away.mjs';
 import { rollDice, motifLedger } from './dice.mjs';
-import { carryParts, lingerLines, afterLines, cueLine, pocketCarry } from './mood.mjs';
+import { carryParts, lingerLines, afterLines, cueLine, pocketCarry, dedupHistoryLines, withHistoryContext } from './mood.mjs';
 import { impulseLines, IN_PLACE, looseEnds, STAY_STATES, stillThere } from './scene.mjs';
 import { profileParts } from './profile.mjs';
 import { senseScores, textKey } from './vectors.mjs';
@@ -43,7 +43,7 @@ import { OFFER_HOLD_SPAN } from './menu-evidence.mjs';
 import { picksOf } from './guide.mjs';
 import { SIGN_PICKS_MAX, NOW_MOTIF, placesIn, buildBrief, needsPlan, stepPocket, stackedHere, reachedFor, awaitingExtract, AWAIT_SPAN, pocketLines, respondLines, shownLines, sinkLines, storyDigest, WORLD, OFFSCREEN_FIT, entryOf, nearPlace, timePassed, offscreenLines, errandLines, entryProjection, ifTakenOf, ifSunkOf, takenOf, expiredPocket, premiseGone, storyLayers, layerNote, briefBlocks, BRIEF_CHARS, BRIEF_SHARES, UNSQUEEZED, categoryCounts, draggingLines, overdueAhead, LOOKBACK_PLANS } from './planner.mjs';
 import { foldState, stateLines, herOwnOnly } from './state.mjs';
-import { timeline, clockNow, dateIn, dayNumber, weekdayIndex, PARTS, withNoteMarks, timeTag, sceneHeading, noteTime } from './timeline.mjs';
+import { timeline, clockNow, dateIn, dayNumber, weekdayIndex, PARTS, withNoteMarks, timeTag, historyTime, sceneHeading, noteTime } from './timeline.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
 import { paceOf, paceNote } from './tempo.mjs';
 import { promiseOf, stageOf, promiseLines, relatedTo, retime, partyOf, LAPSED, settledTwins, settledByDoing, dueOf } from './promises.mjs';
@@ -360,6 +360,8 @@ function materialFor(store, records, { chatKey, speaker, name, anchor = null, re
         anchors: chat.anchors ? JSON.parse(chat.anchors) : null, pool, skipOpen, more: asksPast(recentUser, scaleFor(store, chatKey)), scale, timeScale: scaleFor(store, chatKey), boardAt, timeStart: store.setupOf?.(chat.story_id)?.data?.时间, dayOf: timelineFor(store, records, chatKey).dayOf,
         tag: (n, today) => timeTag(n, { start: store.setupOf?.(chat.story_id)?.data?.时间 ?? null, today, timeScale: scaleFor(store, chatKey) }),
     });
+    const historyTimeline = timelineFor(store, records, chatKey, messages, { seen: true });
+    material.historyWhen = r => r.lesson || material.state.includes(r) || material.open.includes(r) ? material.when(r) : historyTime(historyTimeline, r.pos);
     const byPos = new Map(messages.map(m => [m.pos, m.text]));
     return { material, messageText: pos => byPos.get(pos) ?? '' };
 }
@@ -534,7 +536,7 @@ export async function composeSlot(store, records, args, opts = {}) {
     const scene = slotScene(store, records, args);
     const base = await memorySlot(store, records, eyes, { ...opts, skipOpen: promised?.shownIds ?? null, pendingLedger, scale: fit.s, episodes: store.episodesOf?.(chatKey) ?? [], guard });
     const backstoryPick = await backstorySense(store, chatKey, args.recentUser, opts.vectors);
-    const { lines: extra, blocks = null, contact, carry = [], linger = [], dayOf: seenDayOf = null, stance = null } = extrasFor(store, records, eyes, { ...opts, pendingAway: pending, pendingLedger, backstoryPick, promised, guard, scene }, base);
+    const { lines: extra, blocks = null, contact, carry = [], linger = [], dayOf: seenDayOf = null, historyTimeline, stance = null } = extrasFor(store, records, eyes, { ...opts, pendingAway: pending, pendingLedger, backstoryPick, promised, guard, scene }, base);
     const name = camera ? CAMERA_NAME : speakerName || speaker;
     // 隔着消息、电话的人没"进门"：旧事那段开头那句换成人不在这儿（试玩 10/13：他发消息来，场记写他刚到场、进门之前的事没看见）
     if (stance && base?.text && !['present', 'arrived'].includes(stance.status)) base.text = base.text.split('\n').map(l => l.startsWith(`${name}刚到场。`) ? stance.status === 'remote' ? `${name}这会儿隔着${stance.way || '消息／电话'}，人不在这儿；这里之前发生的事、说过的话，${name}没看见也没听见，除非有人告诉过${name}。` : `${name}人不在这儿；在场情况没有确认。` : l).join('\n');
@@ -566,7 +568,12 @@ export async function composeSlot(store, records, args, opts = {}) {
     };
     // 余波里说她伤病的那一截按守门切（"以为她伤得重、药还没送来"不跨几轮一直带着；她提了身子才算进那两条）
     const carried = carryParts(prior, { name, userName: userName ?? '对方', now: Number.isFinite(at) ? at : messages.length, current: carry, dayOf: seenDayOf, resolve, timeScale: scaleFor(store, chatKey), cut: guard.carry,
-        tag: (n, today) => timeTag(n, { start: store.setupOf?.(chat.story_id)?.data?.时间 ?? null, today, timeScale: scaleFor(store, chatKey) }) });
+        sourcePos: c => {
+            const id = /^(?:away|return|phone):(\d+)/.exec(c.key ?? '')?.[1];
+            const absence = id ? (store.absences?.(chatKey) ?? []).find(a => String(a.id) === id) : null;
+            return absence?.from_pos == null ? null : absence.from_pos + 0.5;
+        },
+        tag: (day, today, pos) => historyTime(historyTimeline, pos, { day, today }) });
     const scopedBlocks = (blocks ?? []).filter(p => !camera || p.scope !== 'person');
     const proposed = [...(camera ? scopedBlocks : (blocks ?? [{ tier: 0, lines: extra, scope: 'person' }])),
         { tier: 0, lines: carried.near, scope: 'person' }, { tier: 1, lines: carried.later, place: 'back', scope: 'person' },
@@ -597,6 +604,9 @@ export async function composeSlot(store, records, args, opts = {}) {
     const recallCap = Math.round((asksPast(args.recentUser, scaleFor(store, chatKey)) ? RECALL_CHARS_ASKED : RECALL_CHARS) * fit.s);
     const kept = new Set([...fitParts(0, all.filter(p => p.place === 'base'), BASE_CHARS), ...fitParts(base.text?.length ?? 0, all.filter(p => p.place === 'recall'), recallCap),
         ...fitParts(0, all.filter(p => p.place !== 'base' && p.place !== 'recall'), opts.slot?.maxChars ?? SLOT_CHARS)]);
+    for (const p of all) if (kept.has(p)) {
+        p.lines = dedupHistoryLines(p.lines);
+    }
     const more = all.filter(p => kept.has(p)).flatMap(p => p.lines);
     const out = { ...base, contact: chosen?.candidate.kind === 'contact' && kept.has(chosen) ? contact : null, carry, room: fit, blocks: all.filter(p => kept.has(p)).map(({ tier, lines, place, scope }) => ({ tier, lines, place, scope })), text: !more.length ? base.text : base.text ? `${base.text}\n${more.join('\n')}` : finish(base.material.name, more) };
     // 场次摘要（N-284）：问起哪天的、玩家这句正冲着的旧账落在哪场——那几场的经过整段给；另算长度，不和别的抢地方，不参与让位
@@ -638,6 +648,15 @@ export async function composeSlot(store, records, args, opts = {}) {
             recall: [episode, !recall.length ? '' : soften(wrap(base.text ? recall.join('\n') : finish(name, recall)))].filter(Boolean).join('\n\n'),
             now: block('now', [...linesOf('now'), ...tail]),
         };
+    }
+    out.text = withHistoryContext(out.text, userName);
+    if (out.parts) {
+        let added = false;
+        for (const key of Object.keys(out.parts)) {
+            if (added) break;
+            const text = withHistoryContext(out.parts[key], userName);
+            added = text !== out.parts[key]; out.parts[key] = text;
+        }
     }
     if (pending) out.final = false;   // 推演还没回来：这一格先不钉住，左滑重来时能用上推好的
     // final 只决定这格能否缓存；程序回退和等待推演时的文字同样已经交给前台。
@@ -1127,9 +1146,9 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         add(0, standingLines(table, who, { jobs: giving && talksJobs(talk), items: goods }), 'recall', 'person');
       }
         const closedMoney = new Set((pendingLedger?.items ?? []).filter(x => x.kind === '钱' && x.status === '办了').map(x => x.source?.id).filter(x => x != null));
-        add(0, moneyLines(buildLedger(visible, { knower: name, named: namedParties(roster, [...store.currentMessages(chatKey)].reverse().find(m => m.is_user)?.name) }), { name, when: material.when, currency: table?.currency ?? '', involves: present, closed: closedMoney }), 'recall', 'person');
+        add(0, moneyLines(buildLedger(visible, { knower: name, named: namedParties(roster, [...store.currentMessages(chatKey)].reverse().find(m => m.is_user)?.name), roster: rosterNames, relation: rel }), { name, when: material.when, currency: table?.currency ?? '', involves: present, closed: closedMoney, roster: rosterNames, relation: rel }), 'recall', 'person');
         // 手上还剩多少（N-266）：他自己的；开局单写了他知道谁开场有多少的，那个人的（按他知道的进出算）
-        const left = balanceLines(visible, { name, start: store.setupOf?.(store.requireChat(chatKey).story_id)?.data?.钱 ?? [], currency: table?.currency ?? '' });
+        const left = balanceLines(visible, { name, start: store.setupOf?.(store.requireChat(chatKey).story_id)?.data?.钱 ?? [], currency: table?.currency ?? '', roster: rosterNames, relation: rel });
         if (left.length) add(0, ['手上的钱（按记下的进出算的大概数）：', ...left], 'recall', 'person');
     }
 
@@ -1142,7 +1161,8 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     const lastPos = messages.at(-1)?.pos ?? 0;
     const absences = store.absences?.(chatKey) ?? [];
     const timeRecs = visible.filter(r => r.type === '时间'), marks = timeMarksFor(store, records, chatKey, messages);
-    const seenDayOf = timelineFor(store, records, chatKey, messages, { seen: true }).dayOf;
+    const historyTimeline = timelineFor(store, records, chatKey, messages, { seen: true });
+    const seenDayOf = historyTimeline.dayOf;
     // 玩家回来后按玩家说的重推离开期间：在折那一步（advanceWorld）
     // 记下的日子（不算还没记账的那几条里临时认的跳转）：回不来的事——口袋沉底、节点检查——只按它来（9/27 审计：临时认错了一天，那件沉了就回不来）。
     const dayOf = confirmedDayFor(store, records, chatKey, messages);
@@ -1159,7 +1179,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     const timeStart = store.setupOf?.(store.requireChat(chatKey).story_id)?.data?.时间 ?? null;
     const tagDay = n => timeTag(n, { start: timeStart, today: seenToday, timeScale: ts }), ago = d => tagDay(seenToday - d);
     // 平常戏里还没过去的（mood.mjs）：记账的"改变"里持续几天、几周的；这一格已经当旧事、现状给了的不重复。
-    const linger = lingerLines(fed, { name, userName, dayOf: seenDayOf, today: seenToday, lastPos, timeScale: ts, when: ago, skip: new Set([...material.hits, ...material.state].map(r => r.id)) });
+    const linger = lingerLines(fed, { name, userName, dayOf: seenDayOf, today: seenToday, lastPos, timeScale: ts, when: (d, r) => historyTime(historyTimeline, r.pos), skip: new Set([...material.hits, ...material.state].map(r => r.id)) });
     const notes = store.notesOf?.(chatKey) ?? [];
     const live = notes.filter(n => n.kind !== '聊' && n.story_day === today && lastPos - (n.pos ?? lastPos) <= NOTE_WINDOW);
     if (live.length) add(0, [`${userName ?? '玩家'}这阵子想要的（原话，场面换了就不用管）：`, ...live.map(n => `· ${n.kind === '写' ? '写法' : '玩法'}：${n.text}`)], 'now', 'reply');
@@ -1385,7 +1405,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         const carry = [...(away.length ? awayCarry(fresh.story, { name, userName: userName ?? '对方', same, id: fresh.id, days: fresh.days })
             : returnCarry({ name, userName: userName ?? '对方', absence: fresh, level: closenessOf(name).level })),
             ...(opening ? phoneCarry({ userName: userName ?? '对方', absence: fresh, attempts }) : [])];
-        return { lines, blocks, contact, carry, linger, dayOf: seenDayOf };
+        return { lines, blocks, contact, carry, linger, dayOf: seenDayOf, historyTimeline };
     }
 
     // 有卡的人谁能来、什么时候来：不再由这一格挑（D-175）——门的名单（door.mjs）列人选，旁白看时机留记号，玩家点了才进场。
@@ -1470,7 +1490,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     }
 
     // 余波（方案"场记的分量与连续性"D 层）：他心里还没过去的那股劲，紧挨此刻的样子之前；和刚递到手上的同一档，不让位
-    if (!camera && mood?.carry !== false) add(0, afterLines(fed, { name, dayOf: seenDayOf, today: seenToday, lastPos, timeScale: ts, tag: n => tagDay(n) }), 'now', 'person');
+    if (!camera && mood?.carry !== false) add(0, afterLines(fed, { name, dayOf: seenDayOf, today: seenToday, lastPos, timeScale: ts, tag: (day, today, pos) => historyTime(historyTimeline, pos, { day, today }) }), 'now', 'person');
     // 此刻的样子（用户 9/30）：聊天里写到过的穿着、位置、天气……只给在场的人（开口的人、玩家）；每轮都带，没写到就没有
     add(0, stateBlock(store, { chatKey, name, present, userName, rosterNames, rel, dayOf: seenDayOf, today: seenToday, records, anchor, scene, keepNote: guard.keepNote }), 'now', 'moment');
     // 此刻能做的（场记章程第二节第 5 条、B3）：隔着电话／消息、刚到、就在这儿，各几样可以做的，由他挑——不写该做什么、不写对方会怎样。只给有卡的人，旁白不给
@@ -1685,7 +1705,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             }
         } catch {}
     }
-    return { lines, blocks, contact, carry, linger, dayOf: seenDayOf, stance };
+    return { lines, blocks, contact, carry, linger, dayOf: seenDayOf, historyTimeline, stance };
 }
 
 // 折一次（D-174 第 1 步乙）：没人开口也该发生的事——离开记一笔、按玩家说的重推、口袋进口袋和沉底、叫规划者和几种检查、
@@ -2729,7 +2749,7 @@ export function promisesNow(store, records, chatKey, { visible, messages, dayOf,
     // 办了没人记了结的（用户 10/8）：办的人名下有一条说的是同一件的"做"，也算关上
     const closed = new Set([...closedAt.keys(), ...twins, ...settledByDoing(visible.filter(r => r.promise && !closedAt.has(r.id) && !twins.has(r.id)), visible, { dayOf, same }).keys()]);
     const start = setup?.钱 ?? [];
-    const balance = who => balances(visible, { start, people: [who] }).find(x => same(x.name, who))?.now ?? null;
+    const balance = who => balances(visible, { start, people: [who], roster: rosterNames, relation: rel }).find(x => same(x.name, who))?.now ?? null;
     let told = {};
     try { told = JSON.parse(store.getMeta?.(`promise_told:${chatKey}`) ?? '{}'); } catch {}
     const allStages = visible.filter(r => r.promise && !closed.has(r.id))
@@ -3296,7 +3316,7 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
         loose: looseEnds(s.visible, { present: s.present, lastPos: s.lastPos, window: 300 }).map(l => ({ ...l, when: s.when({ pos: l.pos }) })),
         // 碰上了、还没下文的事（matters.mjs）：规划给它排后续，来由照它
         matters: matterBrief(s.visible, { when: s.when }),
-        money: moneyLines(buildLedger(s.visible), { name: '全局', when: s.when, max: 8 }).slice(1),
+        money: moneyLines(buildLedger(s.visible, { roster: castNames, relation: rel }), { name: '全局', when: s.when, max: 8, roster: castNames, relation: rel }).slice(1),
         absent: s.people().map(p => ({ ...p, level: s.closenessOf(p.person).level, lastSeen: p.lastPos < 0 ? '（还没出场，never）' : relativeDay(s.today - s.dayOf(p.lastPos), s.ts),
             status: [personState(p.person)?.status ?? (p.lastPos < 0 ? 'never' : '外头'), personState(p.person)?.way, personState(p.person)?.place ? `确知在${personState(p.person).place}` : null].filter(Boolean).join('，') })),
         menu, bringNext: last?.bring_next ? JSON.parse(last.bring_next) : [],
@@ -3548,7 +3568,7 @@ export function driveMaterial(store, records, chatKey, { seeds = [], prices = nu
         add('人', `mind:${plan?.id}:${p.谁}`, [p.谁], [p.想干, p.下一步, mind].filter(Boolean).join('；'), { kind: '候选', pos: plan?.anchor_pos });
     }
     const recentRelations = new Set([...currentRelations(null, { records: live, roster: names }).dir.values()].map(r => r.id));
-    const moneyMoves = new Set(buildLedger(live).moves.map(r => r.id));
+    const moneyMoves = new Set(buildLedger(live, { roster: names, relation: normalizeRelations(store.relationsOf?.(s.chat.story_id)) }).moves.map(r => r.id));
     for (const r of live) {
         const who = owner(r);
         if (r.type === '余波' && afterLines([r], { name: who[0], dayOf: s.dayOf, today: s.today, lastPos: s.lastPos + 1, recent: 0, timeScale: s.ts }).length)
@@ -3560,7 +3580,8 @@ export function driveMaterial(store, records, chatKey, { seeds = [], prices = nu
     }
     // 用现成事账判是否仍有效；归并仅接受明确 promise_ref / matter.menu，不采用文字相似度。
     const tl = timelineFor(store, records, chatKey, s.messages);
-    const pending = foldPending({ records: live, messages: s.messages, menu, timeline: tl });
+    const pending = foldPending({ records: live, messages: s.messages, menu, timeline: tl, rosterNames: names,
+        relation: normalizeRelations(store.relationsOf?.(s.chat.story_id)), named: namedParties(s.roster, s.userName) });
     const byRecord = new Map(live.map(r => [r.id, r]));
     for (const p of pending.items.filter(p => ['约定', '钱'].includes(p.kind) && ['排着', '等着', '到了'].includes(p.status))) {
         const r = byRecord.get(p.source.id);
