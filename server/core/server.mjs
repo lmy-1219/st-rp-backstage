@@ -2,6 +2,7 @@ import { signalEvaluation } from './planner.mjs';
 import { secretCandidates } from './held.mjs';
 // 本机后台的 HTTP 接口。只听 127.0.0.1；浏览器不直接连它，经 ST 里的转发插件过来（plugin/）。
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 import { requestTrace, withTrace, traceView, measure } from './request-timing.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -83,7 +84,7 @@ function readMessages(messages) {
 
 // settings()＝每次现读的设置；packOf(chatKey)＝这一局的素材包（价表、时事、年表），没选包就是空的（D-104）。
 // withPack：把这一局的价表和时事并进给那一格的设置。
-export function createRoutes(store, { worker = null, records = null, assembler = null, keyMaker = null, advisor = null, setupMaker = null, keysMaker = null, handoffs = null, settings = () => ({}) } = {}) {
+export function createRoutes(store, { log = () => {}, worker = null, records = null, assembler = null, keyMaker = null, advisor = null, setupMaker = null, keysMaker = null, handoffs = null, settings = () => ({}) } = {}) {
     let sourceManager = null;
     const sources = () => {
         const backups = settings().backupsDir;
@@ -484,11 +485,18 @@ export function createRoutes(store, { worker = null, records = null, assembler =
         },
         'POST /v1/turn-result': b => {
             const chatKey = str(b.chatKey, 'chatKey'); store.requireChat(chatKey);
-            return executionResult(store, chatKey, { id: str(b.id, 'id', { max: 1000 }), result: str(b.result, 'result', { max: 30 }), reason: String(b.reason ?? '').slice(0,300),
+            const id = str(b.id, 'id', { max: 1000 }), result = str(b.result, 'result', { max: 30 });
+            const value = executionResult(store, chatKey, { id, result, reason: String(b.reason ?? '').slice(0,300),
                 reply: b.reply && typeof b.reply === 'object' ? b.reply : null,
                 previous: b.previous && typeof b.previous==='object' ? b.previous : null,
                 ownReplies: Array.isArray(b.ownReplies) ? b.ownReplies.map(m=>({pos:m.pos,fp:m.fp,text:String(m.text??''),extra:{rp_vis:m.extra?.rp_vis}})) : [],
                 sequence: Array.isArray(b.sequence) ? b.sequence.map(m=>({pos:m.pos,fp:m.fp,hidden:!!m.hidden,boardMark:m.boardMark??null})) : null }, {records,config:settings()});
+            if (value.ok === false) {
+                const shortId = createHash('sha256').update(id).digest('hex').slice(0,8);
+                const action = ['check','start','retry','reconcile','delivered','muted','cancelled','error','unconfirmed','waiting'].includes(result) ? result : 'unknown';
+                log(`turn-result rejected chat=${chatKey.slice(0,8)} id=${shortId} result=${action} kind=${value.kind??'-'} state=${value.state??'-'} code=${value.reasonCode} why=${value.why}`);
+            }
+            return value;
         },
         'POST /v1/card-choice': b => {
             const chatKey=str(b.chatKey,'chatKey'),chat=store.requireChat(chatKey),name=str(b.name,'name'),avatar=str(b.avatar,'avatar');
@@ -1245,7 +1253,7 @@ function readBody(req) {
 }
 
 export function createServer(store, { log = () => {}, worker = null, records = null, assembler = null, keyMaker = null, advisor = null, setupMaker = null, keysMaker = null, handoffs = null, settings = () => ({}) } = {}) {
-    const routes = createRoutes(store, { worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
+    const routes = createRoutes(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
     // 耗时（先量再改）：每个请求后台算了多久，最近 400 笔；超过一秒半的记进日志。GET /v1/timings 给面板
     const timings = [];
     routes['POST /v1/timings'] = () => {

@@ -717,13 +717,29 @@ export async function repairResidentSegment(c,{avatar,name,firstSnapshot=null}){
 }
 export const closeIsolationAt=closeSegment;
 
-// 只改纠正所在的区间，遇到下一个既有边界就停。
-export function boardSegmentEdit(segments, { at, until = null, present }) {
-    const before=structuredClone(segments??[]), bounds=before.flatMap(s=>[s.from,s.to]).filter(n=>Number.isInteger(n)&&n>at);
-    if(Number.isInteger(until)&&until>at)bounds.push(until);
-    const end=bounds.length?Math.min(...bounds):null;
+// 旧日期找不到时，留下后台仍认的历史窗口。截短处没有新的离场来源。
+export function boardSegmentEdit(segments, { at, until = null, present, dates = null }) {
+    const before=structuredClone(segments??[]), bounds=[];
+    const live=before.flatMap(s=>{
+        const fromAt=dates&&s.fromDate?dates.indexOf(String(s.fromDate)):-1;
+        const toAt=dates&&s.to!=null&&s.toDate?dates.indexOf(String(s.toDate)):-1;
+        const cutShort=dates&&s.to!=null&&s.toDate&&toAt<0;
+        const from=fromAt>=0?fromAt+1:s.from;
+        let to=toAt>=0?toAt+1:s.to;
+        if(cutShort){
+            const limit=Date.parse(s.toDate);
+            to=dates.findLastIndex(d=>Date.parse(d??'')<limit)+1;
+            if(to<=from)return [];
+        }
+        if(!dates||!s.fromDate||fromAt>=0)bounds.push(from);
+        if(!cutShort)bounds.push(to);
+        return [from===s.from&&to===s.to?s:{...s,from,to}];
+    });
+    bounds.push(until);
+    const later=bounds.filter(n=>Number.isInteger(n)&&n>at);
+    const end=later.length?Math.min(...later):null;
     const after=[];
-    for(const s of before){
+    for(const s of live){
         if((s.to!=null&&s.to<=at)||(end!=null&&s.from>=end)){after.push(s);continue;}
         if(s.from<at)after.push({...s,to:at,toDate:''});
         if(end!=null&&(s.to==null||s.to>end))after.push({...s,from:end,fromDate:''});

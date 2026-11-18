@@ -2264,7 +2264,7 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
     let knock = pendingKnock(store, chatKey);
     // 叩门的时机（空当：承接的一句、刚换时段、旁白刚写完、身边没人）到了就先叩，屋里的人"顺着接一手"那类弱由头让位；玩家点了名的那一句照样先答
     if (!knock && !t.queue.some(q => q.role === '答')) {
-        const k = knockNow(store, records, chatKey, { present, config: cfg });
+        const k = knockNow(store, records, chatKey, { present, config: cfg, pausedAvatar: t.pausedAvatar });
         if (k.ok) {
             t.queue = [];
             knock = beginKnock(store, chatKey, k);

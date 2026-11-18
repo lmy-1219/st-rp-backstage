@@ -1955,7 +1955,7 @@ async function onChatChanged() {
     state.relationsDraft = null;
     clearPrompts();
     Object.assign(state, { chatKey: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
-    Object.assign(auto, { blocked:null,executionStatus:null,on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null });
+    Object.assign(auto, { blocked:null,executionStatus:null,hideSavedStatus:false,on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null });
     state.memberBase = memberSnapshot();
     watchMembers();   // 首次接入也核对旧的手动静音标记，不把初始名单当成人工操作
     state.firstMemberSnapshot = state.memberBase && !(ctx().chat??[]).some(m=>m.is_user) ? {...state.memberBase,at:0} : null;   // 开局第一次群快照
@@ -3397,13 +3397,13 @@ async function autoPeek({ onlyUndo = false, returnReply = false } = {}) {
     if (chatKey !== state.chatKey || epoch !== state.epoch) return false;
     if (onlyUndo) {
         const undo = (r?.left ?? []).filter(l => l.action === 'undo');
-        if (!undo.length) return false;
+        if (!undo.length && !(r?.enabled === false && auto.on !== false)) return false;
         if (await autoApply({ ...r, left: undo, lapsed: [] }) === false) {
             const error = new Error('离场撤销尚未落实');
             error.code = 'LEAVE_APPLY_FAILED';
             throw error;
         }
-        return true;
+        return undo.length > 0;
     }
     const applied=await autoApply(r);
     return returnReply ? r : applied===false ? false : !!r.enabled;
@@ -3414,6 +3414,12 @@ async function autoApply(r) {
     await autoStrategy(enableTurn);
     const was=auto.on;
     auto.on = !!r?.enabled;
+    if (r?.enabled === false) {
+        if (auto.executionStatus?.source !== 'camera') auto.executionStatus = null;
+        auto.hideSavedStatus = true;
+        auto.blocked = null;
+        auto.lastTurn = null;
+    }
     auto.unavailable=false;
     auto.turnEnabled=enableTurn;
     automodeHint();
@@ -3454,7 +3460,7 @@ async function autoDrive(type) {
     if (auto.blocked?.key === key && auto.blocked.version === localVersion) return false;
     const chatKey = state.chatKey, epoch = state.epoch, length = c.chat.length;
     const driving = auto.driving ??= new Set(), claim = `${chatKey}:${epoch}:${key}`;
-    const withdrawn=Object.values(c.chatMetadata?.rpeExecution??{}).some(e=>e.result==='delivered'
+    const withdrawn=Object.values(c.chatMetadata?.rpeExecution??{}).some(e=>e.chatKey===chatKey&&e.result==='delivered'
         &&e.q?.execution?.through===length-1&&!c.chat.slice(e.at).some(m=>!m.is_user&&!m.is_system
             &&speakerOf(m,fallbackAvatar(c))===e.avatar));
     if (driving.has(claim) || auto.lastTurn === key&&!withdrawn) return false;
@@ -3465,6 +3471,18 @@ async function autoDrive(type) {
             && tip && sourceKey() === key;
     };
     try {
+        // ST 分支会复制元数据。跨窗或无法确认归属的记录只在本窗核对消息。
+        const journal=c.chatMetadata?.rpeExecution??{};
+        let journalChanged=false;
+        for(const [id,e] of Object.entries(journal)){
+            if(e.chatKey===chatKey||!['running','unconfirmed','cancelled','error','waiting','queued','muted'].includes(e.result))continue;
+            const replied=Number.isInteger(e.at)&&e.at>=0&&c.chat.slice(e.at).some(m=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()
+                &&speakerOf(m,fallbackAvatar(c))===(e.avatar??e.q?.avatar??(e.q?.who==='旁白'?'narrator':null)));
+            if(replied){e.result='delivered';e.reason='已核实本人消息，无需重发';}
+            else delete journal[id];
+            journalChanged=true;
+        }
+        if(journalChanged){await c.saveMetadata();if(!current())return false;}
         if (!auto.on || auto.unavailable) { await autoPeek(); if (auto.unavailable || auto.on===null) return false; if (!auto.on) return 'off'; }
         // 同步会重放系统区间，执行基线取同步之后；正文、裁决和人工静音仍须保持。
         const inputs=()=>JSON.stringify([ctx().chat.map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null,m.extra?.rp_door??null,m.swipe_id??0]),
@@ -3517,14 +3535,18 @@ async function autoDrive(type) {
 async function runScheduled(q, prepare) {
     const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,chat=c.chat;
     const journal=c.chatMetadata.rpeExecution??={};
-    const prior=Object.entries(journal).find(([,e])=>e.q?.execution&&q.execution
+    const prior=Object.entries(journal).find(([,e])=>e.chatKey===chatKey&&e.q?.execution&&q.execution
         && e.avatar===(q.avatar??null)&&e.q.execution.through===q.execution.through
         && (!e.q.execution.source?.startsWith('v2:')||!q.execution.source?.startsWith('v2:')||e.q.execution.source===q.execution.source)
         && (e.result!=='delivered'||chat.slice(e.at).some(m=>!m.is_user&&!m.is_system&&speakerOf(m,fallbackAvatar(c))===e.avatar))
         && ['running','unconfirmed','cancelled','error','waiting','delivered'].includes(e.result));
     if(prior)q={...q,execution:{...prior[1].q.execution}};
     const id=q.execution?.id??`${q.avatar??'narrator'}:${chat.length}:${fingerprintMessage(chat.at(-1),speakerOf(chat.at(-1),fallbackAvatar(c)))}`;
-    const length=journal[id]?.at??chat.length;
+    const owned=()=>{
+        const entry=journal[id];
+        return entry&&entry.chatKey===chatKey&&entry.result!=='superseded'?entry:undefined;
+    };
+    const length=owned()?.at??chat.length;
     const snapshot=()=>JSON.stringify(chat.slice(0,length).map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(c))),!!m.is_system,m.extra?.rp_board??null,m.extra?.rp_door??null,m.swipe_id??0]));
     const prefix=snapshot();
     // 展示数据会随消息刷新；执行只固定卡身份、档位和本局实际选中的卡，空认卡条目等同未选择。
@@ -3545,7 +3567,7 @@ async function runScheduled(q, prepare) {
             await c.saveChat?.(); guard();
         }
 
-        journal[id]={...journal[id],result,reason,avatar:q.avatar,at:length,q};
+        journal[id]={...owned(),chatKey,result,reason,avatar:q.avatar,at:length,q};
         await c.saveMetadata();guard();
         if(q.execution){
             if(await syncNow(true)===false)throw Error('执行结果尚未同步，请先核对消息');guard();
@@ -3554,15 +3576,21 @@ async function runScheduled(q, prepare) {
         }
         render();
     };
-    let prepared,issued=false,previousAttempt=['running','unconfirmed','cancelled','error','waiting','delivered'].includes(journal[id]?.result);
+    let prepared,issued=false,previousAttempt=['running','unconfirmed','cancelled','error','waiting','delivered'].includes(owned()?.result);
     try{
         guard();
+        if(!prior&&!owned()&&Number.isInteger(q.execution?.through)&&chat.slice(q.execution.through+1).some(m=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()
+            &&speakerOf(m,fallbackAvatar(c))===(q.avatar??(q.who==='旁白'?'narrator':null))))return true;
         // 冷缓存先读名册并完成当前目标的认卡，再取执行基线；等待真实请求而非定时延迟。
         if(!state.boardCast?.length){const r=await api('cast',{chatKey});guard();state.boardCast=r.cast??[];}
         if(q.role!=='旁白'&&q.who!=='旁白'){await resolveCard(q.who,q.avatar,{interactive:false});guard();}
         roles=roleSnapshot();
         if(landed()){await report('delivered',`${q.who}的消息已落下`);return true;}
-        if(['running','unconfirmed','cancelled','error','waiting','delivered'].includes(journal[id]?.result))throw Object.assign(Error('这次生成已发出或已停止，请核对消息后点重试'),{result:journal[id].result==='cancelled'?'cancelled':'unconfirmed'});
+        const savedResult=owned()?.result;
+        if(['running','unconfirmed','cancelled','error','waiting','delivered'].includes(savedResult)){
+            previousAttempt=true;
+            throw Object.assign(Error('这次生成已发出或已停止，请核对消息后点重试'),{result:savedResult==='cancelled'?'cancelled':'unconfirmed'});
+        }
         if(q.execution){
             let r=await api('turn-result',{chatKey,id:q.execution.id,result:'check'});guard();if(!r.ok)throw Error(r.why);
             if(r.execution?.state==='delivered')return true;
@@ -3596,7 +3624,7 @@ async function runScheduled(q, prepare) {
                 const disabledAfter=!!currentGroup(c)?.disabled_members?.includes(avatar);
                 const muteOwned=!disabledAfter&&(wasDisabled||muteOwners.length>0);
                 if(added.length||wasDisabled!==disabledAfter||muteOwned){
-                    journal[id]={...journal[id],q,avatar,at:length,preparation:{owner,segments:added,segmentOwned:added.length>0,muteOwned,
+                    journal[id]={...owned(),chatKey,q,avatar,at:length,preparation:{owner,segments:added,segmentOwned:added.length>0,muteOwned,
                         openingMuted:openingMuted||muteOwners.some(e=>e.preparation.openingMuted)}};
                     await c.saveMetadata();guard();
                 }
@@ -3610,7 +3638,7 @@ async function runScheduled(q, prepare) {
         const preparedManual=manual();
         if(chat.length!==length)throw Error('已有新消息，停下重新核对');
         if(q.execution){const r=await api('turn-result',{chatKey,id:q.execution.id,result:'start'});guard();if(!r.ok)throw Object.assign(Error(r.why),{result:r.replan?'replan':'unconfirmed'});if(r.execution?.state==='delivered')return true;}
-        journal[id]={...journal[id],result:'running',avatar:q.avatar,at:length,q,reason:`正在叫${q.who}`};await c.saveMetadata();guard();
+        journal[id]={...owned(),chatKey,result:'running',avatar:q.avatar,at:length,q,reason:`正在叫${q.who}`};await c.saveMetadata();guard();
         auto.executionStatus={who:q.who,result:'running',reason:`正在叫${q.who}`,id};render();
         // 最后一次 await 之后按当前群重新找文件与下标，检查期间不再让出执行权。
         guard();
@@ -3643,41 +3671,52 @@ async function runScheduled(q, prepare) {
         const failureReason=(...messages)=>[...new Set([...(issued||previousAttempt?[]:['尚未发出生成命令']),...messages.flatMap(message=>message.split('；'))])].join('；');
         try{await report(result,failureReason(error.message));}catch(reportError){
             auto.executionStatus={result:'unconfirmed',who:q.who,reason:failureReason(error.message,reportError.message),id};
-            journal[id]={...journal[id],result:'unconfirmed',reason:auto.executionStatus.reason,avatar:q.avatar,at:length,q};
+            journal[id]={...owned(),chatKey,result:'unconfirmed',reason:auto.executionStatus.reason,avatar:q.avatar,at:length,q};
             try{await c.saveMetadata();}catch{state.note=auto.executionStatus.reason;}
         }
         globalThis.toastr?.warning(auto.executionStatus.reason,'接话已停下');render();return delivered;
     }
 }
 function scheduledStatusHtml() {
-    const c=ctx(),saved=Object.entries(c.chatMetadata?.rpeExecution??{}).filter(([,e])=>e.q).at(-1);
-    const status=auto.executionStatus??(saved?{...saved[1],id:saved[0]}:null);
+    const c=ctx(),off=auto.on===false;
+    const saved=off||auto.hideSavedStatus?null:Object.entries(c.chatMetadata?.rpeExecution??{}).filter(([,e])=>e.chatKey===state.chatKey&&e.q&&e.result!=='superseded').at(-1);
+    const status=off&&auto.executionStatus?.source!=='camera'?null:auto.executionStatus??(saved?{...saved[1],id:saved[0]}:null);
     const lines=[state.boardReconcile,status?.reason];
     const board=boardLabels.at(-1);
     for(const p of board?.people??[])if(['present','remote'].includes(p.status)&&currentGroup(c)?.disabled_members?.includes(p.avatar))lines.push(`${p.name}在场，${c.chatMetadata?.rp_emergence?.openingMuted?.includes(p.avatar)?'系统静音待核对':'手动静音，暂停发言'}`);
-    return lines.filter(Boolean).map(line=>`<div>${escapeHtml(line)}</div>`).join('')+(status&&['muted','error','cancelled','unconfirmed','running','waiting','paused'].includes(status.result)?'<button class="menu_button" data-action="schedule-retry" title="先核对是否已有本人消息，再重试">核对后重试接话</button>':'');
+    return lines.filter(Boolean).map(line=>`<div>${escapeHtml(line)}</div>`).join('')+(!off&&status&&['muted','error','cancelled','unconfirmed','running','waiting','paused'].includes(status.result)?'<button class="menu_button" data-action="schedule-retry" title="先核对是否已有本人消息，再重试">核对后重试接话</button>':'');
 }
 async function retryScheduled() {
+    if(auto.on===false)return false;
     const c=ctx(),chatKey=state.chatKey,epoch=state.epoch;
     if(auto.executionStatus?.result==='paused'){auto.blocked=null;return autoDrive('normal');}
-    const entry=Object.entries(c.chatMetadata.rpeExecution??{}).filter(([,e])=>e.q).at(-1);
-    if(!entry){auto.blocked=null;auto.lastTurn=null;return autoDrive('normal');}
+    const here=()=>chatKey===state.chatKey&&epoch===state.epoch&&ctx().chat===c.chat;
+    const requeue=()=>{auto.blocked=null;auto.lastTurn=null;auto.executionStatus=null;render();return autoDrive('normal');};
+    const entry=Object.entries(c.chatMetadata.rpeExecution??{}).filter(([,e])=>e.chatKey===chatKey&&e.q&&e.result!=='superseded').at(-1);
+    if(!entry)return requeue();
     const [id,e]=entry;
     if(activeGeneration())throw Error('生成还在进行，请先停止或等它完成');
     if(await syncNow(true)===false)throw Error('消息还没核对完成');
-    if(chatKey!==state.chatKey||epoch!==state.epoch||ctx().chat!==c.chat)return false;
+    if(!here())return false;
     if(e.q.execution){
         const r=await api('turn-result',{chatKey,id,result:'retry',previous:e.q.execution});
-        if(chatKey!==state.chatKey||epoch!==state.epoch)return false;
-        if(!r.ok)throw Error(r.why);
+        if(!here())return false;
+        if(!r.ok){
+            const stale=['unknown_execution','source_prefix_changed','eligibility_changed'].includes(r.reasonCode)
+                ||r.why==='来源版本已失效'||r.why==='在场或成员资格已改变，请重新排队';
+            if(!stale)throw Error(r.why);
+            e.result='superseded';
+            await c.saveMetadata();
+            return here()?requeue():false;
+        }
         if(r.execution.state==='delivered'){e.result='delivered';e.reason='已核实本人消息，无需重发';await c.saveMetadata();render();return true;}
         if(r.item){
             e.result='superseded';
-            c.chatMetadata.rpeExecution[r.execution.id]={result:'queued',avatar:r.item.avatar,at:c.chat.length,q:r.item};
+            c.chatMetadata.rpeExecution[r.execution.id]={chatKey,result:'queued',avatar:r.item.avatar,at:c.chat.length,q:r.item};
         }else {e.result='queued';e.q.execution=r.execution;}
     }else if(c.chat.slice(e.at).some(m=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()&&speakerOf(m,fallbackAvatar(c))===e.avatar)){e.result='delivered';await c.saveMetadata();render();return true;}
     if(!e.q.execution)delete c.chatMetadata.rpeExecution[id];
-    await c.saveMetadata();auto.blocked=null;auto.lastTurn=null;return autoDrive('normal');
+    await c.saveMetadata();return here()?requeue():false;
 }
 // 叫一个人说：旁白走旁白卡；静音着的（这会儿不在场）不叫
 async function autoSpeak(q) {
@@ -4011,7 +4050,7 @@ async function cameraTurn(type, { force = false } = {}) {
             board = await api('board', { chatKey });
             if (!Array.isArray(board?.people)) throw Error('在场状态尚未确认，请核对后重试');
         } catch (error) {
-            auto.executionStatus = { result: 'error', reason: error.message };
+            auto.executionStatus = { source: 'camera', result: 'error', reason: error.message };
             globalThis.toastr?.warning(error.message, 'RP：幕后'); render(); return false;
         }
         if (state.chatKey !== chatKey || state.epoch !== epoch || ctx().chat !== chat || stamp() !== before) return false;
@@ -4020,7 +4059,7 @@ async function cameraTurn(type, { force = false } = {}) {
         const open = members(c).filter(m => !m.disabled);
         if (cards.some(p => p.status === 'unknown') || active.some(p => !open.some(m => m.avatar === p.avatar))) {
             const reason = '有卡的人的在场状态或静音需要核对，请解除静音或纠正在场后重试接话';
-            auto.executionStatus = { result: 'muted', reason };
+            auto.executionStatus = { source: 'camera', result: 'muted', reason };
             globalThis.toastr?.warning(reason, 'RP：幕后'); render(); return false;
         }
         if (active.length) return cameraJoin(c, cam);
@@ -4880,6 +4919,11 @@ async function reconcileBoardState() {
         }
     }
     const anchor=avatar=>c.chatMetadata.contextIsolation?.anchors?.[avatar];
+    const dates=wanted.size?c.chat.map(m=>m.send_date==null?null:String(m.send_date)):null;
+    const editFor=(segments,record)=>{
+        const until=[...wanted.values()].filter(x=>x.avatar===record.avatar&&x.pos>record.pos).sort((a,b)=>a.pos-b.pos)[0]?.pos??null;
+        return boardSegmentEdit(segments,{at:record.pos,until,present:['在场','远程'].includes(record.status),dates});
+    };
     const save=async()=>{guard();await c.saveMetadata();guard();};
     // 自动准备只保留来源所有权和段指纹；段指纹只用于识别人工接管，不能用来恢复区间。
     const automatic=[];
@@ -4911,7 +4955,10 @@ async function reconcileBoardState() {
     // 同一身份的纠正是一串应用；任一环变化，先倒序还原，再按有效来源重放。
     // 后续记录因此不会沿用已经失去前提的 before / wasDisabled。
     const rebase=new Set();
-    for(const [id,r] of Object.entries(journal))if(wanted.get(id)?.status!==r.status||r.undone||!r.applied)rebase.add(r.avatar);
+    for(const [id,r] of Object.entries(journal)){
+        if(wanted.get(id)?.status!==r.status||r.undone||!r.applied
+            ||(r.edit?.before.some(s=>s.fromDate||s.toDate)&&editFor(r.edit.before,r).end!==r.edit.end))rebase.add(r.avatar);
+    }
     for(const [id,w] of wanted)if(!journal[id])rebase.add(w.avatar);
     try{
         // 来源失效只更新自动基础及其在人工 journal 中的依赖，不撤销未变化的人工纠正。
@@ -4947,8 +4994,7 @@ async function reconcileBoardState() {
                     if(r.muteOwned&&!r.muteRelinquished&&!c.chatMetadata.rpeManualMuted?.[e.avatar])
                         disabled=at==null&&!kept.some(s=>s.to==null)&&!muteSupported;
                     for(const record of chain){
-                        const until=[...wanted.values()].filter(x=>x.avatar===record.avatar&&x.pos>record.pos).sort((a,b)=>a.pos-b.pos)[0]?.pos??null;
-                        record.edit=boardSegmentEdit(projected,{at:record.pos,until,present:['在场','远程'].includes(record.status)});
+                        record.edit=editFor(projected,record);
                         projected=record.edit.after;record.wasDisabled=disabled;
                         record.muteChanged=record.edit.end==null&&disabled!==record.disabledAfter;
                         if(record.edit.end==null)disabled=record.disabledAfter;
@@ -4992,8 +5038,7 @@ async function reconcileBoardState() {
             if(journal[id]?.applied)continue;
             const before=anchor(w.avatar);
             const initial=before?.segments??(residentFromStart(c,{avatar:w.avatar,name:w.name,firstSnapshot:state.firstMemberSnapshot})?[{from:0,fromDate:'',to:null,toDate:''}]:[]);
-            const until=[...wanted.values()].filter(x=>x.avatar===w.avatar&&x.pos>w.pos).sort((a,b)=>a.pos-b.pos)[0]?.pos??null;
-            const edit=journal[id]?.edit??boardSegmentEdit(initial,{at:w.pos,until,present:['在场','远程'].includes(w.status)});
+            const edit=journal[id]?.edit??editFor(initial,w);
             const record=journal[id]??{...w,edit,wasDisabled:!!group.disabled_members?.includes(w.avatar),disabledAfter:['不在','外头'].includes(w.status),muteChanged:false};
             journal[id]=record;await save();
             const anchors=(c.chatMetadata.contextIsolation??={anchors:{}}).anchors??={};

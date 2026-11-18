@@ -208,7 +208,7 @@ function decideTurn(input = {}) {
         else if (!phone.length) {
             const conflict = folks.find(p => p.status === 'unknown' || !p.manualAway && ['away','absent'].includes(p.status)
                 && messages.some(m => !m.is_user && m.speaker === p.avatar && m.pos >= (p.since ?? Infinity) && !LEAVE.test(m.text ?? '')));
-            if (conflict) return { queue: [], paused:true, why: `${conflict.name}的在场状态需要核对，停下；请纠正在场或使用重试接话` };
+            if (conflict) return { queue: [], paused:true, why: `${conflict.name}的在场状态需要核对，停下；请纠正在场或使用重试接话`, conflictAvatar: conflict.avatar };
             add(CAMERA_NAME, '旁白', '身边没有有卡的人，旁白接');
         }
     }
