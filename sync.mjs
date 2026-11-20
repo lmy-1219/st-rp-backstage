@@ -639,7 +639,8 @@ function presenceRecord(c,avatar,name,create=false) {
 }
 export function residentFromStart(c,{avatar,name,firstSnapshot}={}) {
     const chat=c?.chat??[],first=chat.findIndex(m=>m?.is_user),limit=first<0?chat.length:first;
-    return chat.slice(0,limit).some(m=>!m?.is_user&&!m?.is_system&&(m.original_avatar?m.original_avatar===avatar:m.name===name))
+    return chat.slice(0,limit).some(m=>m&&!m.is_user&&!m.is_system&&!m.hidden&&!m.extra?.rp_vis
+        &&(m.original_avatar?m.original_avatar===avatar:m.name===name))
         ||!!(firstSnapshot?.at===0&&firstSnapshot.members?.includes(avatar)&&!firstSnapshot.disabled?.includes(avatar));
 }
 export function classify({kind,segments=[],at,disabled=false,resident=false,sourceValid=true}={}) {

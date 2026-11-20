@@ -37,14 +37,17 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     // 已知的事（开局单、世界书）：记账时给和这段沾边的几条，角色提起它不当新事记（用户 10/2）。
     const knownOf = (chat, user = null) => knownItems({ setup: store.setupOf?.(chat.story_id)?.data ?? null, lore: store.loreOf?.(chat.story_id) ?? [], userName: user });
     // 隔着电话、消息的人（场记章程第 2 条）：照进场记录、隔离区间算出那条时谁是远程——记账定"谁知道"时他不算当面在场
-    const remoteOf = chat => {
+    const remoteOf = (chat, current) => {
         let arrivals = [], anchors = null, members = [];
         try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chat.key}`) ?? '[]') ?? []; } catch {}
         try { anchors = chat.anchors ? JSON.parse(chat.anchors) : null; } catch {}
         try { members = chat.members ? JSON.parse(chat.members) : []; } catch {}
-        if (!anchors || !(Array.isArray(arrivals) ? arrivals : Object.values(arrivals)).length) return () => [];
+        if (!anchors) return () => [];
+        const hasArrivals = (Array.isArray(arrivals) ? arrivals : Object.values(arrivals)).length > 0;
+        if (!hasArrivals && !current.some(m => m.boardMark)) return () => [];
         const messages = store.currentMessages(chat.key);
-        const notes = store.stateNotesOf?.(chat.key) ?? [];
+        // 位置札记只用来判定一次远程进场后是否当面碰上。
+        const notes = hasArrivals ? store.stateNotesOf?.(chat.key) ?? [] : [];
         const memo = new Map();
         return pos => { if (!memo.has(pos)) memo.set(pos, remoteWayAt(pos, { arrivals, anchors, members, messages, notes, knockLive: store.knockLiveFor?.(chat.key) })); return memo.get(pos); };
     };
@@ -128,8 +131,8 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     const ready = config => extractorReady(config) || (config.extractor.provider === 'window' && !!handoffs);
     const waiting = chatKey => !!handoffs && store.pendingHandoffs().some(h => h.kind === 'extract' && h.chat_key === chatKey);
 
-    function handOff({ chat, window, context, names, why, budget = false, transient = false }) {
-        const prepared = prepareWindow({ records, config: getConfig(), chat, window, context, names, pocket: candidatesOf(chat.key), known: knownOf(chat, names.user), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
+    function handOff({ chat, messages, window, context, names, why, budget = false, transient = false }) {
+        const prepared = prepareWindow({ records, config: getConfig(), chat, window, context, names, pocket: candidatesOf(chat.key), known: knownOf(chat, names.user), remoteOf: remoteOf(chat, messages), facePresentOf: facePresentOf(chat) });
         return handoffs.request({
             kind: 'extract', key: `${chat.key}:${window[0].fp}:${window.length}`, chatKey: chat.key, why,
             system: prepared.system, user: prepared.user,
@@ -155,7 +158,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
             const start = messages.indexOf(window[0]);
             const context = messages.slice(Math.max(0, start - 2), start);
             const config = getConfig();
-            const prepared = prepareWindow({ records, config, chat, window, context, names: { user: userName(messages) }, pocket: candidatesOf(meta.chatKey), known: knownOf(chat, userName(messages)), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
+            const prepared = prepareWindow({ records, config, chat, window, context, names: { user: userName(messages) }, pocket: candidatesOf(meta.chatKey), known: knownOf(chat, userName(messages)), remoteOf: remoteOf(chat, messages), facePresentOf: facePresentOf(chat) });
             const jobId = records.startJob({ storyId: chat.story_id, chatKey: chat.key, positions: window.map(m => m.pos), model: 'window' });
             try {
                 const r = applyReply({ records, config, chat, window, prepared, jobId, raw: text });
@@ -208,17 +211,17 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                 const start = messages.findIndex(m => m.pos === window[0].pos);
                 const context = messages.slice(Math.max(0, start - 2), start);
                 const names = { user: userName(messages) };
-                if (byWindow) { results.push({ handoff: handOff({ chat, window, context, names, why: '设成了把记账交给窗口做（不走 API）' }) }); break; }
-                if (over) { results.push({ handoff: handOff({ chat, window, context, names, budget: true, why: `今天的花费到了上限（约 ${records.spentToday().toFixed(2)} / ${config.extractor.dailyBudgetUsd}），这一段交给窗口记` }) }); break; }
+                if (byWindow) { results.push({ handoff: handOff({ chat, messages, window, context, names, why: '设成了把记账交给窗口做（不走 API）' }) }); break; }
+                if (over) { results.push({ handoff: handOff({ chat, messages, window, context, names, budget: true, why: `今天的花费到了上限（约 ${records.spentToday().toFixed(2)} / ${config.extractor.dailyBudgetUsd}），这一段交给窗口记` }) }); break; }
                 try {
-                    const r = await runWindow({ records, client, config, chat, window, context, names, pocket: candidatesOf(chatKey), known: knownOf(chat, names.user), remoteOf: remoteOf(chat), facePresentOf: facePresentOf(chat) });
+                    const r = await runWindow({ records, client, config, chat, window, context, names, pocket: candidatesOf(chatKey), known: knownOf(chat, names.user), remoteOf: remoteOf(chat, messages), facePresentOf: facePresentOf(chat) });
                     markShown(chatKey, r.shown, r.voided, r.unshown);
                     noteFaces(chat);
                     await afterCommit(chatKey);
                     results.push(r);
                 } catch (error) {
                     if (!handoffs || config.extractor.fallback === 'off' || !isTransient(error)) throw error;
-                    results.push({ handoff: handOff({ chat, window, context, names, transient: true, why: `调模型没响应（${error.message}）` }) });
+                    results.push({ handoff: handOff({ chat, messages, window, context, names, transient: true, why: `调模型没响应（${error.message}）` }) });
                     break;
                 }
             }

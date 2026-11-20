@@ -7,6 +7,7 @@ import { personWord, renderPronouns } from './pronoun.mjs';
 import { arrivalLive, emptySegment } from './landing.mjs';
 import { assertKnockReader } from './store.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
+import { resolveIdentity } from './cast.mjs';
 
 // 名册里有卡的人（头像是图片文件；"face:"开头的是没卡的新面孔；镜头那张卡不算）
 export const hasCard = entry => !!entry && /\.(png|webp|jpe?g|gif)$/i.test(String(entry.avatar ?? '')) && entry.role !== '不用';
@@ -235,8 +236,19 @@ export function remoteWayAt(pos, { arrivals = [], anchors = null, members = [], 
             const met = opened && !faced && !!list && metInPerson(list.filter(m => m.pos >= since && m.pos <= pos), { who: member.name, userName: user, since, notes: near });
             remote = opened && !faced && !met;
         }
-        const mark = marks.filter(k => Object.prototype.hasOwnProperty.call(k.people, member.name)).at(-1);
-        if (mark && (since == null || mark.pos >= since) && ['在场', '远程', '外头', '不在'].includes(mark.people[member.name])) remote = mark.people[member.name] === '远程';
+        const markValue = ({ people }) => {
+            if (member.avatar && Object.hasOwn(people, member.avatar)) return people[member.avatar];
+            if (!Object.hasOwn(people, member.name)) return null;
+            const named = members.filter(p => p?.name === member.name);
+            const active = named.filter(p => p.role !== '不用');
+            const person = resolveIdentity(active.length ? active : named, member.name).person;
+            return person && person.avatar === member.avatar ? people[member.name] : null;
+        };
+        const mark = marks.findLast(k => markValue(k) != null);
+        if (mark && (since == null || mark.pos >= since)) {
+            const value = markValue(mark), status = typeof value === 'object' ? value.status : value;
+            if (['在场', '远程', '外头', '不在'].includes(status)) remote = status === '远程';
+        }
         if (remote) out.set(member.name, way);
     }
     return out;

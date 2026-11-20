@@ -507,6 +507,7 @@ function playOptions(store, chatKey, opts) {
     return playModeOf(store, chatKey) === 'memory' ? { ...opts, contacts: { enabled: false }, absence: { ...opts.absence, mode: 'pause' }, planner: { record: false }, situation: null, drift: { prices: false, long: false } } : opts;
 }
 const fullPlay = (store, chatKey) => playModeOf(store, chatKey) === 'full';
+const canWitness = stance => !stance || stance.status === 'present';
 export async function composeSlot(store, records, args, opts = {}) {
     const { chatKey, speaker, speakerName } = args;
     opts = playOptions(store, chatKey, opts);
@@ -632,7 +633,10 @@ export async function composeSlot(store, records, args, opts = {}) {
     if (opts.pace?.enabled !== false && !camera) {
         const names = (store.getCast?.(chat.story_id) ?? []).map(e => e.name);
         const upto = uptoAnchor(messages, args.anchor);
-        for (const line of [onwardLine({ messages, speaker, name, userName: userName ?? '对方' }), absentAskLine({ messages, speaker, name, names, present: args.present ?? [] }), takenLine({ messages: upto, speaker, name, userName: userName ?? '对方', remote: stance?.status === 'remote' })]) say(line);
+        say(onwardLine({ messages, speaker, name, userName: userName ?? '对方' }));
+        say(absentAskLine({ messages, speaker, name, names, present: args.present ?? [] }));
+        const taken = { messages: upto, speaker, name, userName: userName ?? '对方', remote: stance?.status === 'remote' };
+        if (taken.remote || canWitness(stance)) say(takenLine(taken));
     }
     // 这一条的范围（用户 10/2，横向生长）：只写眼前这几分钟，停在对方能接的地方；对方没动，场面不挪、时间不跳。放在最末。
     if (opts.pace?.scope !== false && opts.pace?.lateral !== false && !camera) say(scopeLine({ userName: userName ?? '对方' }));
