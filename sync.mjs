@@ -113,10 +113,7 @@ export function fingerprintMessage(message, speaker) {
     return fp;
 }
 
-// 当前聊天 → 序列（每条的指纹）＋ 按指纹找正文的表。
-export function buildSequence(chat, fallbackAvatar = null, generating = null, roster = []) {
-    const seq = [];
-    const bodies = new Map();
+export function sequenceWindow(chat) {
     let pending = false;
     // 末尾正在生成的那条（酒馆先放一条空的再往里写）不同步：它的指纹是"这个人的空消息"，人人一样，
     // 同步过去会被当成改稿，把好几条不相干的消息串成一条链（试玩 10/7：昨天的"此刻的样子"跑到了今天这条上）
@@ -126,22 +123,38 @@ export function buildSequence(chat, fallbackAvatar = null, generating = null, ro
         if (Array.isArray(m.swipes) && m.swipes.some(s => typeof s === 'string' && s.trim())) { pending = true; break; }
         end--;
     }
+    return { end, pending };
+}
+
+export function sequenceRevision(message, speaker, f, generating, tail) {
+    let w = Number.isInteger(message.swipe_id) ? message.swipe_id : 0;
+    let swipes, pending = false;
+    if (Array.isArray(message.swipes)) {
+        swipes = Array.from({ length: message.swipes.length }, (_, i) =>
+            typeof message.swipes[i] === 'string' && message.swipes[i].trim()
+                ? fingerprint(!!message.is_user, speaker, message.swipes[i]) : null);
+        if (swipes[w] !== f) {
+            const matches = swipes.flatMap((fp, i) => fp === f ? [i] : []);
+            if (w >= swipes.length && matches.length === 1 && !generating) w = matches[0];
+            else pending = true;
+        }
+    }
+    if (generating?.message === message || (generating?.active && message === tail && !message.is_user)) pending = true;
+    return { w, swipes, pending };
+}
+
+// 当前聊天 → 序列（每条的指纹）＋ 按指纹找正文的表。
+export function buildSequence(chat, fallbackAvatar = null, generating = null, roster = []) {
+    const seq = [];
+    const bodies = new Map();
+    const window = sequenceWindow(chat);
+    const { end } = window;
+    let pending = window.pending;
     for (const message of chat.slice(0, end)) {
         const speaker = speakerOf(message, fallbackAvatar);
         const f = fingerprintMessage(message, speaker);
-        let w = Number.isInteger(message.swipe_id) ? message.swipe_id : 0;
-        let swipes;
-        if (Array.isArray(message.swipes)) {
-            swipes = Array.from({ length: message.swipes.length }, (_, i) =>
-                typeof message.swipes[i] === 'string' && message.swipes[i].trim()
-                    ? fingerprint(!!message.is_user, speaker, message.swipes[i]) : null);
-            if (swipes[w] !== f) {
-                const matches = swipes.flatMap((fp, i) => fp === f ? [i] : []);
-                if (w >= swipes.length && matches.length === 1 && !generating) w = matches[0];
-                else pending = true;
-            }
-        }
-        if (generating?.message === message || (generating?.active && message === chat[end - 1] && !message.is_user)) pending = true;
+        const { w, swipes, pending: revisionPending } = sequenceRevision(message, speaker, f, generating, chat[end - 1]);
+        if (revisionPending) pending = true;
         const k = message.extra?.rp_day;   // 用户点的剧情日期：day＝从这条起算新的一天｜same＝这里没有跨天｜d:N＝这条是第 N 天
         const b = message.extra?.rp_board;
         // w：正在用的是第几版左滑（后台据此分清"改了这一条"和"左滑换了一版"，N-271）
