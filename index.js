@@ -6,7 +6,7 @@ import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStal
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, captureDoorHandoff, doorHandoffs, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 import { observeManualLeaveCommand } from './sync.mjs';
 import { cutByPresence, storyTimeAt } from './presence.mjs';
-import { captureManualLeave, manualLeaveCardMatches, manualLeaveWriter } from './presence-write.mjs';
+import { captureManualLeave, captureSegmentOpen, manualLeaveCardMatches, manualLeaveWriter, segmentOpenArrivalFailure, segmentOpenFailure, writeSegmentOpen } from './presence-write.mjs';
 import { boardSegmentEdit, undoBoardSegmentEdit } from './sync.mjs';
 import { failureView, setStage, stageHtml, cardChoiceHtml } from './lifecycle.mjs';
 
@@ -1785,8 +1785,8 @@ function scheduleSync(delay = 1500) {
     state.timer = setTimeout(() => syncNow(), delay);
 }
 
-function activeGeneration() {
-    if (globalThis.document?.body?.dataset?.generating !== 'true' && !ctx().is_group_generating) { state.generation = null; return null; }
+function activeGeneration({ readOnly = false } = {}) {
+    if (globalThis.document?.body?.dataset?.generating !== 'true' && !ctx().is_group_generating) { if (!readOnly) state.generation = null; return null; }
     const g = state.generation;
     return g?.epoch === state.epoch && g.chatKey === state.chatKey ? g : { active: true };
 }
@@ -4082,7 +4082,16 @@ document.addEventListener('click', event => {
     if (way) {
         const w = way.dataset.way;
         const mode = w === '去找他' ? 'go' : w === '消息' || w === '电话' ? 'remote' : 'come';
-        enterChar(way.dataset.who, way.dataset.avatar || null, { mode, ...(mode === 'remote' ? { way: w } : {}) }).then(refreshDoor).catch(() => {});
+        const { who, avatar = '' } = way.dataset;
+        const bucket = ['他过来', '电话', '消息'].includes(w) ? w : '其他';
+        const counts = doorOpenCounts[bucket] ??= { clicks: 0, attached: 0, reasons: {} };
+        counts.clicks++;
+        let door;
+        try { door = doorOpenOperation(who, avatar || null, bucket, mode, counts); }
+        catch { settleDoorOpen(counts, 'intent-error'); }
+        const entered = enterChar(who, avatar || null, { mode, ...(mode === 'remote' ? { way: w } : {}) }, door);
+        entered.then(refreshDoor).catch(() => {});
+        if (door) void entered.then(door.finish, () => door.finish(false)).catch(() => {});
     } else if (cancel && state.chatKey) {
         api('arrival-request', { chatKey: state.chatKey, who: cancel.dataset.who, cancel: true }).then(refreshDoor).catch(() => {});
     }
@@ -4303,12 +4312,72 @@ async function resolveCastChoices(names = []) {
         await resolveCard(who,null,{retry:true});
     }
 }
-async function enterChar(who, avatar = null, opts = {}) {
+const doorOpenCounts = {};
+function settleDoorOpen(counts, reason) {
+    if (reason) counts.reasons[reason] = (counts.reasons[reason] ?? 0) + 1;
+    else counts.attached++;
+}
+function doorOpenOperation(who, requested, bucket, mode, counts) {
+    const c = ctx(), origin = editOrigin(), group = currentGroup(c), { chat, chatMetadata: metadata } = c;
+    const { chatKey } = origin, { epoch, leaveWindow: gate } = state;
+    const { groupId, stChatId } = chatIds(c);
+    const newId = () => c.uuidv4?.() ?? crypto.randomUUID(), opKey = newId();
+    const way = bucket === '他过来' ? '当面' : bucket;
+    const card = bucket !== '其他' && group && cardNamed(c, who, requested), avatar = card?.avatar, name = card?.name;
+    const validAvatar = id => !id.includes('..') && (id.startsWith('face:') ? !!id.slice(5).trim() && !/[/\\]/.test(id)
+        : /^[^<>:"/\\|?*\x00-\x1f]+\.(png|webp|jpe?g|gif)$/i.test(id));
+    const memberFiles = list => Array.isArray(list) && Array.from(list).every(id => typeof id === 'string' && /^[^<>:"/\\|?*\x00-\x1f]+\.png$/.test(id));
+    const active = ({ members, disabled_members: muted }) => memberFiles(members) && members.filter(id => id === avatar).length === 1
+        && (muted === undefined || memberFiles(muted) && !muted.includes(avatar));
+    const sameWindow = (now = ctx(), ids = chatIds(now)) => group && chatKey && sameEdit(origin) && epoch === state.epoch
+        && groupId === ids.groupId && stChatId === ids.stChatId && currentGroup(now) === group
+        && localTarget({ chat }, origin.window, { requireHead: true }) && now.chatMetadata === metadata && metadata?.rp_emergence?.chatKey === chatKey;
+    const cardFailure = (now = ctx()) => {
+        if (!manualLeaveEnabled() || state.leaveWindow !== gate || gate.chat !== chat || gate.metadata !== metadata) return 'disabled';
+        if (typeof name !== 'string' || !requested && name !== who || !avatar || avatar.startsWith('face:')
+            || card.name !== name || isCamera(card) || card.avatar !== avatar || cardNamed(now, who, requested) !== card
+            || now.characters.filter(ch => ch.avatar === avatar || !requested && ch.name === who && group.members.includes(ch.avatar)).length !== 1)
+            return 'card-ineligible';
+    };
+    const eligibility = () => sameWindow() ? cardFailure() : 'window-changed';
+    let failure = bucket === '其他' ? 'way-invalid' : eligibility(), capture, result, arrival = 'arrive-unconfirmed', finished;
+    return {
+        card(ch) { if (ch !== card) failure ??= 'card-changed'; },
+        capture(anchor, seg, message) {
+            failure ??= eligibility();
+            if (!failure) capture = captureSegmentOpen({ chat, metadata, chatKey, avatar, opKey, way }, anchor, seg, message, { generating: activeGeneration({ readOnly: true }), newId });
+        },
+        opened(value) { result = value; },
+        arrival(got, remote) { arrival = segmentOpenArrivalFailure(got, remote, { avatar, chatKey, mode, way, bucket }); },
+        async finish(ok) {
+            if (finished) return;
+            finished = true;
+            let reason;
+            try {
+                reason = failure ?? capture?.reason ?? (ok !== true ? 'old-flow-failed' : arrival ?? eligibility()
+                    ?? (active(group) ? null : 'card-disabled') ?? segmentOpenFailure(capture, result, activeGeneration({ readOnly: true })));
+                if (reason) return;
+                const roster = await confirmManualLeave(chatKey, () => 'confirmation-timeout');
+                reason = !sameWindow() ? 'window-changed' : Array.isArray(roster) ? null : roster ?? 'eligibility-unconfirmed';
+                if (reason) return;
+                const publicationFailure = () => {
+                    const [match, duplicate] = roster.filter(ch => ch.avatar === avatar || !requested && ch.name === who);
+                    if (!match || duplicate || match.avatar !== avatar || match.name !== name || match.role === '不用'
+                        || !roster.every(ch => validAvatar(ch.avatar) && Object.hasOwn(ROLE_NOTES, ch.role))) return 'eligibility-unconfirmed';
+                    return cardFailure() ?? (active(group) ? null : 'card-disabled');
+                };
+                reason = writeSegmentOpen(capture, { result, roster, generating: activeGeneration({ readOnly: true }), publicationFailure }).reason;
+            } catch { reason = 'prepare-failed'; }
+            finally { settleDoorOpen(counts, reason); }
+        },
+    };
+}
+async function enterChar(who, avatar = null, opts = {}, door = null) {
     const c = ctx(), group = currentGroup(c);
     if (!group) { globalThis.toastr?.warning('进场只在群聊里用。', 'RP：幕后'); return false; }
     const chatKey=state.chatKey,epoch=state.epoch,chat=c.chat;
     const here=()=>state.chatKey===chatKey&&state.epoch===epoch&&ctx().chat===chat;
-    const ch = await resolveCard(who, avatar);
+    const ch = await resolveCard(who, avatar); door?.card(ch);
     if(!here())return false;
     if (!ch) { globalThis.toastr?.warning(`找不到「${who}」的卡。`, 'RP：幕后'); return false; }
     // 这是扩展自己拉进群的：群名单变了别当成玩家手动拉人（watchMembers），进场就走这一遍
@@ -4326,13 +4395,13 @@ async function enterChar(who, avatar = null, opts = {}) {
         if (g.disabled_members?.includes(ch.avatar)) await setMemberMuted(ch.avatar,false);
         if(!here())return false;
         // 从这一条起在场：之前这里说的话他没听见（没装上下文隔离扩展时，后台只能当他一直在）
-        await openPresence(ch);
+        await openPresence(ch, null, door);
         if(!here())return false;
         prepared=copy(anchor());preparedMute=!!currentGroup(c)?.disabled_members?.includes(ch.avatar);
         if(await syncNow(true)===false)throw Error('消息同步或撤销核验未完成，请重新同步后再进场');
         if(!here())return false;
         globalThis.toastr?.info(`${ch.name}进场中……`, 'RP：幕后', { timeOut: 6000 });
-        const arrived=await arriveNow(ch, opts);
+        const arrived=await arriveNow(ch, opts, door);
         if(!here())return false;
         if(!arrived||arrived.ok===false)throw Error(arrived?.why||'后台未确认进场，请重新核对身份与来源后重试');
         arrivalId=arrived.source_basis?.id??null;
@@ -4375,13 +4444,14 @@ async function enterChar(who, avatar = null, opts = {}) {
     }
 }
 // 后台替他理一次怎么来的、为什么来（main.arrive）；发消息、打电话来的记成远程
-async function arriveNow(ch, opts = {}) {
+async function arriveNow(ch, opts = {}, door = null) {
     let got = null;
     const chatKey=state.chatKey,epoch=state.epoch;
     try { got = await api('arrive', { chatKey, who: ch.name, avatar: ch.avatar, mode: opts.mode ?? 'come', ...(opts.way ? { way: opts.way } : {}) }, 240000); }
     catch(error) { return {ok:false,why:failureView(error,'进场').text}; }
     if(chatKey!==state.chatKey||epoch!==state.epoch||got?.ok===false)return got;
-    state.remote = /电话|消息/.test(got?.how ?? '') ? { who: ch.name, avatar: ch.avatar, how: /电话/.test(got.how) ? '打电话' : '发消息', chatKey: state.chatKey } : null;
+    const remote = state.remote = /电话|消息/.test(got?.how ?? '') ? { who: ch.name, avatar: ch.avatar, how: /电话/.test(got.how) ? '打电话' : '发消息', chatKey: state.chatKey } : null;
+    try { door?.arrival(got, remote); } catch { /* 观察失败只影响影子。 */ }
     return got;
 }
 // 玩家在群面板里直接把卡移出群（不是静音）：区间没关，后台会一直当他在场。和上一次看到的名单比，少了的有卡的人当作离场。
@@ -4469,13 +4539,14 @@ function enterAsBefore(ch, doorItem) {
 }
 // 进场那一步（拉进群判在场、手动取消静音共用）：开区间（since 有就从那条起；早于他上一段在场的末尾就不追，从此刻开），
 // 读回他这一段从第几条起、之前有没有真在场过（零长度的封段不算）。没装上下文隔离扩展：什么都不开，from 为空
-async function openPresence(ch, since = null) {
+async function openPresence(ch, since = null, door = null) {
     const c=ctx(),segs=()=>c.chatMetadata?.contextIsolation?.anchors?.[ch.avatar]?.segments??[];
     const real=s=>s&&s.to!=null&&s.to>s.from;
     const floor=Math.max(0,...segs().filter(real).map(s=>s.to));
     const at=Number.isInteger(since)&&since>=floor?since:c.chat.length;
     const resident=residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot});
-    await openSegment(c,{avatar:ch.avatar,name:ch.name,at,resident});
+    const result = await openSegment(c,{avatar:ch.avatar,name:ch.name,at,resident,...(door ? { onOpen: door.capture } : {})});
+    door?.opened(result);
     const now=segs(),open=now.find(s=>s?.to==null);
     const from=Number.isInteger(open?.from)?open.from:resident&&now.length===0?0:null;
     return{from,since:at===since?since:null,earlier:from!=null&&now.some(s=>real(s)&&s.from<from)};
@@ -4606,15 +4677,16 @@ function manualLeaveEnabled() {
 }
 
 const LEAVE_CONFIRM_MS = 300;
-async function confirmManualLeave(chatKey = state.chatKey) {
+async function confirmManualLeave(chatKey = state.chatKey, timedOut = () => null) {
     const deadline = performance.now() + LEAVE_CONFIRM_MS;
     try {
         const result = await api('presence-check', { chatKey }, LEAVE_CONFIRM_MS);
-        if (performance.now() >= deadline || result?.chatKey !== chatKey || result.enabled !== true
+        if (performance.now() >= deadline) return timedOut();
+        if (result?.chatKey !== chatKey || result.enabled !== true
             || !Array.isArray(result.cast) || !result.cast.every(card => typeof card?.avatar === 'string'
                 && typeof card.name === 'string' && typeof card.role === 'string')) return null;
         return result.cast;
-    } catch { return null; }
+    } catch (error) { return error?.name === 'TimeoutError' || performance.now() >= deadline ? timedOut() : null; }
 }
 function manualLeaveOperation(c, group, ch, who) {
     if (!manualLeaveEnabled()) return null;

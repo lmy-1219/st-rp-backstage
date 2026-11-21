@@ -256,12 +256,13 @@ export function stateAt(input, avatar, k) {
     return { state: change?.state ?? 'unknown', channel: change?.channel ?? null };
 }
 
-export function inspect(input, at, event, { includeProjection = false } = {}) {
+export function inspect(input, at, event, { includeProjection = false, prepared = false } = {}) {
     const field = event?.schema === 2 ? 'rpePresenceOpen' : 'rpePresence';
     const row = input.chat?.[at], records = row?.extra?.[field];
     if (!integer(at) || !object(row) || !object(event)
         || Object.hasOwn(row.extra ?? {}, field) && !Array.isArray(records)) return { ok: false, reason: 'field-invalid', effective: false };
-    const staged = { ...row, extra: { ...row.extra, [field]: records?.includes(event) ? records : [...(records ?? []), event] } };
+    if (prepared && !records?.includes(event)) return { ok: false, reason: 'field-invalid', effective: false };
+    const staged = prepared ? row : { ...row, extra: { ...row.extra, [field]: records?.includes(event) ? records : [...(records ?? []), event] } };
     const generating = input.generating?.message === row ? { ...input.generating, message: staged } : input.generating;
     let ownReason, chainReason;
     const inspection = { at, event, reject(record, reason, targets, matches) {
@@ -269,7 +270,7 @@ export function inspect(input, at, event, { includeProjection = false } = {}) {
         else if (targets.includes(event.avatar) && (matches ? matches.some(valid => valid.event.id === event.id)
             : record?.id === event.id)) chainReason ??= reason;
     } };
-    const projection = projectPresence({ ...input, chat: input.chat.with(at, staged), generating }, inspection);
+    const projection = projectPresence({ ...input, chat: prepared ? input.chat : input.chat.with(at, staged), generating }, inspection);
     const reason = ownReason ?? chainReason ?? (at >= projection.length ? 'field-invalid' : null);
     return { ok: reason === null, reason, effective: reason === null && inspection.effectiveAt !== undefined,
         ...(includeProjection && { projection }) };

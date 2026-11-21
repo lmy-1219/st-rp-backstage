@@ -679,13 +679,15 @@ export function classify({kind,segments=[],at,disabled=false,resident=false,sour
     return{status:'correction',reason:'找不到这次离场所属的在场区间'};
 }
 async function saved(c,avatar,check){await c.saveMetadata();if(!check(presenceRecord(c,avatar)))throw Error('隔离区间保存后核实失败');}
-export async function openSegment(c,{avatar,name,at,resident=false}={}){
+export async function openSegment(c,{avatar,name,at,resident=false,onOpen}={}){
     if(!Array.isArray(c?.chat)||!Number.isInteger(at)||at<0||at>c.chat.length)throw Error('进场条号无效');
     const r=presenceRecord(c,avatar),v=classify({kind:'open',segments:r?.segments??[],at,resident});
     if(v.status==='correction')throw Error(v.reason);
     if(v.status==='achieved')return v;
     const seg={from:at,fromDate:at?String(c.chat[at-1]?.send_date??''):'',to:null,toDate:''};
     const target=presenceRecord(c,avatar,name,true);target.name=name;target.segments.push(seg);
+    try { onOpen?.(target, seg, c.chat[at - 1]); }
+    catch { /* 观察失败不影响旧开段保存。 */ }
     await saved(c,avatar,r=>r?.segments?.some(s=>s.from===at&&s.to==null));
     return{status:'applied',segment:seg};
 }

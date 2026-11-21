@@ -154,3 +154,115 @@ export function manualLeaveWriter(proof, { current, prepare, read, report, sched
         },
     };
 }
+
+const idSlot = (obj, field) => [obj != null && Object.hasOwn(obj, field), obj?.[field]];
+const openIds = (m, source = idSlot(m.extra, 'rpeSourceId')) =>
+    stamp([source, idSlot(m, 'rpeSourceId'), idSlot(m, 'rpeMessageId'), idSlot(m.extra, 'rpeMessageId')]);
+const openColumn = 'rpePresenceOpen', columns = [openColumn, 'rpePresence'];
+const draftShape = m => ['swipe_id', 'swipes', 'swipe_info'].map(key => Object.hasOwn(m, key));
+const openDraft = (m, shape = draftShape(m)) => shape.join(',') + draft(m);
+const plainExtra = extra => extra == null || object(extra) && [null, Object.prototype].includes(Object.getPrototypeOf(extra));
+
+export function captureSegmentOpen(proof, anchor, segment, message, { generating, newId }) {
+    const { chat, avatar, opKey, way } = proof, at = segment.from - 1;
+    if (!validSlot(at) || at + 1 !== chat.length || !message || chat[at] !== message) return outcome('capture', 'boundary-invalid');
+    if (Object.hasOwn(message, 'revisionPending')) return outcome('capture', 'carrier-invalid');
+    const shape = draftShape(message), [hasSlot, hasSwipes, hasInfo] = shape;
+    const { extra, swipe_id: slot, swipes, swipe_info: info } = message, originalSid = extra?.rpeSourceId;
+    const [row] = rowsFromChat([message], null, generating);
+    const unslotted = message.is_user === true && !hasSlot && !hasSwipes && !hasInfo;
+    const invalidCarrier = () => outcome('capture', 'carrier-invalid');
+    if (!row?.fp || row.hidden || row.is_system || row.revisionPending || !row.mes.trim()) return invalidCarrier();
+    if (!unslotted) {
+        if (!hasSlot || !validSlot(slot) || slot !== row.swipe_id) return invalidCarrier();
+        if (Array.isArray(swipes) ? swipes[slot] !== message.mes : slot !== 0 || hasSwipes || hasInfo) return invalidCarrier();
+        if (hasInfo && (!Array.isArray(info) || slot >= info.length)) return invalidCarrier();
+    }
+    if (originalSid == null && message.rpeSourceId != null) return outcome('capture', 'top-only-source-id');
+    if (Object.hasOwn(extra ?? {}, 'rpeSourceId') && !validId(originalSid)) return outcome('capture', 'source-id-conflict');
+    const event = { schema: 2, source: 'segment-open', avatar, opKey, id: null, version: 1, action: 'enter', way, deps: [],
+        carrier: { sid: originalSid ?? newId(), fp: row.fp, sw: unslotted ? null : row.swipe_id } };
+    if (!validId(event.carrier.sid) || !validId(opKey) || !validId(avatar) || !['当面', '电话', '消息'].includes(way)) return outcome('capture', 'intent-invalid');
+    event.id = eventId(event);
+    return { ...proof, at, anchor, segment, message, event, originalSid, ids: openIds(message), draft: openDraft(message, shape),
+        sourceSlot: idSlot(extra, 'rpeSourceId'), boundary: stamp(segment), revision: stamp(anchor?.rpeManualRevision) };
+}
+
+export function segmentOpenFailure(capture, result, generating) {
+    if (result?.status === 'achieved') return 'already-open';
+    if (!capture || result?.status !== 'applied' || result.segment !== capture.segment) return 'open-unconfirmed';
+    const { chat, metadata, chatKey, avatar, at, anchor, segment, message } = capture;
+    if (metadata.rp_emergence?.chatKey !== chatKey || metadata.contextIsolation?.anchors?.[avatar] !== anchor
+        || !Array.isArray(anchor.segments) || !anchor.segments.includes(segment)
+        || segment.to !== null || segment.from !== at + 1 || anchor.segments.filter(s => s && s.to == null).length !== 1
+        || stamp(segment) !== capture.boundary || stamp(anchor.rpeManualRevision) !== capture.revision) return 'segment-changed';
+    if (chat[at] !== message) return 'carrier-moved';
+    if (Object.hasOwn(message, 'revisionPending')) return 'carrier-invalid';
+    if (!plainExtra(message.extra)) return 'event-slot-invalid';
+    if (openDraft(message) !== capture.draft) return 'carrier-changed';
+    if (generating?.message === message || generating?.active && chat.length === at + 1 && !message.is_user) return 'carrier-invalid';
+}
+
+export function writeSegmentOpen(capture, { result, roster, generating, publicationFailure }) {
+    const reject = reason => outcome('prepare', reason);
+    const failure = segmentOpenFailure(capture, result, generating);
+    if (failure) return reject(failure);
+    const { chat, at, message, event, originalSid, ids } = capture, { sid } = event.carrier;
+    const { extra } = message, records = extra?.[openColumn];
+    if ((records !== undefined || Object.hasOwn(extra ?? {}, openColumn)) && !Array.isArray(records)) return reject('event-slot-invalid');
+    const sources = new Set(), messages = new Set();
+    const idSets = [['rpeSourceId', sources], ['rpeMessageId', messages]];
+    let prior, otherRef;
+    for (const [i, row] of chat.entries()) {
+        if (row === message && i !== at) return reject('carrier-duplicated');
+        const extra = row?.extra;
+        for (const [field, used] of idSets) {
+            const [hasTop, top] = idSlot(row, field), [hasNested, nested] = idSlot(extra, field);
+            if (!hasTop && !hasNested) continue;
+            const id = hasNested ? nested : top;
+            if (!validId(id) || hasTop && top !== id || used.has(id)) return reject(used === sources ? 'source-id-conflict' : 'message-id-conflict');
+            used.add(id);
+        }
+        for (const column of columns) {
+            const records = extra?.[column];
+            if (records == null) continue;
+            for (const record of Array.isArray(records) ? records : [records]) {
+                if (record?.id === event.id || record?.avatar === event.avatar && record.source === event.source && record.opKey === event.opKey) {
+                    if (prior || i !== at || column !== openColumn || stamp(record) !== stamp(event)) return reject('op-conflict');
+                    prior = record;
+                } else if (originalSid == null && (record?.carrier?.sid === sid || [record?.deps ?? []].flat().some(ref => ref?.sid === sid))) otherRef = true;
+            }
+        }
+    }
+    const installed = prior && originalSid == null && extra?.rpeSourceId === sid;
+    if (openIds(message, installed ? capture.sourceSlot : undefined) !== ids) return reject('carrier-id-changed');
+    if (originalSid == null && (sources.has(sid) && !installed || otherRef)) return reject('source-id-collision');
+
+    const nextExtra = prior ? extra : Object.create(Object.getPrototypeOf(extra ?? {}), Object.getOwnPropertyDescriptors(extra ?? {}));
+    if (!prior) {
+        if ('extra' in message && !Object.hasOwn(message, 'extra')) return reject('event-slot-invalid');
+        if (extra && !Object.isExtensible(extra)) Object.preventExtensions(nextExtra);
+        if (!Reflect.set(nextExtra, openColumn, [...(records ?? []), event])) return reject('event-slot-invalid');
+        if (originalSid == null && !Reflect.set(nextExtra, 'rpeSourceId', sid)) return reject('event-slot-invalid');
+    }
+    const candidate = prior ? chat : chat.with(at, { ...message, extra: nextExtra });
+    const checked = inspect({ chat: candidate, roster, generating }, at, prior ?? event, { prepared: true });
+    if (!checked.effective) return reject(checked.ok ? 'presence-ineffective' : 'presence-rejected');
+    const ineligible = publicationFailure?.();
+    if (ineligible) return reject(ineligible);
+    if (!prior && !Reflect.set(message, 'extra', nextExtra)) return reject('event-slot-invalid');
+    return prior ? outcome('prepare', 'exact-replay', 'replay') : { status: 'attached' };
+}
+
+export function segmentOpenArrivalFailure(got, remote, { avatar, chatKey, mode, way, bucket }) {
+    if (!object(got) || got.skipped) return 'arrive-unconfirmed';
+    const channel = mode === 'come' ? null : way === '电话' ? 'phone' : 'message';
+    const actual = remote == null ? null : remote.avatar === avatar && remote.chatKey === chatKey
+        ? ({ 打电话: 'phone', 发消息: 'message' })[remote.how] : undefined;
+    const basis = got.source_basis;
+    const dependent = [basis?.deps, got.deps].some(deps => deps != null && (!Array.isArray(deps) || deps.length));
+    if (dependent || basis?.handoff || basis?.sourceStep || basis?.playerRequest || basis?.delivery || basis?.factBasis
+        || got.sourceStep || got.sent || got.factBasis || basis != null && !object(basis)) return 'dependent-arrival';
+    if (actual !== channel || ('mode' in got && got.mode !== mode) || ('channel' in got && got.channel !== channel)
+        || ('way' in got && got.way !== way && !(mode === 'come' && ['上门', bucket].includes(got.way)))) return 'way-conflict';
+}
