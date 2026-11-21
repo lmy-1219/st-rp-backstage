@@ -552,6 +552,11 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             const left = balances(records.visible(chatKey), { start: store.setupOf?.(store.requireChat(chatKey).story_id)?.data?.钱 ?? [], people: [userName], ...identity }).map(x => balanceText(x, currency)).filter(Boolean);
             return { currency, left, debts: ledger.debts.map(row), deals: ledger.deals.map(row), quotes: ledger.quotes.map(row), moves: ledger.moves.map(row) };
         },
+        'POST /v1/presence-check': b => {
+            const chat = store.requireChat(str(b.chatKey, 'chatKey'));
+            const cast = store.getCast(chat.story_id).map(({ avatar, name, role }) => ({ avatar, name, role }));
+            return { chatKey: chat.key, enabled: chat.enabled === 1, cast };
+        },
         // 名册：cards＝ST 里现有的卡（扩展打开窗口时带来，补默认档）；set＝用户改的档位与钩子。
         'POST /v1/cast': b => {
             const chat = store.requireChat(str(b.chatKey, 'chatKey'));
@@ -1252,6 +1257,46 @@ function readBody(req) {
     });
 }
 
+const globalRoutes = new Set([
+    'health', 'timings', 'camera-card', 'stages', 'stages-fit', 'stage-models', 'stage-probe', 'update', 'tuning',
+    'material-pack-upload', 'material-pack-git', 'opening-pack-upload', 'opening-pack-git', 'opening-pack',
+]);
+const mismatch = () => { throw Object.assign(new Error('window-mismatch'), { status: 409 }); };
+const windowId = value => typeof value === 'string' && value.trim() !== '';
+
+export function dispatchRequest(store, routes, name, body, headers = {}) {
+    const route = Object.hasOwn(routes, name) ? routes[name] : null;
+    if (!route) throw Object.assign(new Error('not_found'), { status: 404 });
+    const operation = name.split('/').at(-1);
+    // 插件只转发 JSON；显式选键或按任务 ID 工作的本机工具另带来源头。
+    const tool = headers['x-rpe-source'] === 'tool', window = body.window;
+    if (operation === 'open' || operation === 'join') {
+        if (!windowId(body.stChatId)) mismatch();
+        if (Object.hasOwn(body, 'window')) {
+            if (!window || typeof window !== 'object' || Array.isArray(window)
+                || window.stChatId !== body.stChatId || window.groupId !== body.groupId
+                || (body.groupId !== null && !windowId(body.groupId))) mismatch();
+        } else if (!windowId(body.groupId) && !(tool && body.groupId == null)) mismatch();
+        return route(body);
+    }
+    const key = body.chatKey ?? body.sourceChatKey;
+    if (key != null && window?.groupId === false) mismatch();
+    if (operation === 'absence' && body.mode !== undefined && body.chatKey == null) mismatch();
+    if (tool || globalRoutes.has(operation)) return route(body);
+    if (operation === 'handoff' || operation === 'plan-submit' || (operation === 'advise' && body.planId != null)) mismatch();
+    if (key == null && (
+        (operation === 'preset' && body.apply === undefined && body.save === undefined)
+        || operation === 'advise' || (operation === 'fresh-config' && !body.action)
+        || (operation === 'absence' && body.mode === undefined)
+    )) return route(body);
+    // 面板可以选别窗的包，核对发起窗；包的状态和有效性仍由原处理器核对。
+    if (operation === 'handoff-ui' && key == null) mismatch();
+    const chat = store.requireChat(str(operation === 'handoff-ui' ? key : body.chatKey, 'chatKey'));
+    if (!window || typeof window !== 'object' || Array.isArray(window) || typeof window.stChatId !== 'string' || !window.stChatId
+        || window.stChatId !== chat.st_chat_id || window.groupId !== (chat.group_id || null)) mismatch();
+    return route(body);
+}
+
 export function createServer(store, { log = () => {}, worker = null, records = null, assembler = null, keyMaker = null, advisor = null, setupMaker = null, keysMaker = null, handoffs = null, settings = () => ({}) } = {}) {
     const routes = createRoutes(store, { log, worker, records, assembler, keyMaker, advisor, setupMaker, keysMaker, handoffs, settings });
     // 耗时（先量再改）：每个请求后台算了多久，最近 400 笔；超过一秒半的记进日志。GET /v1/timings 给面板
@@ -1264,17 +1309,18 @@ export function createServer(store, { log = () => {}, worker = null, records = n
     return http.createServer(async (req, res) => {
         const trace = requestTrace();
         const name = `${req.method} ${new URL(req.url, 'http://x').pathname}`;
+        const confirmation = name === 'POST /v1/presence-check';
         const heavy = ['POST /v1/sync', 'POST /v1/slot', 'POST /v1/turn', 'POST /v1/boards'].includes(name);
         const send = (status, value) => {
             trace.ended = performance.now();
             const stages = traceView(trace), ms = Math.round(stages.total);
             const failed = status >= 400 || value?.ok === false;
-            if (name !== 'POST /v1/timings') {
+            if (!confirmation && name !== 'POST /v1/timings') {
                 timings.push({ at: Date.now(), route: name, status, ms, failed, stages });
                 if (timings.length > 400) timings.splice(0, timings.length - 400);
             }
             // 不输出错误原文、请求体、查询参数；失败阶段只取程序内固定标签。
-            if (failed || ms > 1500 || heavy) log(`${failed ? 'failed' : ms > 1500 ? 'slow' : 'request'} ${name}: status=${status} stage=${stages.stage} ${ms} ms${heavy ? ` phases=${JSON.stringify(stages)}` : ''}`);
+            if (!confirmation && (failed || ms > 1500 || heavy)) log(`${failed ? 'failed' : ms > 1500 ? 'slow' : 'request'} ${name}: status=${status} stage=${stages.stage} ${ms} ms${heavy ? ` phases=${JSON.stringify(stages)}` : ''}`);
             res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
             res.end(JSON.stringify(heavy && value && typeof value === 'object' ? { ...value, timings: stages } : value));
         };
@@ -1290,7 +1336,7 @@ export function createServer(store, { log = () => {}, worker = null, records = n
                     if (!body || typeof body !== 'object' || Array.isArray(body)) bad('body must be an object');
                 }
                 trace.stage = 'route';
-                const value = await route(body);
+                const value = await dispatchRequest(store, routes, name, body, req.headers);
                 trace.failedStage = null;
                 trace.stage = value?.ok === false ? 'business' : 'complete';
                 send(200, value);

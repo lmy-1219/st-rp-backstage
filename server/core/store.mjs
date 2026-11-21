@@ -348,6 +348,8 @@ export function openStore(file) {
     };
     const copyArr = a => [...a];
     const getChat = q('select * from chats where key = ?');
+    const castByStory = q(`select c.avatar, c.name, c.gender, c.role, c.hook, c.priority, c.bond, c.set_by, c.call, c.stranger, c.is_group, coalesce(c.interests, p.text) interests, c.interests is not null interests_own
+                  from cast c left join card_profiles p on p.avatar = c.avatar where c.story_id = ? order by c.name`);
     const logEvent = q('insert into events(chat_key, at, kind, detail) values (?, ?, ?, ?)');
     const log = (chatKey, kind, detail) => logEvent.run(chatKey, now(), kind, JSON.stringify(detail ?? null));
     // 快照：一条消息当最后一条时各处的样子（rewind.mjs）。同一条覆盖；一个窗口只留最近 400 条的
@@ -372,6 +374,7 @@ export function openStore(file) {
 
     // 新接入一个窗口 = 开一局新的。同一个聊天重复接入（比如 ST 连发了两次切换事件）就返回已有的那条。
     function join({ stChatId, groupId = null, label = null }) {
+        groupId ||= null;
         return tx(() => {
             const existing = q(`select key, story_id from chats where st_chat_id = ? and coalesce(group_id, '') = coalesce(?, '')
                                 order by joined_at desc limit 1`).get(stChatId, groupId);
@@ -387,14 +390,24 @@ export function openStore(file) {
     // 打开一个带着我们标记的窗口：同一个 / 改了名 / 分支出来的（元数据被 ST 原样复制过来）。
     // siblings：浏览器知道的同组其他聊天 id；旧 id 还在 ⇒ 这是分支，旧 id 没了 ⇒ 是改名。
     function open({ chatKey, stChatId, groupId = null, siblings = null, mainChat = null }) {
-        const chat = getChat.get(chatKey);
-        if (!chat) return { status: 'unknown' };
-        if (chat.st_chat_id === stChatId) return { status: 'same', chatKey, storyId: chat.story_id, enabled: !!chat.enabled };
-        // 单聊↔群聊、或从一个群换到另一个群：换了个"窝"，ST 改名不会动它属于单聊还是哪个群，
-        // 所以不可能是改名，是另一个窗口——按分支办（D-67/D-93：带上分叉点之前已生效的规划，之后各记各的）。
-        const changedHome = (chat.group_id ?? null) !== (groupId ?? null);
-        const oldStillThere = changedHome || (Array.isArray(siblings) ? siblings.includes(chat.st_chat_id) : !!mainChat);
-        return tx(() => {
+        groupId ||= null;
+        const resolve = writing => {
+            const chat = getChat.get(chatKey);
+            if (!chat) return { status: 'unknown' };
+            const changedHome = (chat.group_id || null) !== groupId;
+            if (!changedHome && chat.st_chat_id === stChatId)
+                return { status: 'same', chatKey, storyId: chat.story_id, enabled: !!chat.enabled };
+            const oldStillThere = changedHome || (Array.isArray(siblings) ? siblings.includes(chat.st_chat_id) : !!mainChat);
+            const conflict = () => { throw Object.assign(new Error('聊天文件归属待核对'), { status: 409 }); };
+            if (groupId || changedHome) {
+                const targets = q("select key, parent_key, story_id, enabled from chats where st_chat_id = ? and coalesce(group_id, '') = coalesce(?, '') limit 2").all(stChatId, groupId);
+                if (targets.length) {
+                    const [target] = targets;
+                    if (targets.length !== 1 || target.parent_key !== chatKey || target.story_id !== chat.story_id) conflict();
+                    return { status: 'branch', chatKey: target.key, storyId: target.story_id, enabled: !!target.enabled };
+                }
+            }
+            if (!writing) return tx(() => resolve(true));
             if (!oldStillThere) {
                 q('update chats set st_chat_id = ? where key = ?').run(stChatId, chatKey);
                 log(chatKey, 'renamed', { from: chat.st_chat_id, to: stChatId });
@@ -409,7 +422,8 @@ export function openStore(file) {
             if (drafts) setMeta(`door_handoffs:${branchKey}`, drafts);
             log(branchKey, 'branch', { parent: chatKey, stChatId });
             return { status: 'branch', chatKey: branchKey, storyId: chat.story_id, enabled: true };
-        });
+        };
+        return resolve(false);
     }
 
     // 接入时自动开的记账：从哪条记起等第一次同步再定（见 sync）。
@@ -810,8 +824,7 @@ export function openStore(file) {
     // 名册（按局）：谁是主要角色、谁会来找、谁只是路过、谁还没出场。用户改过的（set_by = 'user'）不被自动覆盖。
     // interests：这个人的兴趣和习惯（D-109：生活感的来源）。这一局用户改过的优先，没改就用读卡写的那份（按卡存，各局共用）。
     function getCast(storyId) {
-        return q(`select c.avatar, c.name, c.gender, c.role, c.hook, c.priority, c.bond, c.set_by, c.call, c.stranger, c.is_group, coalesce(c.interests, p.text) interests, c.interests is not null interests_own
-                  from cast c left join card_profiles p on p.avatar = c.avatar where c.story_id = ? order by c.name`).all(storyId).map(({ gender, is_group, ...e }) => ({ ...e, ...(gender == null ? {} : { gender }), ...(is_group ? { 群体: true } : {}) }));
+        return castByStory.all(storyId).map(({ gender, is_group, ...e }) => ({ ...e, ...(gender == null ? {} : { gender }), ...(is_group ? { 群体: true } : {}) }));
     }
     function profileOf(avatar) { return q('select avatar, hash, text, card_text, card_hash, card_name, updated_at from card_profiles where avatar = ?').get(avatar) ?? null; }
     // 存卡的正文（不动读卡写的那份）：hash＝这份正文的指纹

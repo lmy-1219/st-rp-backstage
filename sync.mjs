@@ -689,7 +689,7 @@ export async function openSegment(c,{avatar,name,at,resident=false}={}){
     await saved(c,avatar,r=>r?.segments?.some(s=>s.from===at&&s.to==null));
     return{status:'applied',segment:seg};
 }
-export async function closeSegment(c,{avatar,name,at,resident=false,disabled=false}={}){
+export async function closeSegment(c,{avatar,name,at,resident=false,disabled=false,onClose}={}){
     if(!Array.isArray(c?.chat)||!Number.isInteger(at)||at<0||at>=c.chat.length)throw Error('来源条号无效');
     const r=presenceRecord(c,avatar),v=classify({kind:'close',segments:r?.segments??[],at,resident,disabled});
     if(v.status==='correction')throw Error(v.reason);
@@ -698,6 +698,8 @@ export async function closeSegment(c,{avatar,name,at,resident=false,disabled=fal
     const target=presenceRecord(c,avatar,name,true),seg=v.segment??{from:0,fromDate:'',to:null,toDate:''};
     if(!v.segment)target.segments.push(seg);
     const end=at+1,date=String(c.chat[at]?.send_date??'');seg.to=end;seg.toDate=date;
+    try { onClose?.(seg, c.chat[at]); }
+    catch { /* 附加记录失败不影响旧封段保存。 */ }
     await saved(c,avatar,r=>r?.segments?.some(s=>s.from===seg.from&&s.to===end&&s.toDate===date));
     return{status:'applied',segment:seg};
 }

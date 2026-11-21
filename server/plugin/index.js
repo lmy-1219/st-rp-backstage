@@ -169,7 +169,7 @@ export async function init(router, { loadConfig = readConfig, startCore = ensure
             res.status(upstream.status).type('application/json').send(await upstream.text());
         } catch {
             // 后台不在（比如刚更新完在重启）：拉一次，这一回先告诉扩展连不上
-            ensureCore(base, readConfig());
+            if (req.params.route !== 'presence-check') startCore(base, loadConfig());
             res.status(503).json({ error: 'core_unavailable' });
         }
     });

@@ -6,13 +6,25 @@ import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStal
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, captureDoorHandoff, doorHandoffs, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
 import { observeManualLeaveCommand } from './sync.mjs';
 import { cutByPresence, storyTimeAt } from './presence.mjs';
+import { captureManualLeave, manualLeaveCardMatches, manualLeaveWriter } from './presence-write.mjs';
 import { boardSegmentEdit, undoBoardSegmentEdit } from './sync.mjs';
 import { failureView, setStage, stageHtml, cardChoiceHtml } from './lifecycle.mjs';
 
 const MODULE = 'rp_emergence';
 const KEYS = { rule: 'rp_emergence_rule', slot: 'rp_emergence_slot', mid: 'rp_emergence_mid', recall: 'rp_emergence_recall', world: 'rp_emergence_world' };
 const INJECT_TYPES = new Set(['normal', 'swipe', 'regenerate', 'continue']);
-const ctx = () => SillyTavern.getContext();
+const hostWrites = new Set(['saveChat', 'saveMetadata', 'saveChatConditional', 'saveChatDebounced', 'saveMetadataDebounced', 'saveGroupChat']);
+function writeST(apply, group) {
+    return (group ? groupById(group.id) === group : localTarget()) ? apply() : Promise.resolve();
+}
+const ctx = () => new Proxy(SillyTavern.getContext(), { get(target, name) {
+    const value = target[name];
+    if (name === 'editGroup' && typeof value === 'function') return (...args) => { const group = groupById(args[0], target); if (group) return writeST(() => value.apply(target, args), group); };
+    if (hostWrites.has(name) && typeof value === 'function') return (...args) => writeST(() => value.apply(target, args));
+    if (name === 'executeSlashCommandsWithOptions' && typeof value === 'function') return (cmd, ...args) =>
+        /^\s*\/(?:member-|trigger(?=\s|$|\|))/.test(cmd) ? writeST(() => value.call(target, cmd, ...args)) : value.call(target, cmd, ...args);
+    return value;
+} });
 
 // ---------- 那一格的几块在提示词里放哪（D-116） ----------
 // 每一块是一个宏（{{rpe_rule}} {{rpe_base}} {{rpe_mid}} {{rpe_recall}} {{rpe_now}}），值在每次生成前由拦截器填、生成完就清。
@@ -138,22 +150,53 @@ function cardHash(text) {
 }
 
 const API_TIMEOUT = 30000;
-async function api(route, body, timeout = 30000, { background = false } = {}) {
+async function api(route, body, timeout = 30000, { background = false, keep, origin, prepare } = {}) {
+    const confirmation = route === 'presence-check';
     const t0 = performance.now();
     let ok = false;
+    const changesCast = route === 'cast' && (Array.isArray(body?.cards) || Array.isArray(body?.set))
+        || route === 'sync' && Array.isArray(body?.members) && body.members.length > 0
+        || route === 'preset' && body?.apply !== undefined
+        || route === 'plan-submit' || route === 'extract-run'
+        || route === 'handoff' && body?.action === 'submit'
+        || route === 'handoff-ui' && ['submit', 'retry'].includes(body?.action);
+    let editing = false;
     try {
+        if (prepare && sameEdit(origin)) await prepare();
+        if (origin && !sameEdit(origin)) throw windowRejected('这份编辑来自上一个聊天');
+        if (route === 'handoff-ui' && body.id != null && (body.chatKey ?? body.sourceChatKey) == null) body = { ...body, sourceChatKey: state.chatKey };
+        const admission = route === 'open' || route === 'join';
+        const bound = admission || (body.chatKey ?? body.sourceChatKey) != null, window = bound ? state.loadedWindow?.ids : null;
+        if (bound && (!window || (admission && !localTarget()))) throw windowRejected();
+        if (bound) body = { ...body, ...(admission ? window : {}), window };
         const options = { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(timeout) };
+        // 名册按故事共享，修改发出即改变版本，回包失败也不回退。
+        if (changesCast) {
+            state.rosterMutation++;
+            state.rosterPending++;
+            editing = true;
+        }
         const response = await fetch(`/api/plugins/rp-emergence/${route}`, options).catch(error => { throw Object.assign(error, { kind: 'network' }); });
         const data = await response.json().catch(() => { if (response.ok) throw new Error('后台响应不是有效 JSON'); return {}; });
-        backendConnection.observe(response.status === 404 && data.error === 'unknown_chat' ? 200 : response.status);
-        if (!response.ok) throw Object.assign(new Error(data.error || String(response.status)), { status: response.status, code: data.error });
+        if (response.status === 409 && data.error === 'window-mismatch') throw windowRejected('本页聊天和后台登记不符，请重新打开聊天', 409);
+        if (!confirmation) backendConnection.observe(response.status === 404 && data.error === 'unknown_chat' ? 200 : response.status);
+        if (!response.ok) throw Object.assign(new Error(data.error || String(response.status)), { status: response.status, code: data.error === 'window-mismatch' ? undefined : data.error });
         ok = true;
         return data;
-    } catch (error) { if (error.kind === 'network' && !background) backendConnection.observe(0); throw error; }
-    finally { tick(`后台:${route}`, performance.now() - t0, ok ? '' : '失败'); }
+    } catch (error) {
+        const original = error.code === 'window-mismatch' && (typeof keep === 'function' ? keep() : keep);
+        if (original) await copyTextPopup('原文可复制', original, error.message);
+        if (error.kind === 'network' && !background && !confirmation) backendConnection.observe(0);
+        throw error;
+    }
+    finally {
+        if (editing) state.rosterPending--;
+        if (!confirmation) tick(`后台:${route}`, performance.now() - t0, ok ? '' : '失败');
+    }
 }
 
 const state = { epoch: 0, chatKey: null, syncing: false, dirty: false, timer: null, status: null, plan: null, planTimer: null, collapsed: null, note: '', door: { items: [], lit: null }, guide: { open: false, items: [] }, remote: null, entering: new Map() };
+Object.assign(state, { rosterMutation: 0, rosterPending: 0 });
 
 // ---------- T070 新加的数值（用户 10/25：决定过的数值要报；回执"新加的数值"一节逐条列） ----------
 // 单聊门上"某人该来了"那条提示停留多久（毫秒）。话比较长（带怎么转群聊），比现有 8000 稍长
@@ -321,6 +364,7 @@ async function showRecords(rejected = false) {
 // 场次摘要（N-284）：一场一段经过，以后被问起"那天都干了什么"照这个说，只给当时在场的人。能改；还没写到的可以现在补写（便宜模型，一场一两美分以内）。
 async function showEpisodes(run = false) {
     const c = ctx();
+    const origin = editOrigin();
     const r = await api('episodes', { chatKey: state.chatKey, ...(run ? { run: true } : {}) }, run ? 300000 : 30000);
     const box = document.createElement('div');
     const upto = r.episodes.length ? r.episodes.at(-1).to + 1 : 0;
@@ -333,17 +377,20 @@ async function showEpisodes(run = false) {
             <textarea class="text_pole" rows="4" style="width:100%" data-old="${escapeHtml(e.text)}">${escapeHtml(e.text)}</textarea></div>`).join('') || '<p>还没有。</p>');
     const res = await c.callGenericPopup(box, c.POPUP_TYPE.CONFIRM, '', { wide: true, large: true, allowVerticalScrolling: true, okButton: '保存', cancelButton: '关闭',
         customButtons: [{ text: '现在补写', result: c.POPUP_RESULT.CUSTOM1 }] });
+    if (res === c.POPUP_RESULT.CUSTOM1 && !sameEdit(origin)) return;
     if (res === c.POPUP_RESULT.CUSTOM1) { globalThis.toastr?.info('在补写，大概几十秒。', 'RP：幕后'); return showEpisodes(true); }
     if (!res) return;
     const changed = [...box.querySelectorAll('[data-ep]')].map(d => ({ id: Number(d.dataset.ep), el: d.querySelector('textarea') })).filter(x => x.el.value.trim() && x.el.value !== x.el.dataset.old);
-    for (const x of changed) await api('episode-edit', { chatKey: state.chatKey, id: x.id, text: x.el.value.trim() });
+    for (const [i, x] of changed.entries())
+        await api('episode-edit', { chatKey: origin.chatKey, id: x.id, text: x.el.value.trim() }, undefined,
+            { origin, keep: () => changed.slice(i).map(({ id, el }) => '#' + id + '\n' + el.value).join('\n\n') });
     if (changed.length) globalThis.toastr?.success(`改了 ${changed.length} 场。`, 'RP：幕后');
 }
 
 // 名册：这个局里每个人算哪一档，还没出场的人什么情况下会找上门（钩子）。
 const ROLE_NOTES = { 主要: '一直在场；你不在的日子里照样过', 常联系: '会主动关心、有事会来找', 路过: '只在被找时回应，不主动关心', 新面孔: '没有卡、这一局里新长出来的人（规划要用的，或每条总结里反复出现的）：能牵头、会来找、有亲疏', 可能登场: '还没出场；写了钩子才会找上门', 不用: '不属于这个故事，或是旧版本' };
 async function editCast() {
-    const { roles, cast } = await api('cast', { chatKey: state.chatKey });
+    const chatKey = state.chatKey, { roles, cast } = await api('cast', { chatKey });
     const box = document.createElement('div');
     const order = r => roles.indexOf(r.role);
     const near = e => e.closeness ? `${e.closeness.level} ${e.closeness.score}` : '';
@@ -383,7 +430,7 @@ async function editCast() {
         群体: row.querySelector('[data-field="group"]')?.checked,
     })).map(e => { const old = cast.find(c => c.avatar === e.avatar); const text = interestsOf(e.avatar); return old && text.trim() !== (old.interests ?? '').trim() ? { ...e, interests: text } : e; })
         .filter(e => { const old = cast.find(c => c.avatar === e.avatar); return old && ('interests' in e || (old.gender ?? '') !== e.gender || old.role !== e.role || (old.hook ?? '') !== e.hook || !!old.priority !== e.priority || !!old.群体 !== !!e.群体 || String(old.bond ?? '') !== e.bond); });
-    if (set.length) await api('cast', { chatKey: state.chatKey, set });
+    if (set.length) await api('cast', { chatKey, set }, undefined, { keep: () => set.map(({ avatar, interests, hook, ...fields }) => [avatar, JSON.stringify(fields), hook, interests].join('\n')).join('\n\n') });
 }
 
 // 账本：谁欠谁、按期给的、谈着的价、最近的进出（只算记录里写明金额的）。
@@ -517,8 +564,8 @@ async function openTalk(first = '') {
     const c = ctx(), chatKey = state.chatKey;
     if (!chatKey) return;
     let v;
-    try { v = await api('talk', first ? { chatKey, text: first } : { chatKey }); }
-    catch (error) { globalThis.toastr?.warning(error.status === 400 ? '后台版本旧了，先在面板上更新。' : '后台暂时连不上。'); return false; }
+    try { v = await api('talk', first.trim() ? { chatKey, text: first.trim() } : { chatKey }, undefined, { keep: first }); }
+    catch (error) { if (error.code === 'window-mismatch') throw error; globalThis.toastr?.warning(error.status === 400 ? '后台版本旧了，先在面板上更新。' : '后台暂时连不上。'); return false; }
     let timer = null, dlg = null;
     const bubble = t => `<div style="margin:.5em 0;text-align:right"><span style="display:inline-block;padding:.3em .6em;border-radius:8px;border:1px solid var(--SmartThemeBorderColor,#666);max-width:85%;text-align:left;white-space:pre-wrap">${escapeHtml(t.text)}</span></div>`;
     const card = (t, ti) => `<div style="margin:.5em 0"><div style="white-space:pre-wrap">${escapeHtml(t.text)}</div>${(t.proposals ?? []).map((p, i) => `<div style="margin:.35em 0;padding:.3em .5em;border-left:3px solid var(--SmartThemeQuoteColor,#e88)"><div>${escapeHtml(p.say)}</div>${p.status === 'proposed'
@@ -553,8 +600,10 @@ async function openTalk(first = '') {
                     if (a.dataset.role === 'talk-send') {
                         const box = dlg.querySelector('[data-role="talk-input"]'), t = box.value.trim();
                         if (!t) return;
-                        box.value = '';
-                        v = await api('talk', { chatKey, text: t });
+                        const original = box.value;
+                        a.classList.toggle('disabled', true);
+                        v = await api('talk', { chatKey, text: t }, undefined, { keep: () => dlg && box.value === original ? '' : original });
+                        if (box.value === original) box.value = '';
                     } else if (a.dataset.role === 'talk-clear') v = await api('talk', { chatKey, clear: true });
                     else {
                         const [turn, i] = String(a.dataset.talkApply ?? a.dataset.talkSkip).split(':').map(Number);
@@ -586,6 +635,9 @@ async function textPopup(title, note, value, { ok, cancel, extra = null, rows = 
     return { result, text };
 }
 
+const copyTextPopup = (title, text, reason = '') => ctx().callGenericPopup(`<h3>${title}</h3><p>${escapeHtml(reason)}</p><textarea data-role="handoff-copy-text" readonly rows="16" style="width:100%"></textarea>`, ctx().POPUP_TYPE.TEXT, '', {
+    wide: true, onOpen: popup => { const box = popup.dlg.querySelector('[data-role="handoff-copy-text"]'); box.value = text; box.focus(); box.select(); },
+});
 // 开局单的四个口（开局单设计稿 §四）：填表（必填只有基调和剧情类别）；填写大纲让后台分格；编辑全文；上传素材。
 async function openSetup() {
     const c = ctx(), chatKey = state.chatKey;
@@ -817,6 +869,7 @@ export function setupIntimatePicked(root, player) {
 }
 async function openSetupForm(s) {
     const c = ctx(), chatKey = state.chatKey, setupPersona = String(c.name1 ?? '').trim();
+    const origin = editOrigin();
     const storyCast = (await api('cast', { chatKey })).cast ?? [];
     const d = s.formData ?? s.confirmed?.data ?? {};
     const t = d.时间 ?? {};
@@ -870,6 +923,7 @@ async function openSetupForm(s) {
         <small data-unshown>${s.unshown?.length ? `还有：${escapeHtml(s.unshown.join('、'))}——在“编辑全文”里改。` : ''}</small>
       </div>`;
     let form = null, initialForm = null, splitChanged = false, splitting = false;
+    let confirmedForm;
     const extraAccepted = [];
     const result = await c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', {
         okButton: '确认生效', cancelButton: '取消', wide: true, allowVerticalScrolling: true,
@@ -957,7 +1011,7 @@ async function openSetupForm(s) {
                     是: el.querySelector('[data-r="是"]').value.trim(), 谁知道: el.querySelector('[data-r="谁知道"]').value.trim(), 原来: orig(el) })).filter(r => r.谁 || r.是) : undefined,
             };
             // 没改任何设定时沿用原字段与顺序；搜索、展开和收起不算修改。
-            if (!splitChanged && s.confirmed && (!intimate.length || d.亲密线?.length) && setupFormSnapshot(popup.dlg) === initialForm) form = { 基调: d.基调, 类别: d.类别 };
+            if (!splitChanged && s.confirmed && (!intimate.length || d.亲密线?.length) && setupFormSnapshot(popup.dlg) === initialForm) confirmedForm = form = { 基调: d.基调, 类别: d.类别 };
             const half = (form.人物 ?? []).filter(r => !r.谁 || !r.是);
             if (popup.result !== c.POPUP_RESULT.NEGATIVE && popup.result !== c.POPUP_RESULT.CANCELLED && (form.亲密线 ?? []).some(r => r.谁.length !== 2 || r.谁.some(n => !n) || r.谁[0] === r.谁[1])) {
                 globalThis.toastr?.warning('亲密线每条要选两个不同的人；不要的点 ✕ 删掉');
@@ -976,16 +1030,15 @@ async function openSetupForm(s) {
     });
     if (result !== c.POPUP_RESULT.AFFIRMATIVE && result !== c.POPUP_RESULT.CUSTOM1) return;
     try {
-        if (result === c.POPUP_RESULT.AFFIRMATIVE) { await sendPersona(); if (String(ctx().name1 ?? '').trim() !== setupPersona) throw new Error('人设变了，请重新打开开局单核对'); }
-        const r = await api('setup', { chatKey, form, confirm: result === c.POPUP_RESULT.AFFIRMATIVE, ...(result === c.POPUP_RESULT.AFFIRMATIVE ? { planPersona: setupPersona, relationCards: await relationCardsFor(chatKey) } : {}) });
-        if (result === c.POPUP_RESULT.AFFIRMATIVE) { await applyOpeningAbsent(r, chatKey); await showReceipt(r.receipt); }
+        const r = await submitSetup(origin, { chatKey, form, confirm: result === c.POPUP_RESULT.AFFIRMATIVE }, setupPersona, form === confirmedForm ? undefined : () => JSON.stringify(form, null, 2));
+        if (result === c.POPUP_RESULT.AFFIRMATIVE) { await applyOpeningAbsent(r, chatKey, origin.window); await showReceipt(r.receipt); }
         else globalThis.toastr?.info('存成草稿了，下次点"开局单 → 核对草稿"接着改。');
     } catch (error) { globalThis.toastr?.warning(error.message || '后台暂时连不上。'); }
 }
 
-async function applyOpeningAbsent(reply, chatKey) {
+async function applyOpeningAbsent(reply, chatKey, window) {
     const c = ctx(), group = currentGroup(c);
-    if (state.chatKey !== chatKey || !group || c.chat?.some(m => m.is_user) || !Array.isArray(reply?.openingAbsent)) return;
+    if (state.chatKey !== chatKey || !localTarget(c, window) || !group || c.chat?.some(m => m.is_user) || !Array.isArray(reply?.openingAbsent)) return;
     const camera = cameraOf(c)?.avatar, disabled = new Set(group.disabled_members ?? []), added = [];
     const metadata = (c.chatMetadata.rp_emergence ??= {});
     metadata.openingMuted ??= [];
@@ -1005,8 +1058,9 @@ async function applyOpeningAbsent(reply, chatKey) {
             await stGroups.editGroup(group.id, true, false);
         });
     }
+    if (!localTarget(c, window)) return;
     if (handled.size !== before) {
-        (c.chatMetadata.rp_emergence ??= {}).openingMuted = [...handled];
+        (ctx().chatMetadata.rp_emergence ??= {}).openingMuted = [...handled];
         await c.saveMetadata();
     }
     if (!added.length) return;
@@ -1014,17 +1068,26 @@ async function applyOpeningAbsent(reply, chatKey) {
     globalThis.toastr?.info(`开场不在场的 ${added.join('、')} 已静音，到时候会自己来。想让他在场，手动取消静音就行。`);
 }
 
+const submitSetup = (origin, body, persona, keep) => api('setup', body, undefined, { origin, keep, prepare: body.confirm && (async () => {
+    await sendPersona(origin.chatKey);
+    if (sameEdit(origin) && String(ctx().name1 ?? '').trim() !== persona) throw Error('人设变了，请重新打开开局单核对');
+    if (sameEdit(origin)) Object.assign(body, { planPersona: persona, relationCards: await relationCardsFor(origin.chatKey) });
+}) });
 async function openSetupText(s) {
     const c = ctx(), chatKey = state.chatKey, setupPersona = String(c.name1 ?? '').trim();
+    const origin = editOrigin();
     const current = s.draft?.text ?? s.confirmed?.text ?? null;
     if (!current) return pasteSetup(chatKey);
     const note = s.draft?.text
         ? `后台分好的草稿，还没生效。${s.draft.unchecked ? `带 ⚠ 的 ${s.draft.unchecked} 条在你的原文里没找到对应的话，请看一眼。` : ''}改完点"确认"，从现在起生效${s.confirmed ? '，替换现在那一版' : ''}。`
         : `现在生效的开局单（${new Date(s.confirmed.at).toLocaleString()} 确认）。改完点"确认"就换成新的一版。`;
     const { result, text } = await textPopup('开局单', [setupPersonaHtml(setupPersona), note, ...(s.intimateWarnings ?? [])].join('\n'), current, { ok: '确认', cancel: s.draft?.text ? '先放着' : '关闭', extra: '重新填写大纲' });
-    if (result === c.POPUP_RESULT.AFFIRMATIVE) { await sendPersona(); if (String(ctx().name1 ?? '').trim() !== setupPersona) throw new Error('人设变了，请重新打开开局单核对'); const r = await api('setup', { chatKey, text, confirm: true, planPersona: setupPersona, relationCards: await relationCardsFor(chatKey) }); await applyOpeningAbsent(r, chatKey); await showReceipt(r.receipt); }
+    if (result === c.POPUP_RESULT.AFFIRMATIVE) {
+        const r = await submitSetup(origin, { chatKey, text, confirm: true }, setupPersona, s.draft?.text || text !== current ? text : '').catch(error => { if (error.code !== 'window-mismatch') throw error; globalThis.toastr?.warning(error.message); });
+        if (r) { await applyOpeningAbsent(r, chatKey, origin.window); await showReceipt(r.receipt); }
+    }
     else if (result === c.POPUP_RESULT.CUSTOM1) await pasteSetup(chatKey);
-    else if (s.draft?.text && text !== current) await api('setup', { chatKey, text });   // 草稿改过的先存着
+    else if (s.draft?.text && text !== current) await api('setup', { chatKey, text }, undefined, { origin, keep: text });   // 草稿改过的先存着
 }
 
 // ---------- 人物关系表 ----------
@@ -1042,7 +1105,7 @@ async function openRelations(append = '', draftId = null) {
     const start = append ? `${r.text ?? ''}\n\n${append}`.trim() + '\n' : r.text ?? blank;
     const { result, text } = await textPopup('人物关系表', (append ? '<b>最后面接着的是从素材整理出来的，核对、删改后保存。</b><br>' : '') + note + later, start, { ok: '保存', cancel: '关闭' });
     if (result === c.POPUP_RESULT.AFFIRMATIVE && text !== (r.text ?? blank)) {
-        const saved = await api('relations', { chatKey, text, ...(draftId ? { draftId } : {}) });
+        const saved = await api('relations', { chatKey, text, ...(draftId ? { draftId } : {}) }, undefined, { keep: text });
         await refreshRelationsDraft();
         globalThis.toastr?.success(`关系表已保存（${saved.people} 人）。`);
         return true;
@@ -1164,23 +1227,23 @@ async function openPresets() {
         const name = event.target.closest('[data-name]')?.dataset.name;
         try {
             if (act === 'save') {
-                const n = box.querySelector('[data-f="name"]').value.trim();
+                const keep = box.querySelector('[data-f="name"]').value, n = keep.trim();
                 if (!n) { globalThis.toastr?.warning('先起个名字。'); return; }
                 if (list.some(p => p.name === n) && !(await c.callGenericPopup(`已经有一份叫"${escapeHtml(n)}"的预设，换成这一局现在的样子？`, c.POPUP_TYPE.CONFIRM))) return;
-                const { cast } = await api('cast', { chatKey });
+                const { cast } = await api('cast', { chatKey }, undefined, { keep });
                 const grown = cast.filter(e => String(e.avatar).startsWith('face:') && e.role === '新面孔' && e.set_by !== 'user').length;
                 const includeGrownFaces = grown > 0 && !!(await c.callGenericPopup(`要不要把这一局长出来的 ${grown} 个新面孔一起存`, c.POPUP_TYPE.CONFIRM));
-                if (state.chatKey !== chatKey) return;
-                list = (await api('preset', { chatKey, save: n, includeGrownFaces })).presets;
+                list = (await api('preset', { chatKey, save: n, includeGrownFaces }, undefined, { keep })).presets;
                 globalThis.toastr?.success('存好了。');
             }
             // 先 return：后面的 draw() 会把这个隐藏的文件框换掉，选完文件的 change 落在已经不在页面上的旧框上，就没反应了（用户 10/22）
             if (act === 'import') { box.querySelector('[data-f="file"]').click(); return; }
             if (act === 'apply') {
+                const { window } = editOrigin();
                 const ok = await c.callGenericPopup(`把"${escapeHtml(name)}"套到这一局？这一局现在的开局单、名册、关系表、素材包、离开时怎么算会换成预设里的（原来的样子后台另存了一份）。`, c.POPUP_TYPE.CONFIRM);
                 if (!ok) return;
                 const r = await api('preset', { chatKey, apply: name });
-                await applyOpeningAbsent(r, chatKey);
+                await applyOpeningAbsent(r, chatKey, window);
                 list = r.presets;
                 for (const warning of r.applied.warnings ?? []) globalThis.toastr?.warning(warning);
                 globalThis.toastr?.success(`套好了：名册 ${r.applied.people} 人${r.applied.setup ? '、开局单' : ''}${r.applied.relations ? '、关系表' : ''}${r.applied.pack ? `、素材包"${r.applied.pack}"` : ''}。`);
@@ -1641,7 +1704,7 @@ async function pasteSetup(chatKey) {
         '大纲、开场稿、设定都行，不用先拆。后台分到各格（基调、类别、生活现状、原则、前史、原作走向、称呼口径、主线、储备线、意向），你再核对。会调一次模型（几毛钱），一两分钟。',
         '', { ok: '让系统分格', cancel: '取消', rows: 16 });
     if (result !== c.POPUP_RESULT.AFFIRMATIVE || !text.trim()) return;
-    await api('setup', { chatKey, source: text });
+    await api('setup', { chatKey, source: text }, undefined, { keep: text });
     globalThis.toastr?.info('在分格，一两分钟，好了会提醒。');
     watchSetup(chatKey);
 }
@@ -1666,8 +1729,19 @@ function watchSetup(chatKey, tries = 0) {
 function chatIds(c) {
     return { stChatId: c.chatId ?? c.getCurrentChatId?.() ?? null, groupId: c.groupId ?? null };
 }
+const groupById = (id, c = ctx()) => id == null ? null : c.groups?.find(g => g.id == id) ?? null;
 function currentGroup(c) {
-    return c.groupId ? c.groups?.find(g => g.id == c.groupId) ?? null : null;
+    return groupById(c.groupId, c);
+}
+const windowRejected = (message = '无法确认酒馆写入目标，请用酒馆重新打开这个聊天', status) => Object.assign(Error(message), { code: 'window-mismatch', status });
+const editOrigin = () => ({ chatKey: state.chatKey, window: state.loadedWindow }), sameEdit = ({ chatKey, window }) => chatKey === state.chatKey && window === state.loadedWindow;
+const localEdit = origin => sameEdit(origin) && localTarget();
+const localHead = c => localTarget(c) && c.chatMetadata === ctx().chatMetadata;
+function localTarget(c, window = state.loadedWindow, { requireHead = false } = {}) {
+    const now = ctx(), ids = chatIds(now);
+    return window && window === state.loadedWindow && now.chat === window.chat && (!c || c.chat === now.chat) && (!requireHead || now.chat.length || now.chatMetadata?.rp_emergence?.chatKey)
+        && ids.stChatId === window.ids.stChatId && (ids.groupId == null ? null : String(ids.groupId)) === window.ids.groupId
+        && (ids.groupId == null ? now.characters?.[now.characterId]?.avatar === window.avatar : currentGroup(now)?.chat_id === ids.stChatId);
 }
 // 单聊里旧消息可能没记 original_avatar，缺的就算这张卡的。
 function fallbackAvatar(c) {
@@ -2005,6 +2079,7 @@ async function openCurrent(c, epoch, mark, manual) {
     const here = () => epoch === state.epoch && ctx().chat === c.chat && ctx().chatMetadata?.rp_emergence?.chatKey === mark.chatKey;
     if (!here()) return false;
     const { stChatId, groupId } = chatIds(c);
+    const gate = state.leaveWindow = { changes: 0 };
     state.openEpoch = epoch; state.opened = false;
     setStage(state, 'open', '进行中'); render();
     try {
@@ -2026,9 +2101,14 @@ async function openCurrent(c, epoch, mark, manual) {
         if (result.status === 'unknown') throw Object.assign(new Error('unknown_chat'), { code: 'unknown_chat' });
         if (!result.chatKey) throw new Error('接入响应缺少窗口标记');
         if (result.chatKey !== mark.chatKey) {
+            if (!localHead(c)) throw windowRejected();
             c.chatMetadata.rp_emergence = { chatKey: result.chatKey };
             await c.saveMetadata();
             if (epoch !== state.epoch || ctx().chat !== c.chat) return false;
+        }
+        const ids = chatIds(ctx());
+        if (state.leaveWindow === gate && ids.stChatId === stChatId && ids.groupId === groupId && ctx().chatMetadata === c.chatMetadata) {
+            Object.assign(gate, { stChatId, groupId, chat: c.chat, metadata: c.chatMetadata });
         }
         state.chatKey = result.chatKey;
         state.opened = true; state.openUnknown = false; auto.unavailable = false; state.note = '';
@@ -2050,6 +2130,11 @@ async function openCurrent(c, epoch, mark, manual) {
     }
 }
 
+function changeChat() {
+    state.leaveWindow = null;
+    return onChatChanged();
+}
+
 // 新窗口＝用户还没说过话、只有开场白（群聊里每个成员各一条开场白，T-22 实测：两人的新群一开就是两条，以前只认"至多一条"，从来不问）。
 const freshChat = c => !(c.chat ?? []).some(m => m.is_user) && (c.chat ?? []).length <= Math.max(1, members(c).length);
 
@@ -2068,7 +2153,7 @@ async function offerJoin(epoch) {
     await new Promise(resolve => setTimeout(resolve, 800));
     const c = ctx();
     if (epoch !== state.epoch) return;
-    if (c.chatMetadata?.rp_emergence?.chatKey) return onChatChanged();   // 载完才看到标记：按已接入的窗口打开
+    if (c.chatMetadata?.rp_emergence?.chatKey) return changeChat();   // 载完才看到标记：按已接入的窗口打开
     if (!freshChat(c) || c.chatMetadata?.rp_emergence || isWelcomeAssistant(c)) return;
     if (mode === 'auto') return join(epoch);
     const { stChatId, groupId } = chatIds(c);
@@ -2082,6 +2167,7 @@ async function offerJoin(epoch) {
     if (epoch !== state.epoch) return;
     if (answer === c.POPUP_RESULT.AFFIRMATIVE) return join(epoch);
     if (answer === c.POPUP_RESULT.CUSTOM1) {
+        if (!localHead(c)) return globalThis.toastr?.warning('无法确认当前聊天的保存目标');
         c.chatMetadata.rp_emergence = { declined: true };
         await c.saveMetadata();
     }
@@ -2096,11 +2182,14 @@ async function join(epoch = state.epoch) {
     const label = currentGroup(c)?.name ?? c.characters?.[c.characterId]?.name ?? null;
     const key = `${groupId ?? ''}/${stChatId}`;
     if (!joining.has(key)) joining.set(key, api('join', { stChatId, groupId, label }).finally(() => joining.delete(key)));
+    const gate = state.leaveWindow = { changes: 0 };
     const result = await joining.get(key);
     if (epoch !== state.epoch) return;
+    if (!localHead(c)) throw windowRejected();
     c.chatMetadata.rp_emergence = { chatKey: result.chatKey };
     await c.saveMetadata();
     if (epoch !== state.epoch || ctx().chat !== c.chat) return;
+    if (state.leaveWindow === gate) Object.assign(gate, { stChatId, groupId, chat: c.chat, metadata: c.chatMetadata });
     state.chatKey = result.chatKey;
     state.opened = true; state.openUnknown = false; auto.unavailable = false;
     setStage(state, 'open', '成功');
@@ -2177,7 +2266,7 @@ globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
     const ask = () => api('slot', { chatKey, speaker, speakerName: camera ? '旁白' : character.name, anchor, recent, recentUser, present, room, soft: softFlag(), frontModel: stPrompts?.getChatCompletionModel?.() ?? null }, 60000);
     try { slot = await ask(); }
     catch (error) {
-        if (error?.name === 'TimeoutError' || epoch !== state.epoch) return;
+        if (error?.name === 'TimeoutError' || error.code === 'window-mismatch' || epoch !== state.epoch) return;
         await new Promise(resolve => setTimeout(resolve, 1500));
         try { slot = await ask(); } catch { globalThis.toastr?.warning('这一条没拿到后台的料，角色只看聊天记录写。', 'RP：幕后', { timeOut: 6000 }); return; }
     }
@@ -2257,16 +2346,15 @@ async function refreshContent() {
     const value = await api('content', { chatKey });
     if (state.chatKey === chatKey) { state.content = { ...value, chatKey }; render(); }
 }
-async function writePromptPack(body) {
-    const chatKey = state.chatKey;
-    let value = await api('content', { chatKey, ...body });
+async function writePromptPack(body, keep, chatKey = state.chatKey) {
+    let value = await api('content', { chatKey, ...body }, undefined, { keep });
     if (value.conflict) {
         const c = ctx(); let mode = 'copy';
         const ok = await c.callGenericPopup(`<h3>已有同名口味包</h3><p>${escapeHtml(value.name)}</p><select class="text_pole" data-role="prompt-conflict"><option value="copy">另存一份</option><option value="overwrite">覆盖同名包</option></select>`, c.POPUP_TYPE.CONFIRM, '', {
             onClosing: popup => { mode = popup.dlg.querySelector('[data-role="prompt-conflict"]').value; return true; },
         });
         if (!ok || state.chatKey !== chatKey) return null;
-        value = await api('content', { chatKey, ...body, mode });
+        value = await api('content', { chatKey, ...body, mode }, undefined, { keep });
     }
     if (value.warnings?.length) globalThis.toastr?.warning(value.warnings.join('\n'));
     if (state.chatKey !== chatKey) return null;
@@ -2302,7 +2390,7 @@ async function openPromptPack() {
             if (state.content.pack === 'default') {
                 const name = await c.callGenericPopup('先另存成自己的口味包。包名：', c.POPUP_TYPE.INPUT, '我的口味');
                 if (!name) return;
-                if (!await writePromptPack({ action: 'copy', id: 'default', name })) return;
+                if (!await writePromptPack({ action: 'copy', id: 'default', name }, name, chatKey)) return;
                 slot = state.content.slots.find(s => s.id === id); draw();
             }
             const pack = state.content.packs.find(p => p.id === state.content.pack);
@@ -2317,10 +2405,10 @@ async function openPromptPack() {
                 },
                 onClosing: popup => { text = popup.dlg.querySelector('[data-role="prompt-text"]').value; return true; },
             });
-            if (!ok || state.chatKey !== chatKey) return;
+            if (!ok) return;
             const paragraphs = { ...pack.paragraphs };
             if (restore) delete paragraphs[id]; else paragraphs[id] = text;
-            await writePromptPack({ action: 'save', id: pack.id, bundle: { 清单: pack.manifest, 段落: paragraphs } }); draw();
+            if (await writePromptPack({ action: 'save', id: pack.id, bundle: { 清单: pack.manifest, 段落: paragraphs } }, restore || text === slot.text ? '' : text, chatKey)) draw();
         } catch (error) { globalThis.toastr?.error(error.message); }
     });
     box.addEventListener('change', async event => {
@@ -2442,6 +2530,25 @@ export function panelShellHtml() {
     @media(max-width:420px){#rp_emergence_panel .rpe-grid{grid-template-columns:1fr}#rp_emergence_panel .rpe-task{flex-wrap:wrap}}
     </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><div class="rpe-topbar"><span class="rpe-dot" data-role="connection-dot" aria-label="未接入"></span><b>RP：幕后</b><small data-role="spend"></small><button class="menu_button" type="button" data-action="pending-tab" data-role="pending-badge" hidden title="打开待办详情，建议按需查看。"></button></div><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content"><div data-role="installation-hint" role="status" hidden></div><nav class="rpe-tabs" role="tablist" aria-label="RP：幕后">${[['now','此刻'],['story','这一局'],['ledger','剧情现状'],['settings','设置']].map(([id,text])=>`<button type="button" class="menu_button" role="tab" data-tab="${id}" aria-controls="rpe-page-${id}" title="切换面板栏目，建议按需要查看。">${text}</button>`).join('')}</nav>${['now','story','ledger','settings','advanced'].map(id=>`<div id="rpe-page-${id}" data-page="${id}" role="tabpanel">${panelPageHtml(id)}</div>`).join('')}<small data-role="note"></small><button type="button" class="menu_button" data-action="reconnect" title="重新接入当前窗口并同步消息。">重新接入</button><div data-role="stages"></div><details><summary>认卡状态与重试</summary><div data-role="card-choices"></div></details></div></div>`;
+}
+
+async function changeWindowEnabled(enabled, setEnabled, readStatus) {
+    const { chatKey, epoch, leaveWindow: gate } = state, change = Symbol();
+    const here = () => state.epoch === epoch && state.chatKey === chatKey && state.leaveWindow === gate;
+    if (gate) {
+        gate.changes++;
+        gate.change = change;
+    }
+    try {
+        await setEnabled({ chatKey, enabled });
+        if (!here() || gate && gate.change !== change) return;
+        clearPrompts();
+        const status = await readStatus({ chatKey });
+        if (!here() || gate && gate.change !== change) return;
+        state.status = status;
+    } finally {
+        if (gate) gate.changes--;
+    }
 }
 
 function mountPanel() {
@@ -2693,9 +2800,7 @@ function mountPanel() {
                     await navigator.clipboard.writeText(r.prompt);
                     globalThis.toastr?.success('已复制，贴给任一个 AI');
                 } catch {
-                    await ctx().callGenericPopup(`<h3>复制题目</h3><textarea data-role="handoff-copy-text" readonly rows="16" style="width:100%">${escapeHtml(r.prompt)}</textarea>`, ctx().POPUP_TYPE.TEXT, '', {
-                        wide: true, onOpen: popup => { const box = popup.dlg.querySelector('[data-role="handoff-copy-text"]'); box.focus(); box.select(); },
-                    });
+                    await copyTextPopup('复制题目', r.prompt);
                 }
                 return;
             }
@@ -2864,9 +2969,7 @@ function mountPanel() {
                 await ctx().callGenericPopup(planRevealHtml(p, escapeHtml), ctx().POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
             }
             if (action === 'toggle' && state.status) {
-                await api('enabled', { chatKey: state.chatKey, enabled: !state.status.enabled });
-                clearPrompts();
-                state.status = await api('status', { chatKey: state.chatKey });
+                await changeWindowEnabled(!state.status.enabled, body => api('enabled', body), body => api('status', body));
             }
         } catch (error) { state.note = failureView(error, '面板操作').text; }
         render();
@@ -2903,7 +3006,7 @@ function mountPanel() {
         if (opt === 'windowConnected') {
             try {
                 if (!state.chatKey) { if (event.target.checked) await join(); }
-                else { await api('enabled', { chatKey: state.chatKey, enabled: event.target.checked }); clearPrompts(); state.status = await api('status', { chatKey: state.chatKey }); }
+                else await changeWindowEnabled(event.target.checked, body => api('enabled', body), body => api('status', body));
             } catch (error) { state.note = failureView(error, '面板操作').text; }
             render(); return;
         }
@@ -2934,7 +3037,7 @@ function mountPanel() {
         } else {
             settings()[opt] = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
             saveExtensionSettings();
-            if (opt === 'enabled') { clearPrompts(); onChatChanged(); }
+            if (opt === 'enabled') { clearPrompts(); changeChat(); }
         }
         render();
     });
@@ -3239,6 +3342,7 @@ async function prepareOpeningChat(group, present, open) {
     await openingChatReady(group, () => ctx().reloadCurrentChat());
     await verifyOpeningChat(group, stable, { allowMissingIntegrity: true });
     const keep = new Set(present), now = ctx();
+    if (!openingGroupIsCurrent(group) || !localTarget(now)) throw windowRejected();
     const kept = now.chat.filter(m => m.is_user || keep.has(m.name));
     now.chat.splice(0, now.chat.length, ...kept);
     const expected = openingMessageStamp(kept);
@@ -3298,7 +3402,7 @@ async function importOpeningPack(pathIn, say, { overwrite = false, together = nu
         say(`开场白：留了 ${kept.length} 条（${[...new Set(kept.map(m => m.name))].join('、')}）`);
         // 同场的人从同场那几段开场白起才看得见（别处那几段——春和堂、客院——他们不在）：上下文隔离扩展记的在场区间
         const firstNear = kept.findIndex(m => near.includes(m.name));
-        const isolateNear = async () => { for (const n of near) { const ch=byName.get(n); if(ch) await openSegment(ctx(),{avatar:ch.avatar,name:ch.name,at:firstNear}); } };
+        const isolateNear = async () => { for (const n of near) { const ch=byName.get(n); if(ch) await writeST(() => { if (!openingGroupIsCurrent(group)) throw windowRejected(); return openSegment(ctx(),{avatar:ch.avatar,name:ch.name,at:firstNear}); }); } };
         const isolated = () => near.every(n => { const av = byName.get(n)?.avatar; return (ctx().chatMetadata?.contextIsolation?.anchors?.[av]?.segments??[]).some(s=>s.from===firstNear&&s.to==null); });
         if (firstNear > 0 && near.length) {
             await isolateNear();
@@ -3307,7 +3411,7 @@ async function importOpeningPack(pathIn, say, { overwrite = false, together = nu
             say(`在场区间：${near.join('、')} 从第 ${firstNear} 条起`);
         }
         if (personaKey) {
-            try { await stPersonas.setUserAvatar(personaKey, { toastPersonaNameChange: false }); await stPersonas.setPersonaLockState?.(true, 'chat'); } catch {}
+            try { await stPersonas.setUserAvatar(personaKey, { toastPersonaNameChange: false }); await writeST(() => { if (openingGroupIsCurrent(group)) return stPersonas.setPersonaLockState?.(true, 'chat'); }); } catch {}
             await ctx().saveMetadata();
         }
         await verifyOpeningChat(group, openingMessageStamp(kept));
@@ -3323,7 +3427,7 @@ async function importOpeningPack(pathIn, say, { overwrite = false, together = nu
             say(`局预设「${r.preset.name}」套上了：名册 ${a.applied.people} 人${a.applied.setup ? '、开局单' : ''}${a.applied.relations ? '、关系表' : ''}${a.applied.pack ? `、素材包 ${a.applied.pack}` : ''}`);
         }
         const chatBook = r.books.find(b => b.bind === '窗口');
-        if (chatBook) { ctx().chatMetadata.world_info = chatBook.name; await ctx().saveMetadata(); await verifyOpeningChat(group, openingMessageStamp(kept)); say(`窗口书：绑了「${chatBook.name}」`); }
+        if (chatBook && openingGroupIsCurrent(group) && localTarget()) { ctx().chatMetadata.world_info = chatBook.name; await ctx().saveMetadata(); await verifyOpeningChat(group, openingMessageStamp(kept)); say(`窗口书：绑了「${chatBook.name}」`); }
         for (const b of r.books.filter(x => x.bind === '全局')) { try { await ctx().executeSlashCommandsWithOptions(`/world ${b.name}`); say(`全局书：开了「${b.name}」`); } catch {} }
         if (r.stPreset) { try { await stJson('/api/presets/save', { name: r.stPreset.name, preset: JSON.parse(r.stPreset.text), apiId: 'openai' }); await ctx().executeSlashCommandsWithOptions(`/preset ${r.stPreset.name}`); say(`ST 预设：${r.stPreset.name}`); } catch (error) { say(`ST 预设没选上：${error.message}`); } }
         // 在场区间再核一遍（中间几次存元数据有没有把它盖掉）：没有就补记
@@ -3362,6 +3466,7 @@ async function autoStrategy(enable) {
     const c=ctx(),current=currentGroup(c),saved=settings().autoStrategy??={};
     const groups=!enable&&!settings().enabled?(c.groups??(current?[current]:[])):(current?[current]:[]);
     for(const g of groups){
+        if (groupById(g.id) !== g) continue;
         const now=Number(g.activation_strategy??0);
         if(enable&&now!==MANUAL_STRATEGY){
             if(!stGroups?.editGroup)throw Error('群设置尚未准备好');
@@ -3534,6 +3639,7 @@ async function autoDrive(type) {
 }
 async function runScheduled(q, prepare) {
     const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,chat=c.chat;
+    if (!localTarget(c)) return false;
     const journal=c.chatMetadata.rpeExecution??={};
     const prior=Object.entries(journal).find(([,e])=>e.chatKey===chatKey&&e.q?.execution&&q.execution
         && e.avatar===(q.avatar??null)&&e.q.execution.through===q.execution.through
@@ -3554,7 +3660,7 @@ async function runScheduled(q, prepare) {
         Object.entries(c.chatMetadata.rpeCardChoices?.[chatKey]??{}).filter(([,choice])=>choice?.avatar).map(([name,choice])=>[name,choice.avatar]).sort(([a],[b])=>a.localeCompare(b))]);
     let roles;
     const guard=()=>{
-        if(!settings().enabled||state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==chat||snapshot()!==prefix)throw Error('来源或聊天已改变，请重新核对');
+        if(!settings().enabled||state.chatKey!==chatKey||state.epoch!==epoch||!localTarget(c)||snapshot()!==prefix)throw Error('来源或聊天已改变，请重新核对');
         if(roles!==undefined&&roleSnapshot()!==roles)throw Error('卡身份或档位已改变，请重新核对');
     };
     const landed=()=>{const m=chat[length];return m&&!m.is_user&&!m.is_system&&String(m.mes??'').trim()&&(q.avatar?speakerOf(m,fallbackAvatar(c))===q.avatar:m.name===q.who)?m:null;};
@@ -3619,7 +3725,7 @@ async function runScheduled(q, prepare) {
         }
         try{prepared=await prepare();guard();}
         finally{
-            if(ownsPreparation&&state.chatKey===chatKey&&state.epoch===epoch&&ctx().chat===chat){
+            if(ownsPreparation&&state.chatKey===chatKey&&state.epoch===epoch&&localTarget(c,undefined,{requireHead:true})){
                 const added=(c.chatMetadata.contextIsolation?.anchors?.[avatar]?.segments??[]).map(segmentKey).filter(key=>!existing.has(key));
                 const disabledAfter=!!currentGroup(c)?.disabled_members?.includes(avatar);
                 const muteOwned=!disabledAfter&&(wasDisabled||muteOwners.length>0);
@@ -3661,7 +3767,7 @@ async function runScheduled(q, prepare) {
         if(landed()){await report('delivered',`${q.who}的消息已落下`);return true;}
         await report('unconfirmed',`${q.who}的生成已返回，但没找到本人新消息，请核对后重试`);return false;
     }catch(error){
-        if(state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==chat)return false;
+        if(state.chatKey!==chatKey||state.epoch!==epoch||!localTarget(c))return false;
         if(error.result==='replan'&&!issued&&!previousAttempt){
             // 本地明确尚未发令才可自动重排；已发出、取消或未确认的生成仍走原有人工核实。
             await report('muted',error.message);auto.executionStatus.result='replan';render();return false;
@@ -3670,6 +3776,7 @@ async function runScheduled(q, prepare) {
         if(!delivered&&result!=='unconfirmed')try{await prepared?.rollback?.();}catch(rollback){error.message+=`；恢复待处理：${rollback.message}`;}
         const failureReason=(...messages)=>[...new Set([...(issued||previousAttempt?[]:['尚未发出生成命令']),...messages.flatMap(message=>message.split('；'))])].join('；');
         try{await report(result,failureReason(error.message));}catch(reportError){
+            if (!localTarget(c, undefined, { requireHead: true })) return false;
             auto.executionStatus={result:'unconfirmed',who:q.who,reason:failureReason(error.message,reportError.message),id};
             journal[id]={...owned(),chatKey,result:'unconfirmed',reason:auto.executionStatus.reason,avatar:q.avatar,at:length,q};
             try{await c.saveMetadata();}catch{state.note=auto.executionStatus.reason;}
@@ -3752,10 +3859,12 @@ async function autoKnock(k) {
         let opened=null,openedKey=null;
         const rollback=async()=>{
             const anchor=c.chatMetadata.contextIsolation?.anchors?.[ch.avatar];
-            if(opened&&anchor?.segments?.includes(opened)&&JSON.stringify(opened)===openedKey){anchor.segments=anchor.segments.filter(s=>s!==opened);await c.saveMetadata();}
+            if(opened&&anchor?.segments?.includes(opened)&&JSON.stringify(opened)===openedKey){anchor.segments=anchor.segments.filter(s=>s!==opened);if(localTarget(c,undefined,{requireHead:true}))await c.saveMetadata();}
             const owned=c.chatMetadata.rpeExecution?.[k.execution?.id]?.preparation;
             if(owned){owned.segments=[];owned.segmentOwned=false;owned.muteOwned=false;}
-            if(wasDisabled&&!group.disabled_members?.includes(ch.avatar)){await setMemberMuted(ch.avatar,true);if(!group.disabled_members?.includes(ch.avatar))throw Error('叩门静音恢复核实失败');}
+            const liveGroup=currentGroup(ctx()),restoreMute=wasDisabled&&liveGroup&&liveGroup.id==group.id&&!liveGroup.disabled_members?.includes(ch.avatar)&&localTarget(c);
+            if(restoreMute&&!localTarget(c,undefined,{requireHead:true})){(liveGroup.disabled_members??=[]).push(ch.avatar);followBase();}
+            else if(restoreMute){await setMemberMuted(ch.avatar,true);const restored=currentGroup(ctx());if(restored?.id!=group.id||!restored?.disabled_members?.includes(ch.avatar))throw Error('叩门静音恢复核实失败');}
             auto.pending.delete(ch.avatar);
         };
         const release=acquireMemberChange(ch.avatar);
@@ -3778,6 +3887,7 @@ const ackLeave=(chatKey,receipt)=>api('leave-ack',{chatKey,receipts:[receipt]});
 async function autoClose(l, why) {
     const chatKey=state.chatKey, jobs=auto.jobs, key=l.id??`${l.who}:${l.at}`;
     if(jobs.has(key)) return jobs.get(key);
+    if (!localTarget()) throw windowRejected();
     const c=ctx(),failures=c.chatMetadata.rpeLeaveRetries??={};
     // 旧版在没有落实记录的撤销回执处读 rec.status 失败；升级后让这一种旧暂停自动重试。
     if(l.action==='undo' && failures[key]?.count>=3 && !c.chatMetadata.rpeLeaveEvents?.[key]
@@ -3799,7 +3909,7 @@ async function applyAutoClose(l,why,chatKey) {
     const key=l.id??`lapsed:${ch.avatar}:${at}`;
     const journal=c.chatMetadata.rpeLeaveEvents??={};
     const epoch=state.epoch;
-    const guard=()=>{if(state.chatKey!==chatKey || state.epoch!==epoch || ctx().chat!==c.chat) throw new Error('聊天已切换');};
+    const guard=()=>{if(state.chatKey!==chatKey || state.epoch!==epoch || !localTarget(c)) throw windowRejected();};
     const save=async()=>{guard();await c.saveMetadata();};
     const anchor=()=>c.chatMetadata.contextIsolation?.anchors?.[ch.avatar];
     const copy=x=>x==null?null:JSON.parse(JSON.stringify(x));
@@ -3951,7 +4061,7 @@ async function pickPresence() {
 
 async function stripDoorMark(id, event = 'read') {
     const c = ctx(), m = c.chat?.[id];
-    if (!m || m.is_user || speakerOf(m, fallbackAvatar(c)) !== 'narrator') return;
+    if (!m || m.is_user || speakerOf(m, fallbackAvatar(c)) !== 'narrator' || !localTarget(c)) return;
     if (!captureDoorHandoff(m, 'narrator', event)) return;
     c.updateMessageBlock(id, m);
     await c.saveChat();
@@ -3977,7 +4087,13 @@ document.addEventListener('click', event => {
         api('arrival-request', { chatKey: state.chatKey, who: cancel.dataset.who, cancel: true }).then(refreshDoor).catch(() => {});
     }
 }, true);
-on('CHAT_CHANGED', () => { if (state.guide.open) { state.guide = guideClosed(); render(); } onChatChanged(); });
+eventSource.makeFirst?.(eventTypes.CHAT_CHANGED, stChatId => {
+    const c = ctx(), { groupId } = c, avatar = fallbackAvatar(c);
+    const identified = groupId === null ? avatar : currentGroup(c)?.chat_id === stChatId;
+    state.epoch++;
+    state.loadedWindow = typeof stChatId === 'string' && stChatId.trim() && identified ? { ids: { stChatId, groupId: groupId === null ? null : String(groupId) }, chat: c.chat, avatar } : null;
+});
+on('CHAT_CHANGED', id => { if (state.loadedWindow && id !== state.loadedWindow.ids.stChatId) return; if (state.guide.open) { state.guide = guideClosed(); render(); } changeChat(); });
 for (const event of ['PERSONA_CHANGED', 'SETTINGS_UPDATED']) on(event, () => { personaWatch.check(); void sendPersona().catch(() => {}); });
 for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'MESSAGE_UPDATED', 'GROUP_UPDATED']) {
     on(name, (id) => { if (guideStaleOn(name) && state.guide.open) { state.guide = guideClosed(); render(); } if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED' || name === 'MESSAGE_RECEIVED') stripDoorMark(id, name === 'MESSAGE_EDITED' ? 'edit' : 'read').catch(() => {}); if (name === 'GROUP_UPDATED') watchMembers(); scheduleSync(); if (name !== 'MESSAGE_SENT') refreshDoor(); if (name === 'MESSAGE_RECEIVED') askGuide(false).catch(() => {}); });
@@ -3995,7 +4111,7 @@ on('MESSAGE_RECEIVED', () => {
     const who = speakerOf(last, fallbackAvatar(c));
     // 叩门那条（autoKnock 叫他写的）：发消息、打电话来的带上记号，同屋别的有卡的人看不见；上门的不带
     const knock = auto.pending.get(who) ?? auto.remote?.get(who) ?? null;   // 叩门那条、远程的人之后写的每一条
-    if (knock) {
+    if (knock && localTarget(c)) {
         auto.pending.delete(who);
         if (['消息', '电话'].includes(knock.way) && !last.extra?.rp_vis) { last.extra = { ...(last.extra ?? {}), rp_vis: { from: knock.who, fromAvatar: who, way: knock.way } }; c.saveChat().catch(() => {}); }
     }
@@ -4012,7 +4128,7 @@ on('MESSAGE_RECEIVED', () => {
     // 同步部分在第一个 await 之前完成；第一人称提醒也不能让内部记号漏进正文。
     stripDoorMark(c.chat.length - 1).catch(() => {});
     if (narratorSaysI(last.mes)) {
-        globalThis.toastr?.warning('旁白这段的叙述用了"我"，写成了某个人的口吻。点这里重写这一段（原来那段留在左边）。', 'RP：幕后', { timeOut: 20000, onclick: () => { $('#chat .last_mes .swipe_right').first().trigger('click'); } });
+        globalThis.toastr?.warning('旁白这段的叙述用了"我"，写成了某个人的口吻。点这里重写这一段（原来那段留在左边）。', 'RP：幕后', { timeOut: 20000, onclick: () => writeST(() => $('#chat .last_mes .swipe_right').first().trigger('click')) });
         return;
     }
     // 交接随现有 sync 提交，autoDrive 的现有同步屏障之后才计算候选。
@@ -4110,20 +4226,20 @@ function acquireMemberChange(avatar) {
         if(count>1)entering.set(avatar,count-1);else entering.delete(avatar);
     };
 }
-async function changeMembers(avatars, apply) {
+async function changeMembers(avatars, apply, beforeSave) {
     const c=ctx(),group=currentGroup(c),releases=[...new Set(avatars)].map(acquireMemberChange);
     try { return await apply(); }
     finally {
         // ST 没发 GROUP_UPDATED 或命令部分成功后报错时，也让基线跟上。
-        try { if(ctx().chat===c.chat&&currentGroup(ctx())===group){watchMembers();followBase();} }
+        try { if(ctx().chat===c.chat&&currentGroup(ctx())===group){watchMembers(beforeSave);followBase();} }
         finally { for(const release of releases)release(); }
     }
 }
 // 系统改静音统一从这里走；直接保存名单也使用同一个 changeMembers。
-async function setMemberMuted(avatar, disabled, execute = run) {
+async function setMemberMuted(avatar, disabled, execute = run, beforeSave) {
     const group=currentGroup(ctx()),at=group?.members.indexOf(avatar)??-1;
     if(at<0)return;
-    return changeMembers([avatar],()=>execute(`/member-${disabled?'disable':'enable'} ${at}`));
+    return changeMembers([avatar],()=>execute(`/member-${disabled?'disable':'enable'} ${at}`),beforeSave);
 }
 function cardNamed(c, who, avatar = null) {
     const group=currentGroup(c),members=group?.members??[c.characters?.[c.characterId]?.avatar].filter(Boolean);
@@ -4276,9 +4392,11 @@ function memberSnapshot() {
     if(!group||ids.groupId==null||String(group.id)!==String(ids.groupId)||ids.stChatId==null||String(group.chat_id??'')!==String(ids.stChatId)||!Array.isArray(group.members)||!Array.isArray(group.disabled_members))return null;
     return group ? { key: `${group.id}|${group.chat_id ?? ''}`, members: [...(group.members ?? [])], disabled: [...(group.disabled_members ?? [])] } : null;
 }
-function watchMembers() {
+function watchMembers(beforeSave) {
     const c = ctx(), base = state.memberBase, snap = memberSnapshot();
     if(!snap)return;
+    if (!localTarget(c)) return;
+    const origin = editOrigin();
     state.memberBase = snap;
     if (!settings().enabled) return;
     const manual=c.chatMetadata.rpeManualMuted??={};
@@ -4298,12 +4416,14 @@ function watchMembers() {
         const owned=c.chatMetadata.rp_emergence?.openingMuted;
         if(owned)c.chatMetadata.rp_emergence.openingMuted=owned.filter(a=>a!==avatar);
     }
+    beforeSave?.();
     save();
     for (const avatar of removedMembers(base.members, now, { camera: cameraOf(c)?.avatar ?? null })) {
         const ch = (c.characters ?? []).find(x => x.avatar === avatar);
         if (!ch || isCamera(ch)) continue;
         (async () => {
             await closeCurrentPresence(ch);
+            if (!localEdit(origin)) return;
             if (state.remote?.avatar === avatar) state.remote = null;
             api('leave', { chatKey: state.chatKey, who: ch.name, avatar, manual: true }, 240000).catch(() => {});
             globalThis.toastr?.info(`${ch.name}被移出了群，已按离场处理：从这条起${ch.name}不在场。`, 'RP：幕后', { timeOut: 8000 });
@@ -4360,11 +4480,11 @@ async function openPresence(ch, since = null) {
     const from=Number.isInteger(open?.from)?open.from:resident&&now.length===0?0:null;
     return{from,since:at===since?since:null,earlier:from!=null&&now.some(s=>real(s)&&s.from<from)};
 }
-async function closeCurrentPresence(ch) {
+async function closeCurrentPresence(ch, onClose) {
     const c=ctx(),at=c.chat?.length-1;
     if(at<0)return{status:'achieved'};
     const rec=c.chatMetadata?.contextIsolation?.anchors?.[ch.avatar];if(rec)rec.rpeManualRevision=crypto.randomUUID();
-    return closeSegment(c,{avatar:ch.avatar,name:ch.name,at,
+    return closeSegment(c,{avatar:ch.avatar,name:ch.name,at,onClose,
         resident:residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot}),
         disabled:!!currentGroup(c)?.disabled_members?.includes(ch.avatar)});
 }
@@ -4479,30 +4599,97 @@ function followBase() {
     const snap = memberSnapshot();
     if (snap && state.memberBase?.key === snap.key) state.memberBase = snap;
 }
-async function leaveChar(who) {
+function manualLeaveEnabled() {
+    const gate = state.leaveWindow;
+    return !!gate && settings().enabled && !gate.changes
+        && state.opened && state.openEpoch === state.epoch;
+}
+
+const LEAVE_CONFIRM_MS = 300;
+async function confirmManualLeave(chatKey = state.chatKey) {
+    const deadline = performance.now() + LEAVE_CONFIRM_MS;
+    try {
+        const result = await api('presence-check', { chatKey }, LEAVE_CONFIRM_MS);
+        if (performance.now() >= deadline || result?.chatKey !== chatKey || result.enabled !== true
+            || !Array.isArray(result.cast) || !result.cast.every(card => typeof card?.avatar === 'string'
+                && typeof card.name === 'string' && typeof card.role === 'string')) return null;
+        return result.cast;
+    } catch { return null; }
+}
+function manualLeaveOperation(c, group, ch, who) {
+    if (!manualLeaveEnabled()) return null;
+    const { stChatId, groupId } = chatIds(c), { chatKey, epoch, leaveWindow, rosterMutation, rosterPending } = state;
+    const { chat, chatMetadata: metadata } = c, { avatar } = ch, { change } = leaveWindow;
+    const current = () => {
+        if (manualLeaveEnabled() !== true || leaveWindow.change !== change) return false;
+        const now = ctx(), ids = chatIds(now), physical = currentGroup(now);
+        return leaveWindow.chat === chat && leaveWindow.metadata === metadata && leaveWindow.stChatId === stChatId && leaveWindow.groupId === groupId
+            && state.epoch === epoch && state.leaveWindow === leaveWindow
+            && !!chatKey && state.chatKey === chatKey && metadata?.rp_emergence?.chatKey === chatKey
+            && ids.stChatId === stChatId && ids.groupId === groupId && now.chat === chat && now.chatMetadata === metadata
+            && stChatId != null && groupId != null && physical === group && String(group.id) === String(groupId)
+            && String(group.chat_id) === String(stChatId);
+    };
+    if (!current()) return null;
+    const proof = { chat, metadata, chatKey, avatar };
+    let roster, carrier, writer;
+    void confirmManualLeave(chatKey).then(cast => { roster = cast; });
+    const prepare = () => {
+        if (ch.avatar !== avatar || rosterPending || state.rosterPending || rosterMutation !== state.rosterMutation || !carrier?.current()) return false;
+        const now = ctx();
+        if (!manualLeaveCardMatches({ characters: now.characters, members: group.members, roster, card: ch, who, resolved: cardNamed(now, who) })) return false;
+        return { roster, generating: activeGeneration(), newId: () => c.uuidv4?.() ?? crypto.randomUUID() };
+    };
+    return {
+        capture: (segment, message) => { carrier = captureManualLeave(proof, segment, message); },
+        beforeSave() {
+            try {
+                if (!roster || !carrier || !current()) return;
+                writer = manualLeaveWriter(proof, { current, prepare, read: () => readOpeningChat({ id: groupId, chat_id: stChatId }),
+                    schedule: task => setTimeout(task, 0), report: result => console.debug('[RP：幕后] 人工离场双写', { groupId, stChatId, ...result }) });
+                writer.capture(carrier.segment, carrier.message);
+            } catch { /* 双写准备失败，仍发起旧保存。 */ }
+        },
+        finish: status => writer?.finish(status),
+    };
+}
+async function leaveChar(who, explicit = false) {
     const c = ctx(), group = currentGroup(c);
+    const origin = editOrigin();
     const ch = cardNamed(c, who);
     if (!group || !ch || !group.members.includes(ch.avatar)) { globalThis.toastr?.warning(`群里没有「${who}」。`, 'RP：幕后'); return false; }
-    await closeCurrentPresence(ch);
-    const at = group.members.indexOf(ch.avatar);
-    if (!group.disabled_members?.includes(ch.avatar)) await setMemberMuted(ch.avatar,true);
-    await syncNow(true).catch(() => {});
-    if (state.remote?.avatar === ch.avatar) state.remote = null;
-    // 他走前说了去哪、办什么：后台记下去向，回来的时机照它（D-169；在后台跑，不等）
-    api('leave', { chatKey: state.chatKey, who: ch.name, avatar: ch.avatar, manual: true }, 240000).catch(() => {});
-    globalThis.toastr?.success(`${ch.name}离场了：从这条起${ch.name}不在场，之后的事${ch.name}不知道。${ch.name}办完手上的事，旁白会带${ch.name}回来；要${ch.name}现在来：/进场 ${ch.name}`, 'RP：幕后', { timeOut: 8000 });
-    return true;
+    if (!localEdit(origin)) return false;
+    const operation = explicit ? manualLeaveOperation(c, group, ch, who) : null;
+    let closeStatus = 'close-failed';
+    try {
+        closeStatus = (await closeCurrentPresence(ch, operation?.capture)).status;
+        if (!localEdit(origin)) return false;
+        if (!group.disabled_members?.includes(ch.avatar)) await setMemberMuted(ch.avatar,true,run,operation?.beforeSave);
+        await syncNow(true).catch(() => {});
+        if (!localEdit(origin)) return false;
+        if (state.remote?.avatar === ch.avatar) state.remote = null;
+        // 他走前说了去哪、办什么：后台记下去向，回来的时机照它（D-169；在后台跑，不等）
+        const rejected = reason => console.warn('[RP：幕后] 离场记录被拒绝', ch.name, reason || '后台拒绝了离场请求');
+        api('leave', { chatKey: state.chatKey, who: ch.name, avatar: ch.avatar, manual: true }, 240000).then(reply => { if (reply?.ok === false) rejected(reply.why ?? reply.error); },
+            error => { if (error?.status === 409) rejected(error.message); });
+        globalThis.toastr?.success(`${ch.name}离场了：从这条起${ch.name}不在场，之后的事${ch.name}不知道。${ch.name}办完手上的事，旁白会带${ch.name}回来；要${ch.name}现在来：/进场 ${ch.name}`, 'RP：幕后', { timeOut: 8000 });
+        return true;
+    } finally {
+        operation?.finish(closeStatus);
+    }
 }
 // 镜头写完了：问让不让他进场
 async function setUpCamera() {
     const c = ctx(), group = currentGroup(c);
+    const origin = editOrigin(), here = () => localEdit(origin);
     if (!group) { globalThis.toastr?.warning('旁白只在群聊里用：一个人的时候把群里的人都静音就行。'); return; }
     let cam = cameraOf(c);
     const steps = [cam ? null : '在你的角色列表里新建一张卡「旁白」（自带镜头主提示词和后历史指令；卡里带一个标记，系统认得它是镜头）', `把它加进这个群「${escapeHtml(group.name ?? '')}」，并且静音`].filter(Boolean);
     const ok = await c.callGenericPopup(`<h3>一个人时的旁白</h3><p>要做的：</p><ul>${steps.map(x => `<li>${x}</li>`).join('')}</ul><p><small>以后你一个人的时候（群里的人都离场或静音了），你说完一句没人接，旁白就写周围：天气、这地方的样子、近处远处的动静，和没有卡的人——路人、店里的人、来搭话的生人，可以一来一回接着演。有卡的人在场时，你这句是冲着没卡的人说的，有卡的人答完旁白也接一手（"这一局"那块里能关）。有卡的角色由各自的卡说话；要角色来，旁白只写到角色出现（门被推开、终端响了），然后按名字问你让不让进场。它不替你说话、不替你拿主意；后台不把它当人，不记它的账、不排它的关系。随时可以用 /旁白 叫它写一段；/离场 名字、/进场 名字 让有卡的人走、来。删卡或者移出群就不用了。</small></p>`, c.POPUP_TYPE.CONFIRM, '', { okButton: '好', cancelButton: '算了' });
-    if (!ok) return;
+    if (!ok || !here()) return;
     if (!cam) {
         const prompt = await api('camera-card', {});
+        if (!here()) return;
         const fd = new FormData();
         for (const [k, v] of Object.entries({ system_prompt: prompt.system, post_history_instructions: prompt.phi, ch_name: '旁白', description: '', personality: '', scenario: '', first_mes: '', mes_example: '', tags: '', fav: 'false',
             creator_notes: 'RP：幕后建的镜头：玩家一个人的时候写周围的动静。后台不把它当人。', extensions: JSON.stringify({ [CAMERA_FLAG]: true }) })) fd.append(k, v);
@@ -4511,16 +4698,20 @@ async function setUpCamera() {
         const r = await fetch('/api/characters/create', { method: 'POST', headers, body: fd });
         if (!r.ok) { globalThis.toastr?.error(`建卡没成（${r.status}）`, 'RP：幕后'); return; }
         await c.getCharacters();
+        if (!here()) return;
         cam = cameraOf(ctx());
         if (!cam) { globalThis.toastr?.error('卡建好了但没认出来，刷新一下页面再点一次。', 'RP：幕后'); return; }
     }
     if (!group.members.includes(cam.avatar)) await changeMembers([cam.avatar],()=>c.executeSlashCommandsWithOptions(`/member-add ${cam.avatar}`));
+    if (!here()) return;
     const now = currentGroup(ctx());
     const at = now?.members.indexOf(cam.avatar) ?? -1;
     if (at >= 0 && !now.disabled_members?.includes(cam.avatar)) await setMemberMuted(cam.avatar,true,cmd=>c.executeSlashCommandsWithOptions(cmd));
     // 旁白是你的眼睛，看得见你看得见的全部：上下文隔离扩展别因为它刚加进群就只给它加进来以后的那几条（N-292，D 副本实测）
     // 光清掉不够：它头一回开口时隔离扩展会照"名册里新来的"再记一次进场——直接记成从第 0 条起就在
+    if (!here()) return;
     await ensureCameraPresence(ctx(),{avatar:cam.avatar,name:cam.name});
+    if (!here()) return;
     globalThis.toastr?.success('旁白在这个群里了（静音）。你一个人的时候它会接；想让它现在写一段，用 /旁白。', 'RP：幕后');
     render();
 }
@@ -4563,7 +4754,7 @@ async function freshen(id, type) {
     const before = id > 0 ? String(c.chat[id - 1]?.mes ?? '') : null;
     try { r = await api('fresh', { chatKey: state.chatKey, speaker: speakerOf(m, fallbackAvatar(c)), text, before, lore: Array.isArray(m.extra?.rp_lore) ? m.extra.rp_lore : null }, 230000); } catch { return; }
     const now = ctx();
-    if (!r?.changes?.length || now.chat?.[id] !== m || m.mes !== text) return;   // 这期间换了窗口、改了稿、左滑了：不动
+    if (!r?.changes?.length || now.chat?.[id] !== m || m.mes !== text || !localTarget(now)) return;   // 这期间换了窗口、改了稿、左滑了：不动
     m.extra = { ...(m.extra ?? {}), rp_fresh: { original: text, changes: r.changes } };
     m.mes = r.text;
     if (Array.isArray(m.swipes) && m.swipes[m.swipe_id ?? 0] === text) m.swipes[m.swipe_id ?? 0] = r.text;
@@ -4628,6 +4819,7 @@ on('WORLDINFO_ENTRIES_LOADED', data => {
 });
 async function openLore() {
     const c = ctx();
+    const origin = editOrigin();
     await refreshLore();
     const rows = state.lore?.rows ?? [];
     if (!rows.length) { globalThis.toastr?.info('后台还没见过这一局的世界书条目（开口生成一次就会收到）。'); return; }
@@ -4645,7 +4837,7 @@ async function openLore() {
         if ((all ? '所有人' : names.join('、')) !== before) set.push({ key: r.key, all, who: all ? [] : names });
     }
     if (!set.length) return;
-    try { state.lore = await api('lore', { chatKey: state.chatKey, set }); globalThis.toastr?.success(`改了 ${set.length} 条。`); }
+    try { const saved = await api('lore', { chatKey: origin.chatKey, set }, undefined, { origin, keep: text }); if (sameEdit(origin)) state.lore = saved; globalThis.toastr?.success(`改了 ${set.length} 条。`); }
     catch { globalThis.toastr?.warning('后台暂时连不上。'); }
 }
 
@@ -4718,6 +4910,7 @@ async function undoFresh(id) {
     });
     if (result !== c.POPUP_RESULT.CUSTOM1 && result !== c.POPUP_RESULT.CUSTOM2) return;
     if (ctx().chat?.[id] !== m || m.extra?.rp_fresh !== f) return;
+    if (!localTarget(c)) return;
     let text = m.mes, left = [];
     if (result === c.POPUP_RESULT.CUSTOM2) text = f.original;
     else {
@@ -4883,7 +5076,7 @@ async function pickBoard(id) {
             return true;
         },
     });
-    if (!ok || !picked || ctx().chat?.[id] !== m) return;
+    if (!ok || !picked || ctx().chat?.[id] !== m || !localTarget(c)) return;
     const extra = { ...(m.extra ?? {}) };
     const mark = { ...(picked.place ? { place: picked.place } : {}), ...(Object.keys(picked.people).length ? { people: picked.people } : {}) };
     if (Object.keys(mark).length) extra.rp_board = mark; else delete extra.rp_board;
@@ -4901,7 +5094,8 @@ async function pickBoard(id) {
 async function reconcileBoardState() {
     const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,group=currentGroup(c);
     if(!group||!chatKey)return;
-    const guard=()=>{if(ctx().chat!==c.chat||state.chatKey!==chatKey||state.epoch!==epoch)throw Error('聊天已切换');};
+    if (!localTarget(c)) return;
+    const guard=()=>{if(state.chatKey!==chatKey||state.epoch!==epoch)throw Error('聊天已切换');if(!localTarget(c))throw windowRejected();};
     const journal=c.chatMetadata.rpeBoardApplied??={}, wanted=new Map();
     const scope=(state.boardCast?.length?state.boardCast:c.characters??[]).filter(p=>p.role!=='不用'&&!isCamera(p));
     for(const [pos,m] of c.chat.entries()){
@@ -5093,7 +5287,7 @@ async function saveDayMark({ c, m, id, mark, picked, chatKey, epoch, fingerprint
     const guard = () => {
         const now = ctx();
         if (state.chatKey !== chatKey || state.epoch !== epoch || now.chat !== c.chat || now.chat?.[id] !== m
-            || JSON.stringify(chatIds(now)) !== JSON.stringify(ids)
+            || !localTarget(c) || JSON.stringify(chatIds(now)) !== JSON.stringify(ids)
             || fingerprintMessage(m, speakerOf(m, fallbackAvatar(c))) !== fingerprint
             || (applied && String(m.extra?.rp_day ?? '') !== mark)) throw Error('聊天、楼号或正文已变化');
     };
@@ -5204,11 +5398,11 @@ function registerCommands() {
         await ctx().callGenericPopup(`<h3>账</h3><pre style="white-space:pre-wrap">${escapeHtml(r.lines.join('\n'))}</pre>`, ctx().POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
         return '';
     }, ['rp-ask'], '查后台记下的事和账（剧情现状；程序查，不进聊天记录）。例：/账 那笔欠款后来怎样了；只写 /账 看总览');
-    const note = (kind, done) => async (_named, text) => {
+    const note = (kind, done) => async (_named, text, options) => {
         const t = String(text ?? '').trim();
-        if (!need() || !t) return '';
+        if (!t || ((!options?.origin || sameEdit(options.origin)) && !need())) return '';
         const clear = t === '清';
-        await api('note', { chatKey: state.chatKey, kind, ...(clear ? { clear: true } : { text: t }) });
+        await api('note', { chatKey: state.chatKey, kind, ...(clear ? { clear: true } : { text: t }) }, undefined, options);
         globalThis.toastr?.info(clear ? `已收回 /${kind}` : `${done}：${t}`, 'RP：幕后');
         refreshPlanStatus();
         return '';
@@ -5249,13 +5443,15 @@ function registerCommands() {
         if (!need()) return '';
         const who = String(text ?? '').trim();
         if (!who) { globalThis.toastr?.warning('用法：/离场 名字', 'RP：幕后'); return ''; }
-        await leaveChar(who);
+        await leaveChar(who, true);
         return '';
     }, ['rp-leave'], '让指定名字的角色离场：从这条起不在场、听不见之后的事，并静音；要回来用 /进场 名字。');
     const oneWay = note('聊', '记下了，下次规划会带上');
     c.registerSlashCommand('聊', async (named, text) => {
         if (!need()) return '';
-        if (await openTalk(String(text ?? '').trim()) === false) return oneWay(named, text);
+        const origin = editOrigin(), original = String(text ?? '');
+        try { if (await openTalk(original) === false) await oneWay(named, text, { origin, keep: original }); }
+        catch (error) { if (error.code !== 'window-mismatch') throw error; if (!original) globalThis.toastr?.warning(error.message); }
         return '';
     }, ['rp-talk'], '任意调整：问记下的事、指出记错的、商量方向（不给角色看）。例：/聊 这几天想轻松点，别总围着伤病转');
 }
@@ -5284,4 +5480,4 @@ addDayButtons();
 addWand();
 registerCommands();
 watchDraft();
-onChatChanged();
+changeChat();
