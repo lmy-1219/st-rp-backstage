@@ -4096,16 +4096,46 @@ document.addEventListener('click', event => {
         api('arrival-request', { chatKey: state.chatKey, who: cancel.dataset.who, cancel: true }).then(refreshDoor).catch(() => {});
     }
 }, true);
+const countPanelMessageChange = () => {
+    state.panelMessageChange = (state.panelMessageChange ?? 0) + 1;
+};
 eventSource.makeFirst?.(eventTypes.CHAT_CHANGED, stChatId => {
+    countPanelMessageChange();
     const c = ctx(), { groupId } = c, avatar = fallbackAvatar(c);
     const identified = groupId === null ? avatar : currentGroup(c)?.chat_id === stChatId;
     state.epoch++;
     state.loadedWindow = typeof stChatId === 'string' && stChatId.trim() && identified ? { ids: { stChatId, groupId: groupId === null ? null : String(groupId) }, chat: c.chat, avatar } : null;
 });
-on('CHAT_CHANGED', id => { if (state.loadedWindow && id !== state.loadedWindow.ids.stChatId) return; if (state.guide.open) { state.guide = guideClosed(); render(); } changeChat(); });
+const panelMessageEvents = ['CHAT_CHANGED', 'MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED',
+    'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'MESSAGE_UPDATED'];
+const panelMessageIdle = () => (state.panelMessageChange ?? 0) === (state.panelMessageChangeEnd ?? 0);
+for (const event of panelMessageEvents) {
+    if (!eventSource.makeFirst) on(event, countPanelMessageChange);
+    else if (event !== 'CHAT_CHANGED' && eventTypes[event]) eventSource.makeFirst(eventTypes[event], countPanelMessageChange);
+}
+on('CHAT_CHANGED', id => {
+    if (state.loadedWindow && id !== state.loadedWindow.ids.stChatId) return;
+    if (state.guide.open) {
+        state.guide = guideClosed();
+        render();
+    }
+    changeChat();
+});
 for (const event of ['PERSONA_CHANGED', 'SETTINGS_UPDATED']) on(event, () => { personaWatch.check(); void sendPersona().catch(() => {}); });
 for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'MESSAGE_UPDATED', 'GROUP_UPDATED']) {
-    on(name, (id) => { if (guideStaleOn(name) && state.guide.open) { state.guide = guideClosed(); render(); } if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED' || name === 'MESSAGE_RECEIVED') stripDoorMark(id, name === 'MESSAGE_EDITED' ? 'edit' : 'read').catch(() => {}); if (name === 'GROUP_UPDATED') watchMembers(); scheduleSync(); if (name !== 'MESSAGE_SENT') refreshDoor(); if (name === 'MESSAGE_RECEIVED') askGuide(false).catch(() => {}); });
+    on(name, (id) => {
+        if (guideStaleOn(name) && state.guide.open) {
+            state.guide = guideClosed();
+            render();
+        }
+        if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED' || name === 'MESSAGE_RECEIVED') {
+            stripDoorMark(id, name === 'MESSAGE_EDITED' ? 'edit' : 'read').catch(() => {});
+        }
+        if (name === 'GROUP_UPDATED') watchMembers();
+        scheduleSync();
+        if (name !== 'MESSAGE_SENT') refreshDoor();
+        if (name === 'MESSAGE_RECEIVED') askGuide(false).catch(() => {});
+    });
 }
 on('OAI_PRESET_CHANGED_AFTER', restoreCameraPrompts);
 for (const name of ['GENERATION_ENDED', 'GENERATION_STOPPED']) on(name, () => {
@@ -4312,6 +4342,9 @@ async function resolveCastChoices(names = []) {
         await resolveCard(who,null,{retry:true});
     }
 }
+const validAvatar = id => !id.includes('..') && (id.startsWith('face:') ? !!id.slice(5).trim() && !/[/\\]/.test(id)
+    : /^[^<>:"/\\|?*\x00-\x1f]+\.(png|webp|jpe?g|gif)$/i.test(id));
+const memberFiles = list => Array.isArray(list) && Array.from(list).every(id => typeof id === 'string' && /^[^<>:"/\\|?*\x00-\x1f]+\.png$/.test(id));
 const doorOpenCounts = {};
 function settleDoorOpen(counts, reason) {
     if (reason) counts.reasons[reason] = (counts.reasons[reason] ?? 0) + 1;
@@ -4324,9 +4357,6 @@ function doorOpenOperation(who, requested, bucket, mode, counts) {
     const newId = () => c.uuidv4?.() ?? crypto.randomUUID(), opKey = newId();
     const way = bucket === '他过来' ? '当面' : bucket;
     const card = bucket !== '其他' && group && cardNamed(c, who, requested), avatar = card?.avatar, name = card?.name;
-    const validAvatar = id => !id.includes('..') && (id.startsWith('face:') ? !!id.slice(5).trim() && !/[/\\]/.test(id)
-        : /^[^<>:"/\\|?*\x00-\x1f]+\.(png|webp|jpe?g|gif)$/i.test(id));
-    const memberFiles = list => Array.isArray(list) && Array.from(list).every(id => typeof id === 'string' && /^[^<>:"/\\|?*\x00-\x1f]+\.png$/.test(id));
     const active = ({ members, disabled_members: muted }) => memberFiles(members) && members.filter(id => id === avatar).length === 1
         && (muted === undefined || memberFiles(muted) && !muted.includes(avatar));
     const sameWindow = (now = ctx(), ids = chatIds(now)) => group && chatKey && sameEdit(origin) && epoch === state.epoch
@@ -4476,6 +4506,43 @@ function watchMembers(beforeSave) {
     for(const avatar of Object.keys(manual))if(!snap.disabled.includes(avatar)){delete manual[avatar];cleaned=true;}
     if (!base || base.key !== snap.key) { if(cleaned)save();return; }
     const now = snap.members;
+    const sources = state.panelArrivalSources ??= new WeakMap();
+    const retired = card => !now.includes(card.avatar) || snap.disabled.includes(card.avatar);
+    for (const card of c.characters ?? []) if (sources.has(card) && retired(card)) sources.delete(card);
+    const source = (card, item, ticket = Symbol()) => {
+        const { avatar, name } = card, { chat, chatMetadata: metadata } = c;
+        const group = currentGroup(c), { epoch, leaveWindow } = state;
+        if (!group) return null;
+        const current = () => {
+            const live = ctx(), { members, disabled_members: disabled } = group;
+            return sources.get(card) === ticket && epoch === state.epoch && sameEdit(origin) && localTarget({ chat }, origin.window, { requireHead: true })
+                && currentGroup(live) === group && live.chatMetadata === metadata
+                && state.leaveWindow === leaveWindow && manualLeaveEnabled() && leaveWindow.chat === chat && leaveWindow.metadata === metadata
+                && origin.chatKey && metadata?.rp_emergence?.chatKey === origin.chatKey
+                && memberFiles(members) && memberFiles(disabled) && members.filter(a => a === avatar).length === 1 && !disabled.includes(avatar)
+                && card.avatar === avatar && card.name === name && live.characters.filter(ch => ch.avatar === avatar).length === 1
+                && cardNamed(live, name, avatar) === card && !isCamera(card);
+        };
+        const shadow = { card, avatar, name, chat, metadata, chatKey: origin.chatKey, current,
+            capture(anchor, segment, message) {
+                shadow.change = panelMessageIdle() ? (state.panelMessageChange ??= 0) : null;
+                if (shadow.change === null || !message || message.hidden || message.is_system
+                    || segment.from !== chat.length) return;
+                Object.assign(shadow, {
+                    anchor, segment, message, revision: anchor.rpeManualRevision,
+                    doorRevision: doorHandoffs([message], fallbackAvatar(c))[0]?.revision,
+                    slot: message.swipe_id, sentAt: message.send_date,
+                    fp: fingerprintMessage(message, speakerOf(message)),
+                    text: message.mes, swipe: message.swipes?.[message.swipe_id ?? 0],
+                    door: JSON.stringify(message.extra?.rp_door),
+                });
+            },
+            opened(result) { shadow.result = result; },
+        };
+        if (item && !panelArrivalIdentity(shadow, item, item.who)) return null;
+        sources.set(card, ticket);
+        return shadow;
+    };
     for(const avatar of new Set([...base.disabled,...snap.disabled])){
         if(base.disabled.includes(avatar)===snap.disabled.includes(avatar))continue;
         if(state.entering.has(avatar))continue;
@@ -4509,14 +4576,14 @@ function watchMembers(beforeSave) {
         // 门上他那一项先拿着：进场以后他就不在门上了
         const doorItem = (state.door?.items ?? []).find(i => i.avatar === avatar || i.who === ch.name) ?? null;
         // 自动进离场开着（T070 二）：不逐个立刻进场，攒一小会儿和同一批拉进来的一起按场面判；和玩家同名的卡照现状
-        if (auto.on === true && ch.name !== c.name1) { arrivals.add(`${state.epoch}|${snap.key}`, { avatar, name: ch.name, count: c.chat?.length ?? 0, doorItem }); continue; }
+        if (auto.on === true && ch.name !== c.name1) { arrivals.add(`${state.epoch}|${snap.key}`, { avatar, name: ch.name, count: c.chat?.length ?? 0, doorItem, shadow: source(ch, doorItem) }); continue; }
         enterAsBefore(ch, doorItem);
     }
     // 玩家在群面板里手动取消静音（T070 三）：只在自动进离场开着时算进场；关着照旧什么都不做
     if (auto.on !== true) return;
     const unmuted = unmutedMembers(base, snap, { camera: cameraOf(c)?.avatar ?? null, skip: [...state.entering.keys()] })
         .map(avatar => (c.characters ?? []).find(x => x.avatar === avatar)).filter(ch => ch && !isCamera(ch) && ch.name !== c.name1);
-    if (unmuted.length) admitUnmuted(unmuted);
+    if (unmuted.length) admitUnmuted(unmuted, source);
 }
 // 现状的拉人进场（自动进离场关着、或者按场面判不成时）：从这条起在场、后台替他理怎么来的，一人一条提示
 function enterAsBefore(ch, doorItem) {
@@ -4575,7 +4642,7 @@ async function settleArrivals(key, list) {
     if (!people.length) return;
     // 等的这一会儿里自动进离场关了：照现状逐个进场
     if (auto.on !== true) { for (const p of people) { const ch = cardNamed(c, p.name, p.avatar); if (ch) enterAsBefore(ch, p.doorItem); } return; }
-    const legacy = [];
+    const legacy = [], shadows = [];
     const releases=people.map(p=>acquireMemberChange(p.avatar));
     try {
         const batch = people.map(p => p.avatar), sealed = [];
@@ -4609,7 +4676,7 @@ async function settleArrivals(key, list) {
                 for (const s of ok) unsealArrival(ctx(), s);
                 try { await ctx().saveMetadata(); } catch {}
                 legacy.push(...ok);
-            } else await placeArrivals(sorted, here);
+            } else await placeArrivals(sorted, here, shadows, board.people);
         }
     } finally {
         for (const release of releases) release();
@@ -4617,40 +4684,77 @@ async function settleArrivals(key, list) {
     }
     if (!here()) return;
     for (const p of legacy) { const ch = cardNamed(ctx(), p.name, p.avatar); if (ch) enterAsBefore(ch, p.doorItem); }
+    if (shadows.length) void publishPanelArrivals(shadows);
 }
 // 分拣好了：不在场的静音，在场的开区间；一条合并提示；然后逐个让后台理怎么来的（门上那项照旧取方式）
-async function placeArrivals({ enter, mute }, here) {
+async function placeArrivals({ enter, mute }, here, shadows, board) {
+    for (const e of enter) {
+        const matches = board.filter(row => row?.avatar === e.avatar);
+        const [row, duplicate] = matches.length ? matches : board.filter(row => row?.name === e.name);
+        if (!row || duplicate || !panelArrivalIdentity(e.shadow, row, row.name)) e.shadow = null;
+    }
     for (const m of mute) {
         const at = currentGroup(ctx())?.members.indexOf(m.avatar) ?? -1;
         if (at >= 0) await setMemberMuted(m.avatar,true);
         if (!currentGroup(ctx())?.disabled_members?.includes(m.avatar)) console.warn('[RP：幕后] 拉进群：判不在场但没静音上', m.name);
     }
-    await admit(enter, here, { all: [...enter, ...mute].map(p => p.name), muted: mute.map(p => p.name) });
+    await admit(enter, here, { all: [...enter, ...mute].map(p => p.name), muted: mute.map(p => p.name), shadows });
 }
 // 进场（拉进群判在场、手动取消静音共用，T070 二、三）：开区间 → 同步 → 门上那项取方式 → 一条提示（一人一行） → 后台逐个理怎么来的
-async function admit(people, here, { all = [], muted = [] } = {}) {
+function panelArrivalIdentity(shadow, item, name) {
+    if (!shadow || !item) return !!shadow;
+    const live = ctx(), members = currentGroup(live)?.members;
+    if (item.avatar) return item.avatar === shadow.avatar && live.characters.filter(ch => ch.avatar === item.avatar).length === 1;
+    const [card, duplicate] = live.characters.filter(ch => ch.name === name && members?.includes(ch.avatar));
+    if (name !== shadow.name || card !== shadow.card || duplicate) return false;
+    shadow.named = true;
+    return true;
+}
+async function admit(people, here, { all = [], muted = [], shadows } = {}) {
     const entered = [];
+    let firstMessageChange;
     for (const e of people) {
         const ch = cardNamed(ctx(), e.name, e.avatar);
         if (!ch || !here()) continue;
-        entered.push({ ch, item: e.doorItem ?? null, ...await openPresence(ch, e.since ?? null) });
+        const shadow = e.shadow?.card === ch ? e.shadow : null;
+        entered.push({ ch, item: e.doorItem ?? null, shadow, entry: e, ...await openPresence(ch, e.since ?? null, shadow) });
+        // null 表示开段时有消息事件尚未结束，后续同批开段不能覆盖。
+        if (firstMessageChange === undefined) firstMessageChange = shadow?.change;
     }
-    await syncNow(true).catch(() => {});
+    const synced = await syncNow(true).catch(() => {});
     if (!here()) return;
     if (entered.some(x => !x.item)) await refreshDoor().catch(() => {});
-    for (const x of entered) x.opts = arriveOpts(x.item ?? (state.door?.items ?? []).find(i => i.avatar === x.ch.avatar || i.who === x.ch.name) ?? null);
+    for (const x of entered) {
+        const item = x.item ?? (state.door?.items ?? []).find(i => i.avatar === x.ch.avatar || i.who === x.ch.name) ?? null;
+        if (!x.item && !panelArrivalIdentity(x.shadow, item, item?.who)) x.shadow = null;
+        x.opts = arriveOpts(item);
+    }
     showArrivalToast(arrivalToastLines({
         all,
         entered: entered.map(x => ({ who: x.ch.name, from: x.from, since: x.since, earlier: x.earlier, how: arrivalHow(x.opts) })),
         muted,
     }));
-    for (const x of entered) { if (here()) await arriveNow(x.ch, x.opts); }
+    for (const x of entered) {
+        if (!here()) continue;
+        const { shadow, opts, entry } = x;
+        await arriveNow(x.ch, opts, synced === true && shadow ? { arrival(got, remote) {
+            const { avatar, name, chatKey } = shadow, way = opts.mode === 'come' ? '当面' : opts.way;
+            if (firstMessageChange !== state.panelMessageChange) return;
+            if (got?.ok !== true || got.prepared || 'avatar' in got && got.avatar !== avatar || 'who' in got && got.who !== name
+                || segmentOpenArrivalFailure(got, remote, { avatar, chatKey, mode: opts.mode, way, bucket: '他过来' })) return;
+            if (entry.status && (entry.status !== (way === '当面' ? 'present' : 'remote')
+                || entry.way != null && entry.way !== way && !(way === '当面' && entry.way === '上门'))) return;
+            shadow.way = way;
+            shadow.ack = got;
+            shadows.push(shadow);
+        } } : null);
+    }
     refreshDoor().catch(() => {});
 }
 // 玩家在群面板里手动取消静音（T070 三，自动进离场开着）：＝进场，和拉进群判在场走同一个 admit。
 // 扩展自己取消的（叩门、点门、叫回来、撤销离场）在 state.entering 里、名单基线也跟上了，不算。
 // 他本来就有开着的区间（静音时没关区间，隔离扩展还当他在场）：照旧不管，console 记一笔——不重开、不重理进场
-function admitUnmuted(list) {
+function admitUnmuted(list, source) {
     const c = ctx(), snap = memberSnapshot();
     if (!snap) return;
     const chatKey = state.chatKey, epoch = state.epoch;
@@ -4659,11 +4763,51 @@ function admitUnmuted(list) {
     for (const ch of list) {
         if ((c.chatMetadata?.contextIsolation?.anchors?.[ch.avatar]?.segments ?? []).some(s => s && s.to == null)) { console.log('[RP：幕后] 取消静音：区间本来就开着，不当新进场', ch.name); continue; }
         const doorItem = (state.door?.items ?? []).find(i => i.avatar === ch.avatar || i.who === ch.name) ?? null;
-        people.push({ avatar: ch.avatar, name: ch.name, doorItem });
+        people.push({ avatar: ch.avatar, name: ch.name, doorItem, shadow: source?.(ch, doorItem) });
     }
     if (!people.length) return;
     const releases=people.map(p=>acquireMemberChange(p.avatar));
-    admit(people, here).catch(e => console.warn('[RP：幕后] 取消静音进场没走完', e)).finally(() => { for (const release of releases) release(); followBase(); });
+    const shadows = [];
+    admit(people, here, { shadows }).catch(e => console.warn('[RP：幕后] 取消静音进场没走完', e))
+        .finally(() => { for (const release of releases) release(); followBase(); })
+        .then(() => { if (shadows.length) void publishPanelArrivals(shadows); });
+}
+// 开段时锁定原楼，发资格请求前捕获，回包后沿用这次捕获终验。
+async function publishPanelArrivals(shadows) {
+    try {
+        const atTip = s => s.message && s.result?.status === 'applied' && s.result.segment === s.segment
+            && s.segment.from === s.chat.length && s.chat.at(-1) === s.message
+            && s.change === state.panelMessageChange && panelMessageIdle() && s.current()
+            && s.message.mes === s.text && s.message.swipe_id === s.slot
+            && s.message.swipes?.[s.slot ?? 0] === s.swipe && JSON.stringify(s.message.extra?.rp_door) === s.door
+            && doorHandoffs([s.message], fallbackAvatar(ctx()))[0]?.revision === s.doorRevision;
+        const ready = [];
+        const newId = () => ctx().uuidv4?.() ?? crypto.randomUUID();
+        for (const s of shadows) try {
+            if (!atTip(s) || s.anchor.rpeManualRevision !== s.revision
+                || s.message.send_date !== s.sentAt
+                || fingerprintMessage(s.message, speakerOf(s.message)) !== s.fp) continue;
+            const { anchor, segment, message, ack, chatKey, chat, metadata, avatar, way } = s;
+            const trigger = ack.source_basis?.trigger, at = chat.length - 1;
+            if (trigger?.revision !== s.doorRevision) continue;
+            if (ack.at != null && ack.at !== at + 1 || ack.fp != null && ack.fp !== s.fp
+                || trigger && (trigger.pos != null && trigger.pos !== at || trigger.fp != null && trigger.fp !== s.fp
+                    || trigger.sw != null && trigger.sw !== (s.slot ?? 0)
+                    || trigger.sentAt != null && trigger.sentAt !== String(message.send_date ?? ''))) continue;
+            const generating = activeGeneration({ readOnly: true });
+            const capture = captureSegmentOpen({ chat, metadata, chatKey, avatar, way, opKey: newId() }, anchor, segment, message, { generating, newId });
+            if (capture?.event) ready.push({ s, capture });
+        } catch { /* 单卡异常只影响该卡的影子。 */ }
+        if (!ready.length) return;
+        const roster = await confirmManualLeave(ready[0].s.chatKey);
+        if (!roster?.every(ch => validAvatar(ch.avatar) && Object.hasOwn(ROLE_NOTES, ch.role))) return;
+        for (const { s, capture } of ready) try {
+            const [match, duplicate] = roster.filter(ch => ch.avatar === s.avatar || s.named && ch.name === s.name);
+            if (!match || duplicate || match.avatar !== s.avatar || match.name !== s.name || match.role === '不用' || !atTip(s)) continue;
+            const generating = activeGeneration({ readOnly: true });
+            writeSegmentOpen(capture, { result: s.result, roster, generating, publicationFailure: () => atTip(s) ? null : 'card-ineligible' });
+        } catch { /* 单卡异常只影响该卡的影子。 */ }
+    } catch { /* 影子确认不影响旧流程。 */ }
 }
 // 扩展自己改了群名单／静音以后：名单基线跟上，别把自己做的当成玩家做的
 function followBase() {
@@ -5545,6 +5689,12 @@ function refreshPlanStatus() {
     });
 }
 
+for (const event of panelMessageEvents) {
+    if (!eventTypes[event]) continue;
+    (eventSource.makeLast ?? eventSource.on).call(eventSource, eventTypes[event], () => {
+        state.panelMessageChangeEnd = (state.panelMessageChangeEnd ?? 0) + 1;
+    });
+}
 mountPanel();
 void backendConnection.check();
 loadExtensionRelease();
