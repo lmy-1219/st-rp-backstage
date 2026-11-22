@@ -56,6 +56,7 @@ export function dedupHistoryLines(lines) {
             const kept = uniqueSentences(main.slice(colon + 1));
             // 附属说明不能脱离正文；删空时整条原样留下。
             if (kept || tail) {
+                lines.keptIndices?.push(i - 1);
                 body.push(kept ? `· ${label}${kept}${tail}` : line);
             }
         }
@@ -63,11 +64,12 @@ export function dedupHistoryLines(lines) {
     }
     return out;
 }
-export function withHistoryContext(text, userName = '对方') {
+export function withHistoryContext(text, userName = '对方', markHint = null) {
     let added = false;
     return text.split('\n').map(line => {
         if (added || !historyHead(line)) return line;
-        added = true; return `${HISTORY_CONTEXT(userName)}\n${line}`;
+        const hint = HISTORY_CONTEXT(userName);
+        added = true; return `${markHint ? markHint(hint, line) : hint}\n${line}`;
     }).join('\n');
 }
 
@@ -149,7 +151,7 @@ export function lingerLines(records, { name, userName = null, dayOf, today, last
 // 没等到也有个头：轻的不给，明显的带三天，重的带一周（按这一局的单位折）。至多 AFTER_MAX 条：重的、近的先占，按先后排。tag(第几天, 今天)：日子的说法（timeTag）。
 export const AFTER_MAX = 3;
 const AFTER_DAYS = { 2: 3, 3: 7 };
-export function afterLines(records, { name, dayOf = () => 0, today = 0, lastPos = 0, timeScale = null, tag = null, recent = RECENT_WINDOW }) {
+export function afterLines(records, { name, dayOf = () => 0, today = 0, lastPos = 0, timeScale = null, tag = null, recent = RECENT_WINDOW, selected = null }) {
     const ts = scaleOf(timeScale);
     const keep = w => (ts.unit === '天' ? AFTER_DAYS[w] : Math.round(AFTER_DAYS[w] / ts.days));
     const rows = records.filter(r => r.type === '余波' && r.holder_name === name && !r.superseded_by && r.pos < lastPos - recent)
@@ -157,6 +159,7 @@ export function afterLines(records, { name, dayOf = () => 0, today = 0, lastPos 
         .filter(x => x.w > 1 && today - x.day <= keep(x.w));
     if (!rows.length) return [];
     const picked = rows.sort((a, b) => b.w - a.w || b.r.pos - a.r.pos).slice(0, AFTER_MAX).sort((a, b) => a.r.pos - b.r.pos);
+    if (selected) for (const { r } of picked) selected.push(r);
     const when = x => (tag ? tag(x.day, today, x.r.pos) : dayWord(today - x.day, timeScale) || ts.this);
     const until = x => (x.r.relation?.until ? `（当时记下的：要等到${x.r.relation.until}）` : '');
     return [`${name}当时记下的余波：`,

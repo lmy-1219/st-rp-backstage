@@ -508,6 +508,12 @@ function playOptions(store, chatKey, opts) {
     return playModeOf(store, chatKey) === 'memory' ? { ...opts, contacts: { enabled: false }, absence: { ...opts.absence, mode: 'pause' }, planner: { record: false }, situation: null, drift: { prices: false, long: false } } : opts;
 }
 const fullPlay = (store, chatKey) => playModeOf(store, chatKey) === 'full';
+const declaredCard = (groups, speaker) => speaker !== CAMERA && groups.some(g => g.卡.includes(speaker));
+function stripNul(out) {
+    const clean = text => text.replaceAll('\0', '');
+    out.text = clean(out.text);
+    for (const key of Object.keys(out.parts ?? {})) out.parts[key] = clean(out.parts[key]);
+}
 const canWitness = stance => !stance || stance.status === 'present';
 export async function composeSlot(store, records, args, opts = {}) {
     const { chatKey, speaker, speakerName } = args;
@@ -536,11 +542,12 @@ export async function composeSlot(store, records, args, opts = {}) {
     const guard = bodyGuardFor(store, records, chatKey, { anchor: args.anchor ?? null, recentUser: args.recentUser ?? '', knower: camera ? userName : speakerName || speaker, userName,
         speaker: args.speaker, absence: opts.absence ?? null, camera, carry: (opts.mood ?? {}).carry !== false });
     const scene = slotScene(store, records, args);
-    const groups = camera && store.cachedDeclarations ? declarationGroupsOf(store, chat.story_id) : [];
-    const withoutKnowledge = groups.length ? {} : null;
+    const groups = store.cachedDeclarations ? declarationGroupsOf(store, chat.story_id) : [];
+    const withoutKnowledge = camera && groups.length ? {} : null;
+    const protectAfter = declaredCard(groups, speaker);
     const base = await memorySlot(store, records, eyes, { ...opts, skipOpen: promised?.shownIds ?? null, pendingLedger, scale: fit.s, episodes: store.episodesOf?.(chatKey) ?? [], guard }, withoutKnowledge);
     const backstoryPick = await backstorySense(store, chatKey, args.recentUser, opts.vectors);
-    const { lines: extra, blocks = null, contact, carry = [], linger = [], dayOf: seenDayOf = null, historyTimeline, stance = null } = extrasFor(store, records, eyes, { ...opts, pendingAway: pending, pendingLedger, backstoryPick, promised, guard, scene }, base);
+    const { lines: extra, blocks = null, contact, carry = [], linger = [], dayOf: seenDayOf = null, historyTimeline, stance = null } = extrasFor(store, records, eyes, { ...opts, pendingAway: pending, pendingLedger, backstoryPick, promised, guard, scene, protectAfter }, base);
     const name = camera ? CAMERA_NAME : speakerName || speaker;
     // 隔着消息、电话的人没"进门"：旧事那段开头那句换成人不在这儿（试玩 10/13：他发消息来，场记写他刚到场、进门之前的事没看见）
     if (stance && base?.text && !['present', 'arrived'].includes(stance.status)) base.text = base.text.split('\n').map(l => l.startsWith(`${name}刚到场。`) ? stance.status === 'remote' ? `${name}这会儿隔着${stance.way || '消息／电话'}，人不在这儿；这里之前发生的事、说过的话，${name}没看见也没听见，除非有人告诉过${name}。` : `${name}人不在这儿；在场情况没有确认。` : l).join('\n');
@@ -611,9 +618,13 @@ export async function composeSlot(store, records, args, opts = {}) {
     for (const p of all) if (kept.has(p)) {
         p.lines = dedupHistoryLines(p.lines);
     }
-    const token = opts.recordReplay ? crypto.randomUUID() : null;
-    const mark = (line, kind) => line && token ? line.replace(/^(· |)/gm, (_, bullet) => bullet + token + kind) : line;
-    const rowsOf = blocks => blocks.flatMap(p => p.scope?.description ? p.lines.map(line => mark(line, 0)) : p.lines);
+    const aftermath = protectAfter && all.find(p => p.aftermath && kept.has(p))?.aftermath;
+    // 与回放标记共用成品位置：3 为禁行，4 为标题，5 为放行。
+    const afterKinds = aftermath && [4, ...aftermath.indices.map(i => ownAftermath(aftermath.selected[i - 1], speaker) ? 5 : 3)];
+    const token = opts.recordReplay || afterKinds ? crypto.randomUUID() : null;
+    const mark = (line, kind) => line && token && (kind >= 3 || opts.recordReplay) ? line.replace(/^(· |)/gm, (_, bullet) => bullet + token + kind) : line;
+    const rowsOf = blocks => blocks.flatMap(p => afterKinds && p.aftermath ? p.lines.map((line, i) => mark(line, afterKinds[i]))
+        : p.scope?.description ? p.lines.map(line => mark(line, 0)) : p.lines);
     const more = rowsOf(all.filter(p => kept.has(p)));
     const out = { ...base, contact: chosen?.candidate.kind === 'contact' && kept.has(chosen) ? contact : null, carry, room: fit, blocks: all.filter(p => kept.has(p)).map(({ tier, lines, place, scope }) => ({ tier, lines, place, scope: scope?.description ?? scope })), text: !more.length ? base.text : base.text ? `${base.text}\n${more.join('\n')}` : finish(base.material.name, more, token ? text => stripReplayMarks(text, token).length : undefined) };
     // 场次摘要（N-284）：问起哪天的、玩家这句正冲着的旧账落在哪场——那几场的经过整段给；另算长度，不和别的抢地方，不参与让位
@@ -659,23 +670,56 @@ export async function composeSlot(store, records, args, opts = {}) {
             now: block('now', [...linesOf('now'), ...tail]),
         };
     }
-    out.text = withHistoryContext(out.text, userName);
+    const afterMark = afterKinds && afterMarkPattern(token);
+    const history = text => withHistoryContext(text, userName, afterMark ? (hint, line) => {
+        const kind = afterMark.exec(line)?.[1];
+        return kind ? mark(hint, kind) : hint;
+    } : null);
+    out.text = history(out.text);
     let partsChecked = 0;
     if (out.parts) {
         let added = false;
         for (const key of Object.keys(out.parts)) {
             if (added) break;
-            const text = withHistoryContext(out.parts[key], userName);
+            const text = history(out.parts[key]);
             partsChecked++;
             added = text !== out.parts[key]; out.parts[key] = text;
         }
     }
     cutCameraKnowledge(out, withoutKnowledge?.text, base.text, cameraDef, userName, partsChecked);
-    if (token) out.replay = { text: takeReplayMarks(out, token), now: out.parts?.now ? takeReplayMarks(out.parts, token) : null };
+    if (afterKinds) {
+        const index = all.filter(p => kept.has(p)).findIndex(p => p.aftermath);
+        if (afterKinds.includes(5)) out.blocks[index].lines = out.blocks[index].lines.filter((_, i) => afterKinds[i] !== 3);
+        else out.blocks.splice(index, 1);
+        out.text = cutAftermath(out.text, token);
+        if (out.parts) out.parts.now = cutAftermath(out.parts.now, token);
+    }
+    // SQLite TEXT 在 NUL 处截断。声明卡定稿时先清理，再按同一份正文记录回放位置。
+    if (protectAfter) stripNul(out);
+    if (opts.recordReplay) out.replay = {
+        text: takeReplayMarks(out, token), now: out.parts?.now ? takeReplayMarks(out.parts, token) : null,
+        ...(protectAfter ? { clean: true } : {}),
+    };
     if (pending) out.final = false;   // 推演还没回来：这一格先不钉住，左滑重来时能用上推好的
     // final 只决定这格能否缓存；程序回退和等待推演时的文字同样已经交给前台。
     for (const p of all) if (kept.has(p) && (p === chosen || p.candidate?.carry)) p.candidate?.commit?.();
     return out;
+}
+
+function ownAftermath(r, speaker) {
+    if (r.holder !== speaker || r.job_id == null || r.idea_ref != null || r.source_basis != null
+        || !r.raw_text?.trim() || r.text !== r.raw_text) return false;
+    const [part, ...rest] = recordParts(r);
+    return !rest.length && part?.text === r.raw_text && part.sources.length === 1 && part.sources[0] === r;
+}
+
+const afterMarkPattern = token => new RegExp(token + '([345])');
+// 排版已完成：标记覆盖每条的续行及附在组件上的历史提示。
+function cutAftermath(text, token) {
+    const rows = text.split('\n');
+    const keepHead = rows.some(row => row.includes(token + '5'));
+    return rows.filter(row => !row.includes(token + '3') && (keepHead || !row.includes(token + '4')))
+        .join('\n').replace(new RegExp(token + '[45]', 'g'), '');
 }
 
 // 按基线完成排版后再切掉知情块，落在块内的历史提示随块一起去掉。
@@ -1118,7 +1162,7 @@ function staleMindReasons(store, planId) {
         return Array.isArray(stale) ? stale : [];
     } catch { return []; }
 }
-function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { economy = null, contacts = null, absence = null, planner = null, world = null, factions = null, situation = null, pendingAway = false, pendingLedger = null, slot = null, backstoryPick = null, drift = null, promised = null, pace = null, mood = null, guard: given = null, scene = null }, base) {
+function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { economy = null, contacts = null, absence = null, planner = null, world = null, factions = null, situation = null, pendingAway = false, pendingLedger = null, slot = null, backstoryPick = null, drift = null, promised = null, pace = null, mood = null, guard: given = null, scene = null, protectAfter = false }, base) {
     const drama = fullPlay(store, chatKey);
     const ts = scaleFor(store, chatKey);   // 这一局的时间尺度（章程 G2）
     // 她的身子她说了算（bodyGuardFor）：记账来的几块（规矩、心里没过去的、生活现状、碰上了／来意、还想知道的）拿 fed，不拿 visible
@@ -1523,7 +1567,15 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     }
 
     // 余波（方案"场记的分量与连续性"D 层）：他心里还没过去的那股劲，紧挨此刻的样子之前；和刚递到手上的同一档，不让位
-    if (!camera && mood?.carry !== false) add(0, afterLines(fed, { name, dayOf: seenDayOf, today: seenToday, lastPos, timeScale: ts, tag: (day, today, pos) => historyTime(historyTimeline, pos, { day, today }) }), 'now', 'person');
+    if (!camera && mood?.carry !== false) {
+        const selected = protectAfter ? [] : null;
+        const after = afterLines(fed, { name, dayOf: seenDayOf, today: seenToday, lastPos, timeScale: ts, tag: (day, today, pos) => historyTime(historyTimeline, pos, { day, today }), selected });
+        add(0, after, 'now', 'person');
+        if (selected?.length) {
+            after.keptIndices = [];
+            blocks.at(-1).aftermath = { selected, indices: after.keptIndices };
+        }
+    }
     // 此刻的样子（用户 9/30）：聊天里写到过的穿着、位置、天气……只给在场的人（开口的人、玩家）；每轮都带，没写到就没有
     add(0, stateBlock(store, { chatKey, name, present, userName, rosterNames, rel, dayOf: seenDayOf, today: seenToday, records, anchor, scene, keepNote: guard.keepNote }), 'now', Symbol('moment'));
     // 此刻能做的（场记章程第二节第 5 条、B3）：隔着电话／消息、刚到、就在这儿，各几样可以做的，由他挑——不写该做什么、不写对方会怎样。只给有卡的人，旁白不给
@@ -2560,7 +2612,7 @@ function swapState(text, lines) {
     }
     return lines.length ? [...kept.filter((l, i) => l || i < kept.length - 1), ...lines].join('\n') : kept.join('\n');
 }
-const stripReplayMarks = (text, token) => text.replace(new RegExp(token + '[012]', 'g'), '');
+const stripReplayMarks = (text, token) => text.replace(new RegExp(token + '[0-5]', 'g'), '');
 function takeReplayMarks(target, token, key = Object.hasOwn(target, 'text') ? 'text' : 'now') {
     const rows = target[key].split('\n');
     const has = kind => row => row.includes(token + kind);
@@ -2568,6 +2620,8 @@ function takeReplayMarks(target, token, key = Object.hasOwn(target, 'text') ? 't
     target[key] = stripReplayMarks(target[key], token);
     return { state: span(0, 0), vary: span(1, span(2, rows.length)[0]) };
 }
+const validReplayRanges = (text, ranges) => typeof text === 'string' && [ranges?.state, ranges?.vary].every(r => Array.isArray(r) && r.length === 2
+    && r.every(i => Number.isSafeInteger(i) && i >= 0 && i <= text.split('\n').length) && r[0] <= r[1]) && ranges.state[1] <= ranges.vary[0];
 function swapRecorded(text, { state: [start, end], vary: [at, after] }, lines, vary) {
     const rows = text.split('\n').toSpliced(start, end - start);
     if (lines.length && rows.at(-1) === '') rows.pop();
@@ -2589,7 +2643,9 @@ function refreshPinned(store, records, { chatKey, speaker, speakerName, present,
     if (!lines.length && !vary && !hasOld) return { text, parts };
     const swap = (t, ranges) => ranges ? swapRecorded(t, ranges, lines, vary) : swapVary(swapState(t, lines), vary);
     const nextParts = parts ? { ...parts, now: parts.now ? swap(parts.now, replay?.now) : lines.length || vary ? soften([HEADS.now(name), ...lines, ...(vary ? [vary] : [])].join('\n')) : '' } : parts;
-    return { text: swap(text, replay?.text), parts: nextParts };
+    const out = { text: swap(text, replay?.text), parts: nextParts };
+    if (replay?.clean === true) stripNul(out);
+    return out;
 }
 
 // 这一局的时间尺度（章程 G2）：开局单"时间"那一格的"尺度"；没写就是天。
@@ -3838,9 +3894,12 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     const pinned = store.getSlot({ chatKey, speaker, anchor, ver: version });
     if (pinned !== null) {
         const { parts = null, replay = null } = store.getSlotParts?.({ chatKey, speaker, anchor, withReplay: true }) ?? {};
-        const again = chat.test_slot ? { text: pinned, parts } : refreshPinned(store, records, { chatKey, speaker, speakerName, present, anchor }, pinned, parts, { fresh, pace, replay });
-        if (versionNow() === version) return { ...shape(again.text, again.parts), pinned: true };
-        return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
+        const rebuild = speaker !== CAMERA && !chat.test_slot
+            && (!validReplayRanges(pinned, replay?.text) || (parts?.now && !validReplayRanges(parts.now, replay?.now)))
+            && store.cachedDeclarations && declaredCard(declarationGroupsOf(store, chat.story_id), speaker);
+        const again = rebuild ? null : chat.test_slot ? { text: pinned, parts } : refreshPinned(store, records, { chatKey, speaker, speakerName, present, anchor }, pinned, parts, { fresh, pace, replay });
+        if (again && versionNow() === version) return { ...shape(again.text, again.parts), pinned: true };
+        if (again) return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
     }
     const key = `${chatKey}\u0001${speaker}\u0001${anchor}\u0001${version}`;
     if (!inflight.has(key)) {

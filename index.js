@@ -638,7 +638,7 @@ const declarationCardLabel = (cards, id) => cards.has(id) ? cards.get(id) + '（
 function declarationPanelHtml(cards, groups) {
     if (!groups.length) return '无声明';
     return groups.map(g => `<p><b>${escapeHtml(g.类型)}</b> · ${escapeHtml(g.卡.map(id => declarationCardLabel(cards, id)).join('、'))}</p>`).join('')
-        + '<p>声明后，旁白替无卡人物回忆时不再给出人物知情（包括别人的事）；角色旧事、原话、余波、地点等仍可能串知。</p>';
+        + '<p>声明后，声明卡的余波只给它自己记下的那几条；主旧事、原话、地点等仍可能串知。</p>';
 }
 function declarationGroupHtml(cards, selected = []) {
     const choices = [...new Set([...selected, ...cards.keys()])].map(id =>
