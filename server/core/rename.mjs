@@ -1,11 +1,12 @@
 // 角色改名：卡换了名字，头像文件名跟着换；ST 会把旧消息上的署名、头像一起改掉。
 // 后台认一条消息靠"谁说的（头像文件名）＋说了什么"的指纹，改名以后这个人说过的每条都成了"没见过的新消息"：
 // 记账、钉住的格子、余波、离开、规划全对不上，还会整段重抽。
-// 这里把后台里这个人的旧头像名、旧名字、旧指纹一起换成新的——每张表每一格字都过一遍，不挑表，免得漏。
+// 这里把后台里这个人的旧头像名、旧名字、旧指纹一起换成新的——逐表查找要替换的文字。
 // 要在 ST 改名之前停掉后台、改完名再换、换完再开：中间要是同步进来了新指纹，就不动，让调用方先处理。
 import { fingerprint } from './store.mjs';
 
 const FP = /\b[0-9a-f]{32}\b/g;
+const RENAME_EXCLUDED_TABLES = new Set(['card_groups']); // 声明绑定确切的 avatar 文件名，保留缺卡供用户重选。
 
 export function renameSpeaker(db, { fromAvatar, toAvatar, fromName, toName }) {
     if (!fromAvatar || !toAvatar || !fromName || !toName) throw new Error('rename_needs_both_names');
@@ -25,7 +26,7 @@ export function renameSpeaker(db, { fromAvatar, toAvatar, fromName, toName }) {
         if (out.includes(fromName)) out = out.split(fromName).join(toName);
         return out;
     };
-    const tables = db.prepare("select name from sqlite_master where type = 'table' and name not like 'sqlite_%'").all().map(t => t.name);
+    const tables = db.prepare("select name from sqlite_master where type = 'table' and name not like 'sqlite_%'").all().map(t => t.name).filter(name => !RENAME_EXCLUDED_TABLES.has(name));
     const changed = {};
     db.exec('begin');
     try {

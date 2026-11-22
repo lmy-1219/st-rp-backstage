@@ -221,6 +221,8 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
     return {
         // code：这个进程是用哪个版本的代码起来的（插件开 ST 时拿它和磁盘上的比，D-163）
         'GET /v1/health': () => ({ ok: true, version: VERSION, code: settings().code ?? null }),
+        'POST /v1/declarations': b => store.declarationsOf(b.story),
+        'POST /v1/declarations-save': b => store.putDeclarations(b.story, b.groups, b.version),
         'POST /v1/camera-card': () => cameraCardPrompt(),
         'POST /v1/join': b => {
             const r = store.join({
@@ -1282,7 +1284,8 @@ export function dispatchRequest(store, routes, name, body, headers = {}) {
     const key = body.chatKey ?? body.sourceChatKey;
     if (key != null && window?.groupId === false) mismatch();
     if (operation === 'absence' && body.mode !== undefined && body.chatKey == null) mismatch();
-    if (tool || globalRoutes.has(operation)) return route(body);
+    const declaration = operation === 'declarations' || operation === 'declarations-save';
+    if ((tool && !declaration) || globalRoutes.has(operation)) return route(body);
     if (operation === 'handoff' || operation === 'plan-submit' || (operation === 'advise' && body.planId != null)) mismatch();
     if (key == null && (
         (operation === 'preset' && body.apply === undefined && body.save === undefined)
@@ -1294,6 +1297,7 @@ export function dispatchRequest(store, routes, name, body, headers = {}) {
     const chat = store.requireChat(str(operation === 'handoff-ui' ? key : body.chatKey, 'chatKey'));
     if (!window || typeof window !== 'object' || Array.isArray(window) || typeof window.stChatId !== 'string' || !window.stChatId
         || window.stChatId !== chat.st_chat_id || window.groupId !== (chat.group_id || null)) mismatch();
+    if (declaration && body.story !== chat.story_id) mismatch();
     return route(body);
 }
 

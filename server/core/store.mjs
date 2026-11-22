@@ -105,6 +105,8 @@ export const validMark = k => typeof k === 'string' && k !== '' && DAY_MARK.test
 const SCHEMA = `
 create table if not exists stories(
   id text primary key, label text, created_at text not null);
+create table if not exists card_groups(
+  story_id text primary key, data text not null, version integer not null, updated_at text not null);
 create table if not exists chats(
   key text primary key, story_id text not null references stories(id), parent_key text,
   st_chat_id text, group_id text, label text,
@@ -238,6 +240,30 @@ export function diffSequences(oldFps, newFps) {
     return { added, removed };
 }
 
+const DECLARATION_TYPE = '同一人不同经历';
+const EMPTY_DECLARATIONS = Object.freeze({ groups: Object.freeze([]), version: 0 });
+const declarationError = message => Object.assign(new Error('人物关系声明：' + message), { status: 400 });
+function validateDeclarations(value, stored = false) {
+    if (!Array.isArray(value)) throw declarationError('须填写组列表，清空请用 []');
+    const seen = new Set();
+    return Array.from(value, group => {
+        if (['不同人、认知共享', '不同人认知共享', '认知共享'].includes(group?.类型)) throw declarationError('「不同人、认知共享」下一单支持');
+        if (group?.类型 !== DECLARATION_TYPE) throw declarationError('只接受「同一人不同经历」');
+        if (!Array.isArray(group.卡) || Array.from(group.卡).some(id => typeof id !== 'string' || !/^[^<>:"/\\|?*\x00-\x1f]+\.(png|webp|jpe?g|gif)$/i.test(id)))
+            throw declarationError('请填写确切的卡文件名');
+        const 卡 = [...new Set(group.卡)];
+        if (卡.length < 2) throw declarationError('每组至少选两张不同的卡');
+        if (stored && 卡.length !== group.卡.length) throw declarationError('已存组内有重复卡');
+        if (卡.some(id => seen.has(id))) throw declarationError('各组有重叠的卡，请整理后再保存');
+        for (const id of 卡) seen.add(id);
+        return Object.freeze({ 类型: DECLARATION_TYPE, 卡: Object.freeze(卡) });
+    });
+}
+
+export function declarationGroupsOf(store, story) {
+    return store.cachedDeclarations(story).groups;
+}
+
 export function openStore(file) {
     const db = new DatabaseSync(file);
     let confirmedDayOf = null, confirmedDaysOf = null, confirmedPointOf = null;
@@ -346,6 +372,37 @@ export function openStore(file) {
         slot.map.set(key, v);
         return copy(v);
     };
+    const declarationRow = story => q('select data, version from card_groups where story_id = ?').get(story);
+    function readDeclarations(story) {
+        const row = declarationRow(story);
+        if (!row) return EMPTY_DECLARATIONS;
+        try {
+            const groups = validateDeclarations(JSON.parse(row.data), true);
+            if (!Number.isSafeInteger(row.version) || row.version < 1) throw Error('版本无效');
+            return Object.freeze({ groups: groups.length ? Object.freeze(groups) : EMPTY_DECLARATIONS.groups, version: row.version });
+        } catch (error) { throw new Error('已存人物关系声明损坏：' + error.message, { cause: error }); }
+    }
+    let declarationGeneration = 0;
+    const declarationCache = new Map();
+    function cachedDeclarations(story) {
+        if (db.isTransaction) return readDeclarations(story);
+        const cached = declarationCache.get(story);
+        if (cached?.generation === declarationGeneration) return cached.value;
+        const value = readDeclarations(story);
+        declarationCache.set(story, { generation: declarationGeneration, value });
+        return value;
+    }
+    function putDeclarations(story, groups, version) {
+        const saved = tx(() => {
+            if (version !== (declarationRow(story)?.version ?? 0))
+                throw Object.assign(new Error('另一页已改过人物关系声明，请重新打开'), { status: 409 });
+            groups = validateDeclarations(groups);
+            q('insert or replace into card_groups(story_id, data, version, updated_at) values (?, ?, ?, ?)').run(story, JSON.stringify(groups), version + 1, now());
+            return { groups, version: version + 1 };
+        });
+        declarationGeneration++;
+        return saved;
+    }
     const copyArr = a => [...a];
     const getChat = q('select * from chats where key = ?');
     const castByStory = q(`select c.avatar, c.name, c.gender, c.role, c.hook, c.priority, c.bond, c.set_by, c.call, c.stranger, c.is_group, coalesce(c.interests, p.text) interests, c.interests is not null interests_own
@@ -755,9 +812,11 @@ export function openStore(file) {
     }
     // 没钉住的那一格给了什么（ver＝given：getSlot 不当钉住的用；getSlotParts、recentSlotIds 照样读得到）
     function putGiven({ chatKey, speaker, anchor, text, ids = null, parts = null }) { putSlot({ chatKey, speaker, anchor, text, ids, parts, ver: 'given' }); }
-    function getSlotParts({ chatKey, speaker, anchor }) {
+    function getSlotParts({ chatKey, speaker, anchor, withReplay = false }) {
         const r = q('select parts from slots where chat_key = ? and speaker = ? and anchor = ?').get(chatKey, speaker, anchor);
-        try { return r?.parts ? JSON.parse(r.parts) : null; } catch { return null; }
+        const saved = fromJson(r?.parts);
+        const slot = saved?.replay ? saved : { parts: saved };
+        return withReplay ? slot : slot.parts;
     }
 
     // 这一格留下的余波（钉没钉住都记；同一格重组一次就换成新的，没有就删掉）。
@@ -1747,5 +1806,6 @@ export function openStore(file) {
     }
 
     setSourceContext(db, chatKey => ({ limits: historyOf(chatKey).limits, dependencies: (basis, options) => memo('arrival_dependencies', JSON.stringify([chatKey, basis, options.rawBasis ?? false, options.through ?? null]), () => arrivalDependencies(chatKey, basis, options)) }));
-    return { deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+    return { declarationsOf: readDeclarations, cachedDeclarations, putDeclarations,
+        deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

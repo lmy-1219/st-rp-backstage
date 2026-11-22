@@ -674,11 +674,11 @@ export function renderOpen({ name, open, when, who }) {
     ];
 }
 
-export function finish(name, lines) {
+export function finish(name, lines, renderedLength = text => text.length) {
     if (!lines.length) return '';
     const head = `以下是${name}自己知道、此刻可能用得上的事，只供参考：\n`;
     let text = head + lines.join('\n');
-    while (text.length > SOFT_CHARS && lines.filter(l => l.startsWith('· ')).length > 1) {
+    while (renderedLength(text) > SOFT_CHARS && lines.filter(l => l.startsWith('· ')).length > 1) {
         lines.splice(lines.findIndex(l => l.startsWith('· ')), 1);
         text = head + lines.join('\n');
     }

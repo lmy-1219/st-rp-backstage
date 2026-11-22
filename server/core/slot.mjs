@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { selectMaterial, renderPlain, finish, dayIndex, relativeDay, timeSkipIn, expiredTodo, placeRecall, faceRecall, recordKnownTo } from './recall.mjs';
 import { isPrivate } from './visibility.mjs';
+import { declarationGroupsOf } from './store.mjs';
 import { renderNarrative, narrativeState } from './assemble.mjs';
 import { matchPrices, priceLines, talksMoney, talksJobs, tiersNamed, tierPrice, standingLines, scopeOf, planPriceLines, matchHousing, housingLines } from './pricing.mjs';
 import { buildLedger, moneyLines, amountsIn, balanceLines, balances, namedParties } from './money.mjs';
@@ -535,7 +536,9 @@ export async function composeSlot(store, records, args, opts = {}) {
     const guard = bodyGuardFor(store, records, chatKey, { anchor: args.anchor ?? null, recentUser: args.recentUser ?? '', knower: camera ? userName : speakerName || speaker, userName,
         speaker: args.speaker, absence: opts.absence ?? null, camera, carry: (opts.mood ?? {}).carry !== false });
     const scene = slotScene(store, records, args);
-    const base = await memorySlot(store, records, eyes, { ...opts, skipOpen: promised?.shownIds ?? null, pendingLedger, scale: fit.s, episodes: store.episodesOf?.(chatKey) ?? [], guard });
+    const groups = camera && store.cachedDeclarations ? declarationGroupsOf(store, chat.story_id) : [];
+    const withoutKnowledge = groups.length ? {} : null;
+    const base = await memorySlot(store, records, eyes, { ...opts, skipOpen: promised?.shownIds ?? null, pendingLedger, scale: fit.s, episodes: store.episodesOf?.(chatKey) ?? [], guard }, withoutKnowledge);
     const backstoryPick = await backstorySense(store, chatKey, args.recentUser, opts.vectors);
     const { lines: extra, blocks = null, contact, carry = [], linger = [], dayOf: seenDayOf = null, historyTimeline, stance = null } = extrasFor(store, records, eyes, { ...opts, pendingAway: pending, pendingLedger, backstoryPick, promised, guard, scene }, base);
     const name = camera ? CAMERA_NAME : speakerName || speaker;
@@ -608,8 +611,11 @@ export async function composeSlot(store, records, args, opts = {}) {
     for (const p of all) if (kept.has(p)) {
         p.lines = dedupHistoryLines(p.lines);
     }
-    const more = all.filter(p => kept.has(p)).flatMap(p => p.lines);
-    const out = { ...base, contact: chosen?.candidate.kind === 'contact' && kept.has(chosen) ? contact : null, carry, room: fit, blocks: all.filter(p => kept.has(p)).map(({ tier, lines, place, scope }) => ({ tier, lines, place, scope })), text: !more.length ? base.text : base.text ? `${base.text}\n${more.join('\n')}` : finish(base.material.name, more) };
+    const token = opts.recordReplay ? crypto.randomUUID() : null;
+    const mark = (line, kind) => line && token ? line.replace(/^(· |)/gm, (_, bullet) => bullet + token + kind) : line;
+    const rowsOf = blocks => blocks.flatMap(p => p.scope?.description ? p.lines.map(line => mark(line, 0)) : p.lines);
+    const more = rowsOf(all.filter(p => kept.has(p)));
+    const out = { ...base, contact: chosen?.candidate.kind === 'contact' && kept.has(chosen) ? contact : null, carry, room: fit, blocks: all.filter(p => kept.has(p)).map(({ tier, lines, place, scope }) => ({ tier, lines, place, scope: scope?.description ?? scope })), text: !more.length ? base.text : base.text ? `${base.text}\n${more.join('\n')}` : finish(base.material.name, more, token ? text => stripReplayMarks(text, token).length : undefined) };
     // 场次摘要（N-284）：问起哪天的、玩家这句正冲着的旧账落在哪场——那几场的经过整段给；另算长度，不和别的抢地方，不参与让位
     const episode = camera || opts.episodes === false ? '' : soften(episodeBlock(store, records, chatKey, { name, text: args.recentUser, hits: episodeHits(base.material), messages, roster: (store.getCast?.(chat.story_id) ?? []).map(e => e.name), cap: Math.round(EPISODE_CHARS * fit.s), count: Math.min(5, Math.max(1, Math.round(2 * fit.s))) }).join('\n'));
     if (episode) out.text = out.text ? `${out.text}\n${episode}` : episode;
@@ -628,7 +634,7 @@ export async function composeSlot(store, records, args, opts = {}) {
     // 给前台的那一句口味：这一轮对用户这句话怎么接，由前台当场定。
     say(mood.cue && !camera ? cueLine({ name, userName: userName ?? '对方', recentUser: args.recentUser }) : null);
     // 他用滥的路数、最近两条的模子、上一条的复述开头，合成一句（varyFor）
-    say(varyFor(store, { chatKey, speaker, name, userName, messages: uptoAnchor(messages, args.anchor), fresh: opts.fresh, pace: opts.pace }));
+    say(mark(varyFor(store, { chatKey, speaker, name, userName, messages: uptoAnchor(messages, args.anchor), fresh: opts.fresh, pace: opts.pace }), 1));
     // 往下接（pace.mjs）：用户只应了一声，别把上一段再演一遍；他上一段问了不在场的人话，别干等。
     if (opts.pace?.enabled !== false && !camera) {
         const names = (store.getCast?.(chat.story_id) ?? []).map(e => e.name);
@@ -639,11 +645,11 @@ export async function composeSlot(store, records, args, opts = {}) {
         if (taken.remote || canWitness(stance)) say(takenLine(taken));
     }
     // 这一条的范围（用户 10/2，横向生长）：只写眼前这几分钟，停在对方能接的地方；对方没动，场面不挪、时间不跳。放在最末。
-    if (opts.pace?.scope !== false && opts.pace?.lateral !== false && !camera) say(scopeLine({ userName: userName ?? '对方' }));
+    if (opts.pace?.scope !== false && opts.pace?.lateral !== false && !camera) say(mark(scopeLine({ userName: userName ?? '对方' }), 2));
     if (camera) out.text = out.text ? `${cameraDef}\n${out.text}` : cameraDef;   // 整格（预览、不分块时）也带定义
     if (out.text) out.text = soften(out.text);
     if (split && out.text) {
-        const linesOf = place => all.filter(p => kept.has(p) && (p.place ?? 'now') === place).flatMap(p => p.lines);
+        const linesOf = place => rowsOf(all.filter(p => kept.has(p) && (p.place ?? 'now') === place));
         const block = (place, lines) => (lines.length ? soften([HEADS[place](name), ...lines].join('\n')) : '');
         const recall = [base.text, ...linesOf('recall')].filter(Boolean);
         out.parts = {
@@ -654,18 +660,39 @@ export async function composeSlot(store, records, args, opts = {}) {
         };
     }
     out.text = withHistoryContext(out.text, userName);
+    let partsChecked = 0;
     if (out.parts) {
         let added = false;
         for (const key of Object.keys(out.parts)) {
             if (added) break;
             const text = withHistoryContext(out.parts[key], userName);
+            partsChecked++;
             added = text !== out.parts[key]; out.parts[key] = text;
         }
     }
+    cutCameraKnowledge(out, withoutKnowledge?.text, base.text, cameraDef, userName, partsChecked);
+    if (token) out.replay = { text: takeReplayMarks(out, token), now: out.parts?.now ? takeReplayMarks(out.parts, token) : null };
     if (pending) out.final = false;   // 推演还没回来：这一格先不钉住，左滑重来时能用上推好的
     // final 只决定这格能否缓存；程序回退和等待推演时的文字同样已经交给前台。
     for (const p of all) if (kept.has(p) && (p === chosen || p.candidate?.carry)) p.candidate?.commit?.();
     return out;
+}
+
+// 按基线完成排版后再切掉知情块，落在块内的历史提示随块一起去掉。
+function cutCameraKnowledge(out, keptBase, baseText, cameraDef, userName, partsChecked) {
+    if (keptBase == null || keptBase === baseText) return;
+    const history = text => withHistoryContext(text, userName);
+    const cut = (text, before, through, format) => {
+        const prefix = text.slice(0, format(soften(before)).length);
+        const rest = text.slice(format(soften(through)).length + 1);
+        return [prefix, rest].filter(Boolean).join('\n');
+    };
+    out.text = cut(out.text, [cameraDef, keptBase].filter(Boolean).join('\n'), `${cameraDef}\n${baseText}`, history);
+    if (out.parts) {
+        const format = partsChecked > Object.keys(out.parts).indexOf('recall') ? history : text => text;
+        const recall = cut(out.parts.recall, keptBase ? wrap(keptBase) : '', wrap(baseText), format);
+        out.parts.recall = keptBase || !recall ? recall : wrap(recall);
+    }
 }
 
 // 按事挑那几场经过时，旧账的先后：用户那句里在说以前的那一句（"之前……的时候""你说过"），它最对得上的那条在最前；
@@ -881,7 +908,7 @@ export function cameraKnowledgeLines({ roster, board, visible = [], rel = null, 
 // 叙事组装限时（D-100：前台速度是用户的硬要求；实测配检索词＋组装一般 16 秒、慢时近 30 秒）：从这里起至多等 assembler.budgetMs，
 // 到点先给纯程序那一格、不钉住；配词和组装照旧在后台跑完，结果留在 ahead 里，左滑重来时直接用上。
 // 后开口的人多半已经提前组装好（prefetchOthers），不用等。
-async function memorySlot(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { assembler = null, keyMaker = null, vectors = null, skipOpen = null, pendingLedger = null, scale = 1, episodes = [], guard = null, recallCache = {} }) {
+async function memorySlot(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { assembler = null, keyMaker = null, vectors = null, skipOpen = null, pendingLedger = null, scale = 1, episodes = [], guard = null, recallCache = {} }, withoutKnowledge = null) {
     const name = speakerName || speaker;
     // 异步配词、组装期间玩家可能纠正；迟到的结果只留在开始时的版本里。
     const recallKey = recallKeyFor(store, records, chatKey, speaker, recentUser, correctionRev(store, chatKey), recallTimeKey(store, records, chatKey, recallCache), recallCache);
@@ -912,6 +939,8 @@ async function memorySlot(store, records, { chatKey, speaker, speakerName, ancho
         const recallText = rows.length ? ['上次在这儿：', ...rows].join('\n') : '';
         const people = cameraFaceLines({ roster, board, messages, player, rel, setup: store.setupOf(storyId)?.data, current: relationsNow(store, chatKey, rel, visible, roster.map(e => e.name)) });
         const text = [recallText, people, knowledge].filter(Boolean).join('\n');
+        // 先照基线选地点并占预算，交付时整块省去人物知情。
+        if (withoutKnowledge) withoutKnowledge.text = [recallText, people].filter(Boolean).join('\n');
         return { text, final: true, mode: 'place', ids: [], material: { name, hits: [], state: [], open: [], pool: [], lessons: [], when, who: () => '' }, queryKeys: [] };
     }
     // 事账说关了的不再当"惦记着、问过没回音"给：有回音、失效的要求；关了的约定（没关的远期约定照旧在"惦记着"里，约定那块只给今天、过了时候的）；钱、规矩各归各的块
@@ -1496,7 +1525,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 余波（方案"场记的分量与连续性"D 层）：他心里还没过去的那股劲，紧挨此刻的样子之前；和刚递到手上的同一档，不让位
     if (!camera && mood?.carry !== false) add(0, afterLines(fed, { name, dayOf: seenDayOf, today: seenToday, lastPos, timeScale: ts, tag: (day, today, pos) => historyTime(historyTimeline, pos, { day, today }) }), 'now', 'person');
     // 此刻的样子（用户 9/30）：聊天里写到过的穿着、位置、天气……只给在场的人（开口的人、玩家）；每轮都带，没写到就没有
-    add(0, stateBlock(store, { chatKey, name, present, userName, rosterNames, rel, dayOf: seenDayOf, today: seenToday, records, anchor, scene, keepNote: guard.keepNote }), 'now', 'moment');
+    add(0, stateBlock(store, { chatKey, name, present, userName, rosterNames, rel, dayOf: seenDayOf, today: seenToday, records, anchor, scene, keepNote: guard.keepNote }), 'now', Symbol('moment'));
     // 此刻能做的（场记章程第二节第 5 条、B3）：隔着电话／消息、刚到、就在这儿，各几样可以做的，由他挑——不写该做什么、不写对方会怎样。只给有卡的人，旁白不给
     if (!camera && stance && stance.status !== 'absent') {
         const same = (a, b) => sameName(a, b, rosterNames) || (!!rel && !!personOf(rel, a, rosterNames) && personOf(rel, a, rosterNames) === personOf(rel, b, rosterNames));
@@ -2531,7 +2560,22 @@ function swapState(text, lines) {
     }
     return lines.length ? [...kept.filter((l, i) => l || i < kept.length - 1), ...lines].join('\n') : kept.join('\n');
 }
-function refreshPinned(store, records, { chatKey, speaker, speakerName, present, anchor = null }, text, parts, { fresh = null, pace = null } = {}) {
+const stripReplayMarks = (text, token) => text.replace(new RegExp(token + '[012]', 'g'), '');
+function takeReplayMarks(target, token, key = Object.hasOwn(target, 'text') ? 'text' : 'now') {
+    const rows = target[key].split('\n');
+    const has = kind => row => row.includes(token + kind);
+    const span = (kind, fallback, start = rows.findIndex(has(kind))) => start < 0 ? [fallback, fallback] : [start, rows.findLastIndex(has(kind)) + 1];
+    target[key] = stripReplayMarks(target[key], token);
+    return { state: span(0, 0), vary: span(1, span(2, rows.length)[0]) };
+}
+function swapRecorded(text, { state: [start, end], vary: [at, after] }, lines, vary) {
+    const rows = text.split('\n').toSpliced(start, end - start);
+    if (lines.length && rows.at(-1) === '') rows.pop();
+    rows.push(...lines);
+    const index = at === after && lines.length ? rows.length : at - (end - start);
+    return rows.toSpliced(index, after - at, ...(vary ? [vary] : [])).join('\n');
+}
+function refreshPinned(store, records, { chatKey, speaker, speakerName, present, anchor = null }, text, parts, { fresh = null, pace = null, replay = null } = {}) {
     const name = speakerName || speaker;
     const messages = uptoAnchor(store.currentMessages(chatKey), anchor);
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? (speaker === CAMERA ? present?.[0] : null);
@@ -2541,11 +2585,11 @@ function refreshPinned(store, records, { chatKey, speaker, speakerName, present,
     try {
         vary = varyFor(store, { chatKey, speaker, name, userName, messages, fresh, pace });
     } catch {}
-    const hasOld = String(text ?? '').split('\n').some(l => STATE_HEAD.test(l) || VARY.test(l));
+    const hasOld = replay || String(text ?? '').split('\n').some(l => STATE_HEAD.test(l) || VARY.test(l));
     if (!lines.length && !vary && !hasOld) return { text, parts };
-    const swap = t => swapVary(swapState(t, lines), vary);
-    const nextParts = parts ? { ...parts, now: parts.now ? swap(parts.now) : lines.length || vary ? soften([HEADS.now(name), ...lines, ...(vary ? [vary] : [])].join('\n')) : '' } : parts;
-    return { text: swap(text), parts: nextParts };
+    const swap = (t, ranges) => ranges ? swapRecorded(t, ranges, lines, vary) : swapVary(swapState(t, lines), vary);
+    const nextParts = parts ? { ...parts, now: parts.now ? swap(parts.now, replay?.now) : lines.length || vary ? soften([HEADS.now(name), ...lines, ...(vary ? [vary] : [])].join('\n')) : '' } : parts;
+    return { text: swap(text, replay?.text), parts: nextParts };
 }
 
 // 这一局的时间尺度（章程 G2）：开局单"时间"那一格的"尺度"；没写就是天。
@@ -3793,18 +3837,18 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
     const version = versionNow();
     const pinned = store.getSlot({ chatKey, speaker, anchor, ver: version });
     if (pinned !== null) {
-        const parts = store.getSlotParts?.({ chatKey, speaker, anchor }) ?? null;
-        const again = chat.test_slot ? { text: pinned, parts } : refreshPinned(store, records, { chatKey, speaker, speakerName, present, anchor }, pinned, parts, { fresh, pace });
+        const { parts = null, replay = null } = store.getSlotParts?.({ chatKey, speaker, anchor, withReplay: true }) ?? {};
+        const again = chat.test_slot ? { text: pinned, parts } : refreshPinned(store, records, { chatKey, speaker, speakerName, present, anchor }, pinned, parts, { fresh, pace, replay });
         if (versionNow() === version) return { ...shape(again.text, again.parts), pinned: true };
         return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
     }
     const key = `${chatKey}\u0001${speaker}\u0001${anchor}\u0001${version}`;
     if (!inflight.has(key)) {
         const recallCache = {};
-        inflight.set(key, measure('compose', () => composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift, recallCache }))
+        inflight.set(key, measure('compose', () => composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift, recallCache, recordReplay: true }))
             .then(result => {
                 if (versionNow() !== version) return result;
-                if (result.final) store.putSlot({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.parts ?? null, ver: version });
+                if (result.final) store.putSlot({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.replay ? { parts: result.parts ?? null, replay: result.replay } : result.parts ?? null, ver: version });
                 // 没钉住的（组装超时先给了纯程序那一格）也记下给了什么，标成 given：不当钉住的用（getSlot 认版本），
                 // 回头查得到、去复读核对时拿得到"想起的"那块（质量窗 10/5：从 10/4 早上起常常没钉住，后台查不到那几轮给了什么）
                 else if (result.text && result.mode !== 'test' && result.mode !== 'none') store.putGiven?.({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.parts ?? null });

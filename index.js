@@ -620,6 +620,79 @@ async function openTalk(first = '') {
     return true;
 }
 
+// ---------- 人物关系声明 ----------
+const DECLARATION_TYPE = '同一人不同经历';
+let declarationEditor, refreshDeclarationsPanel = () => {};
+function declarationContext() {
+    const origin = editOrigin(), { storyId: story, epoch } = state;
+    const here = () => state.opened && state.openedWindow === origin.window && state.storyId === story
+        && state.epoch === epoch && ctx().chatMetadata?.rp_emergence?.chatKey === origin.chatKey && localEdit(origin);
+    return story && origin.chatKey && here() ? { story, chatKey: origin.chatKey, here } : null;
+}
+function declarationCards(c) {
+    const cards = new Map((c.characters ?? []).filter(ch => ch?.avatar && ch.name && !isCamera(ch)).map(ch => [ch.avatar, ch.name]));
+    const order = currentGroup(c)?.members ?? [c.characters?.[c.characterId]?.avatar];
+    return new Map([...order, ...cards.keys()].filter(id => cards.has(id)).map(id => [id, cards.get(id)]));
+}
+const declarationCardLabel = (cards, id) => cards.has(id) ? cards.get(id) + '（' + id + '）' : id + '（待重选）';
+function declarationPanelHtml(cards, groups) {
+    if (!groups.length) return '无声明';
+    return groups.map(g => `<p><b>${escapeHtml(g.类型)}</b> · ${escapeHtml(g.卡.map(id => declarationCardLabel(cards, id)).join('、'))}</p>`).join('')
+        + '<p>声明后，旁白替无卡人物回忆时不再给出人物知情（包括别人的事）；角色旧事、原话、余波、地点等仍可能串知。</p>';
+}
+function declarationGroupHtml(cards, selected = []) {
+    const choices = [...new Set([...selected, ...cards.keys()])].map(id =>
+        `<label class="checkbox_label"><input type="checkbox" value="${escapeHtml(id)}"${selected.includes(id) ? ' checked' : ''}> ${escapeHtml(declarationCardLabel(cards, id))}</label>`);
+    return `<fieldset data-declaration-group><legend>${DECLARATION_TYPE}</legend>
+        <button type="button" class="menu_button" data-declaration-remove title="保存后撤销这组声明">移除这组</button>
+        <div style="max-height:14em;overflow:auto">${choices.join('')}</div></fieldset>`;
+}
+async function openDeclarations({ story, chatKey, here }) {
+    const c = ctx(), ticket = declarationEditor = Symbol();
+    let active = true, data;
+    const current = () => active && declarationEditor === ticket && here();
+    try { data = await api('declarations', { chatKey, story }); }
+    catch (error) { if (current()) globalThis.toastr?.error(error.message); return; }
+    if (!current()) return;
+    const cards = declarationCards(c);
+    const html = `<h3>人物关系声明</h3><p>每组勾两张或更多卡。</p>
+        <div data-declaration-groups>${data.groups.map(g => declarationGroupHtml(cards, g.卡)).join('')}</div>
+        <button type="button" class="menu_button" data-declaration-add title="添加一组可以勾选的卡">添加一组</button>
+        <button type="button" class="menu_button" data-declaration-save title="保存本局的人物关系声明">保存</button><p role="status" data-declaration-status></p>`;
+    await c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', {
+        okButton: false, cancelButton: '关闭', wide: true, allowVerticalScrolling: true,
+        onClosing: () => { active = false; return true; },
+        onOpen: ({ dlg }) => {
+            const rows = dlg.querySelector('[data-declaration-groups]'), save = dlg.querySelector('[data-declaration-save]');
+            const status = dlg.querySelector('[data-declaration-status]');
+            dlg.addEventListener('click', event => {
+                if (!rows.inert && event.target.closest('[data-declaration-add]')) rows.insertAdjacentHTML('beforeend', declarationGroupHtml(cards));
+                event.target.closest('[data-declaration-remove]')?.closest('[data-declaration-group]')?.remove();
+            });
+            save.onclick = async () => {
+                if (!current() || !dlg.isConnected || save.disabled) return;
+                const groups = [...rows.querySelectorAll('[data-declaration-group]')].map(group => ({
+                    类型: DECLARATION_TYPE, 卡: [...group.querySelectorAll('input:checked')].map(input => input.value),
+                }));
+                save.disabled = rows.inert = true;
+                status.textContent = '正在保存……';
+                try {
+                    const saved = await api('declarations-save', { chatKey, story, groups, version: data.version });
+                    if (!current()) return;
+                    data = saved;
+                    status.textContent = '已保存';
+                    void refreshDeclarationsPanel();
+                } catch (error) {
+                    if (!current()) return;
+                    status.textContent = error.message;
+                    if (error.status === 409) return;
+                }
+                save.disabled = rows.inert = false;
+            };
+        },
+    });
+}
+
 // ---------- 开局单 ----------
 // 填写大纲 → 后台分格（一两分钟，好了会提醒）→ 你核对、改、确认；确认后从现在起生效，随时能改。按局存，不写进卡和书。
 
@@ -641,6 +714,7 @@ const copyTextPopup = (title, text, reason = '') => ctx().callGenericPopup(`<h3>
 // 开局单的四个口（开局单设计稿 §四）：填表（必填只有基调和剧情类别）；填写大纲让后台分格；编辑全文；上传素材。
 async function openSetup() {
     const c = ctx(), chatKey = state.chatKey;
+    const declaration = declarationContext();
     const s = await api('setup', { chatKey });
     if (s.draft?.status === 'working') { globalThis.toastr?.info('还在分格，好了会提醒。'); watchSetup(chatKey); return; }
     if (s.draft?.status === 'handoff') { globalThis.toastr?.warning(`调模型分格没响应，${s.draft.error}。打开“此刻 → 外援”，复制题目贴给任何一个 AI（网页版也行），把回答贴回来点“交回”，然后再核对开局单。`); watchSetup(chatKey); return; }
@@ -649,11 +723,17 @@ async function openSetup() {
     const status = draft ? `后台分好的草稿还没核对${s.draft.unchecked ? `（${s.draft.unchecked} 条在原文里没找到对应的话）` : ''}。`
         : s.confirmed ? `现在生效的是 ${new Date(s.confirmed.at).toLocaleString()} 确认的那份${s.confirmed.data?.节奏 ? `（故事节奏：${s.confirmed.data.节奏}）` : ''}。` : '这一局还没有开局单。';
     const html = `<h3>开局单</h3><p>${status}</p>${(s.intimateWarnings ?? []).map(w => `<p><small>${escapeHtml(w)}</small></p>`).join('')}<p><small>填写表单：必填只有基调和剧情类别，其余都能空着。填写大纲：大纲、开场稿都行，后台替你分到各格、你再核对。上传素材：txt、md、json、csv，后台看一眼说该当开局单、关系表还是参考资料，你点头才处理。</small></p>`;
+    const declarationResult = c.POPUP_RESULT.CUSTOM5 ?? c.POPUP_RESULT.CUSTOM4 + 1;
     const r = await c.callGenericPopup(html, c.POPUP_TYPE.TEXT, '', {
         okButton: false, cancelButton: '关闭',
         customButtons: [...(has ? [{ text: draft ? '核对草稿' : '编辑全文', result: c.POPUP_RESULT.CUSTOM1 }] : []),
-            { text: '填写表单', result: c.POPUP_RESULT.CUSTOM2 }, { text: '填写大纲', result: c.POPUP_RESULT.CUSTOM3 }, { text: '上传素材', result: c.POPUP_RESULT.CUSTOM4 }],
+            { text: '填写表单', result: c.POPUP_RESULT.CUSTOM2 }, { text: '填写大纲', result: c.POPUP_RESULT.CUSTOM3 }, { text: '上传素材', result: c.POPUP_RESULT.CUSTOM4 },
+            ...(declaration?.here() ? [{ text: '人物关系声明', result: declarationResult }] : [])],
     });
+    if (r === declarationResult) {
+        if (declaration?.here()) await openDeclarations(declaration);
+        return 'declarations';
+    }
     if (r === c.POPUP_RESULT.CUSTOM1) return openSetupText(s);
     if (r === c.POPUP_RESULT.CUSTOM2) return openSetupForm(s);
     if (r === c.POPUP_RESULT.CUSTOM3) return pasteSetup(chatKey);
@@ -2028,7 +2108,7 @@ async function onChatChanged() {
     clearTimeout(state.relationsTimer);
     state.relationsDraft = null;
     clearPrompts();
-    Object.assign(state, { chatKey: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
+    Object.assign(state, { chatKey: null, storyId: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
     Object.assign(auto, { blocked:null,executionStatus:null,hideSavedStatus:false,on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null });
     state.memberBase = memberSnapshot();
     watchMembers();   // 首次接入也核对旧的手动静音标记，不把初始名单当成人工操作
@@ -2076,6 +2156,7 @@ function reconnect(manual = false) {
 }
 
 async function openCurrent(c, epoch, mark, manual) {
+    const window = state.loadedWindow;
     const here = () => epoch === state.epoch && ctx().chat === c.chat && ctx().chatMetadata?.rp_emergence?.chatKey === mark.chatKey;
     if (!here()) return false;
     const { stChatId, groupId } = chatIds(c);
@@ -2111,6 +2192,8 @@ async function openCurrent(c, epoch, mark, manual) {
             Object.assign(gate, { stChatId, groupId, chat: c.chat, metadata: c.chatMetadata });
         }
         state.chatKey = result.chatKey;
+        state.storyId = result.storyId;
+        state.openedWindow = window;
         state.opened = true; state.openUnknown = false; auto.unavailable = false; state.note = '';
         setStage(state, 'open', '成功');
         personaWatch.check();
@@ -2120,6 +2203,7 @@ async function openCurrent(c, epoch, mark, manual) {
     } catch (error) {
         if (epoch === state.epoch && ctx().chat === c.chat) {
             const failure = failureView(error, '接入');
+            state.storyId = null;
             state.chatKey = mark.chatKey; auto.unavailable = true; state.note = failure.text;
             state.openUnknown = failure.kind === 'unknown';
             setStage(state, 'open', '失败', failure.text);
@@ -2176,7 +2260,7 @@ async function offerJoin(epoch) {
 // 同一个聊天同一时刻只接入一次（新建聊天时 ST 会连发切换事件）。
 const joining = new Map();
 async function join(epoch = state.epoch) {
-    const c = ctx();
+    const c = ctx(), window = state.loadedWindow;
     const { stChatId, groupId } = chatIds(c);
     if (!stChatId) return;
     const label = currentGroup(c)?.name ?? c.characters?.[c.characterId]?.name ?? null;
@@ -2191,6 +2275,8 @@ async function join(epoch = state.epoch) {
     if (epoch !== state.epoch || ctx().chat !== c.chat) return;
     if (state.leaveWindow === gate) Object.assign(gate, { stChatId, groupId, chat: c.chat, metadata: c.chatMetadata });
     state.chatKey = result.chatKey;
+    state.storyId = result.storyId;
+    state.openedWindow = window;
     state.opened = true; state.openUnknown = false; auto.unavailable = false;
     setStage(state, 'open', '成功');
     scheduleSync(0);
@@ -2502,7 +2588,8 @@ export function panelPageHtml(page) {
         ${card('幕后', '<p data-role="plan"></p><small data-role="secret-hint"></small><div data-role="plan-row" class="rpe-grid">' + button('plan-reroll', '重新规划') + '<button class="menu_button" type="button" data-action="plan-repair" hidden title="只修已保存规划的格式，建议先看失败原因。">修格式</button><button class="menu_button" type="button" data-action="plan-abandon" hidden title="放弃挂着的规划，继续用已生效那份。">放弃这次重抽</button>' + button('plan-reveal', '看幕后（剧透）') + '</div>')}
         <details class="rpe-card" data-role="handoff-details"><summary>外援</summary><small>把未完成任务交给其他AI，建议按题目交回。</small><div data-role="handoffs" hidden></div><div data-role="extract-alert"></div></details></div>`;
     if (page === 'story') return `<div data-joined><div data-role="relations-draft"></div>${card('这一局', '<p><small>有局预设：套上就行。没有：用“填写表单”编辑，或“填写大纲”让后台拆，核对确认后可保存、导出为局预设。开局包是作者用 skill 生成的整套卡、书和设定，点“导入开局包”会新建群。</small></p><div data-role="content-controls"></div><label class="checkbox_label"><input type="checkbox" data-opt="absencePaused"> 暂停离开计时</label>')}
-        <div class="rpe-grid">${button('setup', '开局单')}${button('cast', '名册')}${button('relations', '关系表')}${button('presets', '局预设')}${button('opening-pack', '导入开局包')}</div></div>`;
+        <div class="rpe-grid">${button('setup', '开局单')}${button('cast', '名册')}${button('relations', '关系表')}${button('presets', '局预设')}${button('opening-pack', '导入开局包')}</div>
+        <details class="rpe-card" data-role="declarations"><summary>人物关系声明 · 当前生效</summary><div data-role="declaration-body"></div></details></div>`;
     if (page === 'ledger') return `<div data-joined class="rpe-stack">${button('records', '总结详情')}${button('ledger', '账本')}${button('pending', '约定历史')}${button('episodes', '剧情总览')}${button('talk', '任意调整 <small>几美分一句</small>')}</div>`;
     if (page === 'settings') return `${card('设置', '<label>玩法（全局默认）：<select data-opt="playMode"><option value="full">完整</option><option value="memory">只记忆</option></select></label><small>只记忆：只留记性（总结、召回、不串知），不排剧情、不推演，省钱；角色主动性会弱一些。</small><label class="checkbox_label"><input type="checkbox" data-opt="windowConnected"> 本窗口接入</label><label>每天最多花（美元）<input class="text_pole" type="number" min="0" max="500" step="0.1" data-opt="dailyBudget" aria-label="每天最多花（美元）"></label>' + button('stages', '钥匙和模型') + '<small data-role="edition"></small><a data-role="release" data-action="update" hidden href="#">检查更新</a>')}${card('去复读', '<small>先用免费第一档；第二档只改绑定角色。</small>' + button('fresh-settings', '去复读两档与口吻语料'))}${button('advanced', '高级（创作者用）›')}`;
     if (page !== 'advanced') return '';
@@ -2574,6 +2661,20 @@ function mountPanel() {
             if (request === glanceRequest && glance.open && state.chatKey === chatKey) body.textContent = '这次没读到，请收起再打开。';
         }
     });
+    const declarations = $('[data-role="declarations"]'), declarationBody = $('[data-role="declaration-body"]');
+    let declarationOrigin, declarationRequest = 0;
+    refreshDeclarationsPanel = async () => {
+        const request = ++declarationRequest, origin = declarationContext();
+        if (!origin) declarationBody.textContent = '';
+        if (!declarations.open || !origin) return;
+        const current = () => declarations.open && request === declarationRequest && origin.here();
+        declarationBody.textContent = '正在读取……';
+        try {
+            const { groups } = await api('declarations', { chatKey: origin.chatKey, story: origin.story });
+            if (current()) declarationBody.innerHTML = declarationPanelHtml(declarationCards(ctx()), groups);
+        } catch (error) { if (current()) declarationBody.textContent = '人物关系声明读取失败：' + error.message; }
+    };
+    declarations.addEventListener('toggle', refreshDeclarationsPanel);
     let currentTab = readPanelTab(() => settings().panelTab);
     const showPage = (next, save = false) => {
         currentTab = panelTab(next);
@@ -2587,6 +2688,13 @@ function mountPanel() {
     });
     render = () => {
         const s = settings(), st = state.status;
+        declarations.hidden = !declarationContext();
+        if (declarationOrigin?.window !== state.loadedWindow || declarationOrigin?.story !== state.storyId) {
+            declarationOrigin = { window: state.loadedWindow, story: state.storyId };
+            declarationRequest++;
+            declarations.open = false;
+            declarationBody.textContent = '';
+        }
         if (glanceChatKey !== state.chatKey) {
             glanceChatKey = state.chatKey;
             glanceRequest++;
@@ -2907,7 +3015,7 @@ function mountPanel() {
             if (action === 'talk') await openTalk();
             if (action === 'lore') await openLore();
             if (action === 'cast') await editCast();
-            if (action === 'setup') { await openSetup(); await refreshContent().catch(() => {}); }
+            if (action === 'setup' && await openSetup() !== 'declarations') await refreshContent().catch(() => {});
             if (action === 'relations') await openRelations();
             if (action === 'relations-draft' && state.relationsDraft?.status === 'drafted') await openRelations(state.relationsDraft.text, state.relationsDraft.id);
             if (action === 'relations-redraft') await redraftRelations();
@@ -4105,6 +4213,7 @@ eventSource.makeFirst?.(eventTypes.CHAT_CHANGED, stChatId => {
     const identified = groupId === null ? avatar : currentGroup(c)?.chat_id === stChatId;
     state.epoch++;
     state.loadedWindow = typeof stChatId === 'string' && stChatId.trim() && identified ? { ids: { stChatId, groupId: groupId === null ? null : String(groupId) }, chat: c.chat, avatar } : null;
+    void refreshDeclarationsPanel();
 });
 const panelMessageEvents = ['CHAT_CHANGED', 'MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED',
     'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'MESSAGE_UPDATED'];
