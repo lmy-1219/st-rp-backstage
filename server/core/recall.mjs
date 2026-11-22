@@ -627,59 +627,94 @@ export const lessonLines = ({ name, lessons = [], when }) => (lessons.length
     ? [`眼下的情形，让${name}想起自己以前的一回（${personWord(name)}记得；这回怎么做由${personWord(name)}，不用特意提起）：`, ...lessons.map(r => lessonText(r, when))] : []);
 
 // 纯程序版的一格：按时间顺序给，同一天的并成一行（读着像一段话，不像清单）；原话只挂在最相关的两条上。
-export function renderPlain({ name, entry, hits, plainHits = null, quoted = null, state, open, when, historyWhen = when, who, lessons = [] }) {
-    const lines = [];
-    if (entry) lines.push(entry);
-    lines.push(...lessonLines({ name, lessons, when }));
+export function renderPlain({ name, entry, hits, plainHits = null, quoted = null, state, open, when, historyWhen = when, who, lessons = [] }, projection = null) {
+    const lines = [], kept = projection && [];
+    const addGroup = (block, rows) => {
+        if (!block.length) return;
+        lines.push(...block);
+        if (kept) kept.push(null, ...rows.map((r, i) => projection.allowed.has(r) ? [block[0], block[i + 1]] : null));
+    };
+    if (entry) {
+        lines.push(entry);
+        kept?.push([null, entry]);
+    }
+    addGroup(lessonLines({ name, lessons, when }), lessons);
     const shown = plainHits ?? hits;
     if (shown.length) {
-        lines.push(`${name}记得的、和眼下有关的旧事：`);
+        const head = `${name}记得的、和眼下有关的旧事：`;
+        lines.push(head);
+        kept?.push(null);
         const groups = [];
         for (const r of shown) {
             const w = historyWhen(r), g = groups.at(-1);
             if (g && g.when === w) g.items.push(r); else groups.push({ when: w, items: [r] });
         }
         for (const g of groups) {
-            const earlier = new Map();
+            const earlier = new Map(), approved = kept && [];
             const items = g.items.map(r => {
                 const owner = who(r), tail = `${owner}${!quoted || quoted.has(r.id) ? quote(r) : ''}`;
                 let text = uniqueSentences(String(r.text), earlier.get(owner) ?? '');
                 if (!text && tail) text = String(r.text);
                 if (!text) return '';
                 earlier.set(owner, `${earlier.get(owner) ?? ''}\n${text}`);
-                return `${text.replace(/[。．.]+$/, '')}${tail}`;
+                const item = `${text.replace(/[。．.]+$/, '')}${tail}`;
+                if (item && projection?.allowed.has(r)) approved.push(item);
+                return item;
             }).filter(Boolean);
-            if (items.length) lines.push(`· ${g.when}：${items.join('；')}。`);
+            const dateLine = items => `· ${g.when}：${items.join('；')}。`;
+            if (items.length) {
+                lines.push(dateLine(items));
+                kept?.push(approved.length ? [head, dateLine(approved)] : null);
+            }
         }
     }
-    if (state.length) {
-        lines.push(`${name}知道的、一直算数的现状：`);
-        for (const r of state) lines.push(`· ${r.text}${who(r)}（${when(r)}起）`);
+    if (state.length) addGroup([`${name}知道的、一直算数的现状：`, ...state.map(r => `· ${r.text}${who(r)}（${when(r)}起）`)], state);
+    const openLines = renderOpen({ name, open, when, who }, kept ? addGroup : null);
+    if (!kept) lines.push(...openLines);
+    const text = finish(name, lines, undefined, kept && (index => kept.splice(index, 1)));
+    const arrived = projection?.arrival && text ? projection.arrival(text) : text;
+    if (kept) {
+        const survives = line => !projection.arrival || `\n${arrived}\n`.includes(`\n${line}\n`);
+        let previous = null;
+        const approved = [];
+        for (const [head, line] of kept.filter((row, i) => row && (!row[0] || survives(lines[i])))) {
+            if (head && head !== previous) approved.push(head);
+            approved.push(head ? line : (projection.arrival?.(line) ?? line));
+            previous = head;
+        }
+        projection.text = finish(name, approved, () => 0);
     }
-    lines.push(...renderOpen({ name, open, when, who }));
-    return finish(name, lines);
+    return arrived;
 }
 
 // 他问过、要过对方、还没回音的（他自己的"待办"里不是约定、不是想法的那些）单列：和他自己要办的混在"挑一件眼下就能做的"里，
 // 前台会把"你自己穿还是我替你塞"这种逼人的话当成待办再逼一遍（试玩 10/3）。对方没接话也是一种回答。
 export const askedOther = r => !!r.todo && !r.promise && r.type !== '想法';
 const askedByOwner = (r, name) => (!r.holder_name || r.holder_name === name) && !r.promise && askedOther(r);
-export function renderOpen({ name, open, when, who }) {
+export function renderOpen({ name, open, when, who }, addGroup = null) {
     if (!open.length) return [];
     const line = r => `· ${r.text}${who(r)}（${when(r)}）`;
     const mine = open.filter(r => !askedByOwner(r, name)), asked = open.filter(r => askedByOwner(r, name));
+    const group = (rows, head) => {
+        if (!rows.length) return [];
+        const block = [head, ...rows.map(line)];
+        addGroup?.(block, rows);
+        return block;
+    };
     return [
-        ...(mine.length ? [`${name}惦记着、想办的（挑一件眼下就能做或能问的；提不提、什么时候提由${personWord(name)}）：`, ...mine.map(line)] : []),
-        ...(asked.length ? [`${name}问过、要过对方，还没回音的（对方没接也是一种回答；要不要再提由${personWord(name)}，别一句句追着要）：`, ...asked.map(line)] : []),
+        ...group(mine, `${name}惦记着、想办的（挑一件眼下就能做或能问的；提不提、什么时候提由${personWord(name)}）：`),
+        ...group(asked, `${name}问过、要过对方，还没回音的（对方没接也是一种回答；要不要再提由${personWord(name)}，别一句句追着要）：`),
     ];
 }
 
-export function finish(name, lines, renderedLength = text => text.length) {
+export function finish(name, lines, renderedLength = text => text.length, onDrop = null) {
     if (!lines.length) return '';
     const head = `以下是${name}自己知道、此刻可能用得上的事，只供参考：\n`;
     let text = head + lines.join('\n');
     while (renderedLength(text) > SOFT_CHARS && lines.filter(l => l.startsWith('· ')).length > 1) {
-        lines.splice(lines.findIndex(l => l.startsWith('· ')), 1);
+        const index = lines.findIndex(l => l.startsWith('· '));
+        lines.splice(index, 1);
+        onDrop?.(index);
         text = head + lines.join('\n');
     }
     return text;

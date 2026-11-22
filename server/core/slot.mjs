@@ -544,13 +544,23 @@ export async function composeSlot(store, records, args, opts = {}) {
     const scene = slotScene(store, records, args);
     const groups = store.cachedDeclarations ? declarationGroupsOf(store, chat.story_id) : [];
     const withoutKnowledge = camera && groups.length ? {} : null;
-    const protectAfter = declaredCard(groups, speaker);
-    const base = await memorySlot(store, records, eyes, { ...opts, skipOpen: promised?.shownIds ?? null, pendingLedger, scale: fit.s, episodes: store.episodesOf?.(chatKey) ?? [], guard }, withoutKnowledge);
+    const protectAfter = groups.length === 0 ? false : declaredCard(groups, speaker);
+    const base = await memorySlot(store, records, eyes, { ...opts, skipOpen: promised?.shownIds ?? null, pendingLedger, scale: fit.s, episodes: store.episodesOf?.(chatKey) ?? [], guard }, withoutKnowledge, protectAfter);
     const backstoryPick = await backstorySense(store, chatKey, args.recentUser, opts.vectors);
     const { lines: extra, blocks = null, contact, carry = [], linger = [], dayOf: seenDayOf = null, historyTimeline, stance = null } = extrasFor(store, records, eyes, { ...opts, pendingAway: pending, pendingLedger, backstoryPick, promised, guard, scene, protectAfter }, base);
     const name = camera ? CAMERA_NAME : speakerName || speaker;
     // 隔着消息、电话的人没"进门"：旧事那段开头那句换成人不在这儿（试玩 10/13：他发消息来，场记写他刚到场、进门之前的事没看见）
-    if (stance && base?.text && !['present', 'arrived'].includes(stance.status)) base.text = base.text.split('\n').map(l => l.startsWith(`${name}刚到场。`) ? stance.status === 'remote' ? `${name}这会儿隔着${stance.way || '消息／电话'}，人不在这儿；这里之前发生的事、说过的话，${name}没看见也没听见，除非有人告诉过${name}。` : `${name}人不在这儿；在场情况没有确认。` : l).join('\n');
+    const arrival = stance && !['present', 'arrived'].includes(stance.status)
+        ? text => text.split('\n').map(l => l.startsWith(`${name}刚到场。`) ? stance.status === 'remote' ? `${name}这会儿隔着${stance.way || '消息／电话'}，人不在这儿；这里之前发生的事、说过的话，${name}没看见也没听见，除非有人告诉过${name}。` : `${name}人不在这儿；在场情况没有确认。` : l).join('\n') : null;
+    let approvedBase = null;
+    if (base.text === null) {
+        const { plainHits, hits, state, open, lessons = [] } = base.material;
+        const rows = [...(plainHits ?? hits), ...state, ...open, ...lessons];
+        const projection = { allowed: new Set(rows.filter(r => ownRecord(r, speaker))), arrival };
+        base.text = renderPlain(base.material, projection);
+        base.ids = rows.filter(r => projection.allowed.has(r)).map(r => r.id);
+        approvedBase = projection.text;
+    } else if (arrival && base.text) base.text = arrival(base.text);
     // 情绪余波（mood.mjs）：前几格给过、他心里还没过去的，接着给他之后的开口；平常戏里持续几天的"改变"也在这里。
     const mood = opts.mood ?? {};
     const on = mood.carry !== false;
@@ -620,7 +630,7 @@ export async function composeSlot(store, records, args, opts = {}) {
     }
     const aftermath = protectAfter && all.find(p => p.aftermath && kept.has(p))?.aftermath;
     // 与回放标记共用成品位置：3 为禁行，4 为标题，5 为放行。
-    const afterKinds = aftermath && [4, ...aftermath.indices.map(i => ownAftermath(aftermath.selected[i - 1], speaker) ? 5 : 3)];
+    const afterKinds = aftermath && [4, ...aftermath.indices.map(i => ownRecord(aftermath.selected[i - 1], speaker) ? 5 : 3)];
     const token = opts.recordReplay || afterKinds ? crypto.randomUUID() : null;
     const mark = (line, kind) => line && token && (kind >= 3 || opts.recordReplay) ? line.replace(/^(· |)/gm, (_, bullet) => bullet + token + kind) : line;
     const rowsOf = blocks => blocks.flatMap(p => afterKinds && p.aftermath ? p.lines.map((line, i) => mark(line, afterKinds[i]))
@@ -687,6 +697,13 @@ export async function composeSlot(store, records, args, opts = {}) {
         }
     }
     cutCameraKnowledge(out, withoutKnowledge?.text, base.text, cameraDef, userName, partsChecked);
+    if (approvedBase != null && approvedBase !== base.text) {
+        out.text = replacePlainBase(out.text, base.text, approvedBase, history);
+        if (out.parts) {
+            const format = recallHistory(out.parts, partsChecked, history);
+            out.parts.recall = replacePlainBase(out.parts.recall, base.text, approvedBase, format, episode);
+        }
+    }
     if (afterKinds) {
         const index = all.filter(p => kept.has(p)).findIndex(p => p.aftermath);
         if (afterKinds.includes(5)) out.blocks[index].lines = out.blocks[index].lines.filter((_, i) => afterKinds[i] !== 3);
@@ -706,7 +723,21 @@ export async function composeSlot(store, records, args, opts = {}) {
     return out;
 }
 
-function ownAftermath(r, speaker) {
+function recallHistory(parts, partsChecked, history) {
+    return partsChecked > Object.keys(parts).indexOf('recall') ? history : text => text;
+}
+
+// 沿基线完成让位和历史提示选择后，按底文的位置替换。
+function replacePlainBase(text, before, after, history, episode = null) {
+    const show = base => soften(episode === null ? base : [episode, base && wrap(base)].filter(Boolean).join('\n\n'));
+    const original = show(before), formatted = history(original);
+    const rest = text.slice(formatted.length + 1);
+    const kept = formatted === original ? show(after) : history(show(after));
+    if (episode !== null && !after && rest) return [kept, wrap(rest)].filter(Boolean).join('\n\n');
+    return [kept, rest].filter(Boolean).join('\n');
+}
+
+function ownRecord(r, speaker) {
     if (r.holder !== speaker || r.job_id == null || r.idea_ref != null || r.source_basis != null
         || !r.raw_text?.trim() || r.text !== r.raw_text) return false;
     const [part, ...rest] = recordParts(r);
@@ -733,7 +764,7 @@ function cutCameraKnowledge(out, keptBase, baseText, cameraDef, userName, partsC
     };
     out.text = cut(out.text, [cameraDef, keptBase].filter(Boolean).join('\n'), `${cameraDef}\n${baseText}`, history);
     if (out.parts) {
-        const format = partsChecked > Object.keys(out.parts).indexOf('recall') ? history : text => text;
+        const format = recallHistory(out.parts, partsChecked, history);
         const recall = cut(out.parts.recall, keptBase ? wrap(keptBase) : '', wrap(baseText), format);
         out.parts.recall = keptBase || !recall ? recall : wrap(recall);
     }
@@ -952,7 +983,7 @@ export function cameraKnowledgeLines({ roster, board, visible = [], rel = null, 
 // 叙事组装限时（D-100：前台速度是用户的硬要求；实测配检索词＋组装一般 16 秒、慢时近 30 秒）：从这里起至多等 assembler.budgetMs，
 // 到点先给纯程序那一格、不钉住；配词和组装照旧在后台跑完，结果留在 ahead 里，左滑重来时直接用上。
 // 后开口的人多半已经提前组装好（prefetchOthers），不用等。
-async function memorySlot(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { assembler = null, keyMaker = null, vectors = null, skipOpen = null, pendingLedger = null, scale = 1, episodes = [], guard = null, recallCache = {} }, withoutKnowledge = null) {
+async function memorySlot(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { assembler = null, keyMaker = null, vectors = null, skipOpen = null, pendingLedger = null, scale = 1, episodes = [], guard = null, recallCache = {} }, withoutKnowledge = null, protectPlain = false) {
     const name = speakerName || speaker;
     // 异步配词、组装期间玩家可能纠正；迟到的结果只留在开始时的版本里。
     const recallKey = recallKeyFor(store, records, chatKey, speaker, recentUser, correctionRev(store, chatKey), recallTimeKey(store, records, chatKey, recallCache), recallCache);
@@ -1005,7 +1036,7 @@ async function memorySlot(store, records, { chatKey, speaker, speakerName, ancho
     // 按意思算出来的分也交出去：碰上的事那一块拿它认玩家这句是不是在说那件（matters.mjs）
     let senseUsed = null;
     const out = (material, queryKeys, text, final, mode, ids) => ({ text, final, mode, ids, material, queryKeys, sense: senseUsed });
-    const plain = (material, queryKeys, final, mode) => out(material, queryKeys, renderPlain(material), final, mode, [...(material.plainHits ?? material.hits), ...material.state, ...material.open, ...(material.lessons ?? [])].map(r => r.id));
+    const plain = (material, queryKeys, final, mode) => out(material, queryKeys, protectPlain ? null : renderPlain(material), final, mode, [...(material.plainHits ?? material.hits), ...material.state, ...material.open, ...(material.lessons ?? [])].map(r => r.id));
     if (!assembler) return plain(pick([], false, await senseFor()).material, [], true, 'plain');
 
     let keysSoFar = [], senseSoFar = null;

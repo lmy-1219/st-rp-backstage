@@ -638,7 +638,8 @@ const declarationCardLabel = (cards, id) => cards.has(id) ? cards.get(id) + '（
 function declarationPanelHtml(cards, groups) {
     if (!groups.length) return '无声明';
     return groups.map(g => `<p><b>${escapeHtml(g.类型)}</b> · ${escapeHtml(g.卡.map(id => declarationCardLabel(cards, id)).join('、'))}</p>`).join('')
-        + '<p>声明后，声明卡的余波只给它自己记下的那几条；主旧事、原话、地点等仍可能串知。</p>';
+        + '<p>新组格时，声明卡“当时记下的余波”和程序列出的旧事、原话，只给能认定是这张卡自己的账。模型组装不成或等不及时，程序给的旧事也按这条处理。旁白替人物回忆的知情块已隐藏。'
+        + '<br>仍可能串知：模型组装的旧事和原话、逐卡预跑、近期聊天、配词和向量、地点和场次、场面、人物关系和其他背景，以及规划、后台总结和外援使用的材料。声明前已经生成或正在生成的格子也可能保留旧文。有些原本听过的事、后台补记的事，目前会少显示。</p>';
 }
 function declarationGroupHtml(cards, selected = []) {
     const choices = [...new Set([...selected, ...cards.keys()])].map(id =>
