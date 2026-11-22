@@ -7,7 +7,7 @@ import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, 
 import { observeManualLeaveCommand } from './sync.mjs';
 import { cutByPresence, storyTimeAt } from './presence.mjs';
 import { captureManualLeave, captureSegmentOpen, manualLeaveCardMatches, manualLeaveWriter, segmentOpenArrivalFailure, segmentOpenFailure, writeSegmentOpen } from './presence-write.mjs';
-import { boardSegmentEdit, undoBoardSegmentEdit } from './sync.mjs';
+import { boardSegmentEdit, undoBoardSegmentEdit, frozenBoardAvatars, readBoardMarks } from './sync.mjs';
 import { failureView, setStage, stageHtml, cardChoiceHtml } from './lifecycle.mjs';
 
 const MODULE = 'rp_emergence';
@@ -2006,6 +2006,7 @@ async function syncOnce(force = false, light = false) {
         return epoch === state.epoch;
     } catch (error) {
         if (epoch === state.epoch) {
+            if (typeof refreshContent === 'function') void refreshContent().catch(() => {});
             const failure = failureView(error, '消息同步 / 对账');
             state.note = error.code === 'LEAVE_APPLY_FAILED' ? `离场撤销尚未落实：${String(error.message).slice(0, 100)}` : failure.text;
             setStage(state, 'sync', '失败', state.note);
@@ -2099,6 +2100,7 @@ async function onChatChanged() {
     state.openEpoch = epoch; state.opened = false; state.openUnknown = false; state.openFlight = null; state.cardFlight = null; state.recoveryRequested = null;
     state.stages = { connection: state.stages?.connection };
     state.boardsStale = false;
+    state.boardReconcile = null;
     state.lastCameraPrompt = null;
     state.generation = null;
     state.pendingSyncEpoch = null;
@@ -2774,7 +2776,7 @@ function mountPanel() {
             if(help&&label&&!label.querySelector('[data-help-opt="'+input.dataset.opt+'"]')){const small=document.createElement('small');small.dataset.helpOpt=input.dataset.opt;small.textContent=help;label.append(small);}
         }
         const content = state.content?.chatKey === state.chatKey ? state.content : null;
-        $('[data-role="content-controls"]').innerHTML = contentControlsHtml(joinedNow ? content : null);
+        $('[data-role="content-controls"]').innerHTML = contentControlsHtml(joinedNow ? content : null) || (joinedNow ? '<small>玩法设置暂未读取。</small>' : '');
         $('[data-role="prompt-pack-controls"]').innerHTML = !joinedNow || !content ? '' : `<label>这一局的包：<select data-content="pack"><option value=""${content.ownPack ? '' : ' selected'}>跟全局默认</option>${content.packs.map(p => `<option value="${escapeHtml(p.id)}"${content.ownPack === p.id ? ' selected' : ''}>${escapeHtml(p.manifest.名字)}</option>`).join('')}</select></label>
             <label>全局默认包：<select data-content="global-pack">${content.packs.map(p => `<option value="${escapeHtml(p.id)}"${content.globalPack === p.id ? ' selected' : ''}>${escapeHtml(p.manifest.名字)}</option>`).join('')}</select></label><small>${escapeHtml(content.warning)}</small>`;
         for (const section of panel.querySelectorAll('[data-joined]')) section.hidden = !joinedNow;
@@ -2834,7 +2836,8 @@ function mountPanel() {
         const playSelect=$('[data-opt="playMode"]'); if(playSelect) playSelect.value=state.globalPlay ?? state.content?.globalPlay ?? 'full';
         for(const el of panel.querySelectorAll('[data-action="plan-request"], [data-action="plan-reroll"], [data-opt="awayMode"], [data-opt="speakFirst"]')) { el.disabled=!!playReason; el.title=playReason || '按需使用'; }
         const plan = state.plan, joined = !!state.chatKey && s.enabled;
-        for (const sel of ['[data-role="ledger"]', '[data-action="extract"]', '[data-action="backfill"]', '[data-action="records"]', '[data-action="rejected"]', '[data-action="ledger"]', '[data-action="cast"]', '[data-action="setup"]', '[data-action="relations"]', '[data-action="presets"]']) $(sel).hidden = !joined || !plan;
+        for (const sel of ['[data-role="ledger"]', '[data-action="extract"]', '[data-action="backfill"]', '[data-action="records"]', '[data-action="rejected"]', '[data-action="ledger"]']) $(sel).hidden = !joined || !plan;
+        for (const sel of ['[data-action="cast"]', '[data-action="setup"]', '[data-action="relations"]', '[data-action="presets"]']) $(sel).hidden = !joined;
         if (joined && plan) {
             const cost = `约 ${plan.estimate.calls} 次调用、约 $${plan.estimate.usd.toFixed(2)}`;
             $('[data-role="ledger"]').textContent = !plan.configured ? '后台每条总结：还没配置模型（在后台的 config.json 里填）。'
@@ -2891,6 +2894,7 @@ function mountPanel() {
         if (action === 'camera-now') { await ctx().executeSlashCommandsWithOptions('/旁白'); return; }
         if (action === 'handoffs-open') { const d = $('[data-role="handoff-details"]'); d.open = true; d.scrollIntoView({ block: 'nearest' }); return; }
         try {
+            if (action === 'board-abandon') await abandonBoardCorrection(target.dataset.boardId);
             if (action === 'prompt-pack') { await openPromptPack(); return; }
             if (action === 'prompt-preview') {
                 const value = await api('content', { chatKey: state.chatKey, action: 'preview' });
@@ -3609,7 +3613,8 @@ async function autoPeek({ onlyUndo = false, returnReply = false } = {}) {
     try { r = await api('turn', { chatKey, peek: true }); } catch (error) { if(chatKey===state.chatKey&&epoch===state.epoch){auto.unavailable=true;render();} if (onlyUndo) throw error; return false; }
     if (chatKey !== state.chatKey || epoch !== state.epoch) return false;
     if (onlyUndo) {
-        const undo = (r?.left ?? []).filter(l => l.action === 'undo');
+        const c = ctx(), frozen = frozenBoardAvatars(c.chatMetadata);
+        const undo = (r?.left ?? []).filter(l => l.action === 'undo' && (!frozen.size || !frozen.has(l.avatar || cardNamed(c, l.who)?.avatar)));
         if (!undo.length && !(r?.enabled === false && auto.on !== false)) return false;
         if (await autoApply({ ...r, left: undo, lapsed: [] }) === false) {
             const error = new Error('离场撤销尚未落实');
@@ -3896,10 +3901,13 @@ function scheduledStatusHtml() {
     const c=ctx(),off=auto.on===false;
     const saved=off||auto.hideSavedStatus?null:Object.entries(c.chatMetadata?.rpeExecution??{}).filter(([,e])=>e.chatKey===state.chatKey&&e.q&&e.result!=='superseded').at(-1);
     const status=off&&auto.executionStatus?.source!=='camera'?null:auto.executionStatus??(saved?{...saved[1],id:saved[0]}:null);
-    const lines=[state.boardReconcile,status?.reason];
+    const lines=[status?.reason];
+    const review = state.boardReconcile ? '<div style="color:var(--warning,#d33)">' + escapeHtml(state.boardReconcile)
+        + Object.entries(c.chatMetadata?.rpeBoardApplied ?? {}).filter(([, r]) => r.review).map(([id, r]) =>
+            ` <span>${escapeHtml(r.name)} · 第 ${escapeHtml(r.pos)} 楼 </span><button type="button" class="menu_button" data-action="board-abandon" data-board-id="${escapeHtml(id)}" title="保留当前在场区间，停止自动撤回。">放弃这条纠正</button>`).join('') + '</div>' : '';
     const board=boardLabels.at(-1);
     for(const p of board?.people??[])if(['present','remote'].includes(p.status)&&currentGroup(c)?.disabled_members?.includes(p.avatar))lines.push(`${p.name}在场，${c.chatMetadata?.rp_emergence?.openingMuted?.includes(p.avatar)?'系统静音待核对':'手动静音，暂停发言'}`);
-    return lines.filter(Boolean).map(line=>`<div>${escapeHtml(line)}</div>`).join('')+(!off&&status&&['muted','error','cancelled','unconfirmed','running','waiting','paused'].includes(status.result)?'<button class="menu_button" data-action="schedule-retry" title="先核对是否已有本人消息，再重试">核对后重试接话</button>':'');
+    return review+lines.filter(Boolean).map(line=>`<div>${escapeHtml(line)}</div>`).join('')+(!off&&status&&['muted','error','cancelled','unconfirmed','running','waiting','paused'].includes(status.result)?'<button class="menu_button" data-action="schedule-retry" title="先核对是否已有本人消息，再重试">核对后重试接话</button>':'');
 }
 async function retryScheduled() {
     if(auto.on===false)return false;
@@ -5413,30 +5421,35 @@ async function pickBoard(id) {
     const resume=!!auto.blocked||['paused','muted','waiting'].includes(auto.executionStatus?.result);
     auto.blocked = null;
     await refreshDays();
-    globalThis.toastr?.success(Object.keys(mark).length ? '改好了，从这条往后照它算。' : '这条跟着系统认的了。', 'RP：幕后');
+    globalThis.toastr?.[state.boardReconcile ? 'warning' : 'success'](state.boardReconcile ?? (Object.keys(mark).length ? '改好了，从这条往后照它算。' : '这条跟着系统认的了。'), 'RP：幕后');
     if(resume)await autoDrive('normal');
+}
+async function abandonBoardCorrection(id) {
+    const c = ctx(), epoch = state.epoch, journal = c.chatMetadata?.rpeBoardApplied, record = journal?.[id];
+    const here = () => state.epoch === epoch && localHead(c);
+    if (!record?.review || !here()) return;
+    if (!await c.callGenericPopup('放弃这条纠正？这条纠正以后不再自动撤回，在场按现在看到的算。', c.POPUP_TYPE.CONFIRM, '', { okButton: '放弃这条纠正', cancelButton: '取消' })) return;
+    if (state.syncFlight?.epoch === epoch) await state.syncFlight.promise;
+    if (!here() || c.chatMetadata?.rpeBoardApplied !== journal || journal[id] !== record) return;
+    const group = currentGroup(c), m = c.chat[record.pos], extra = m?.extra, mark = extra?.rp_board;
+    const current = group && readBoardMarks(c, state, group, fallbackAvatar(c), [record.pos]).get(id);
+    if (current?.avatar === record.avatar && current.fp === record.fp && current.status === record.status) {
+        const key = current.markKey;
+        const { people, ...remaining } = mark, others = { ...people }; delete others[key];
+        if (Object.keys(others).length) remaining.people = others;
+        m.extra = { ...extra }; if (Object.keys(remaining).length) m.extra.rp_board = remaining; else delete m.extra.rp_board;
+    }
+    delete journal[id];
+    try { await c.saveMetadata(); }
+    catch (error) { journal[id] = record; if (m) m.extra = extra; throw error; }
+    if (here()) await syncNow();
 }
 async function reconcileBoardState() {
     const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,group=currentGroup(c);
     if(!group||!chatKey)return;
     if (!localTarget(c)) return;
     const guard=()=>{if(state.chatKey!==chatKey||state.epoch!==epoch)throw Error('聊天已切换');if(!localTarget(c))throw windowRejected();};
-    const journal=c.chatMetadata.rpeBoardApplied??={}, wanted=new Map();
-    const scope=(state.boardCast?.length?state.boardCast:c.characters??[]).filter(p=>p.role!=='不用'&&!isCamera(p));
-    for(const [pos,m] of c.chat.entries()){
-        if(m.is_system)continue;
-        for(const [key,value] of Object.entries(m.extra?.rp_board?.people??{})){
-            const choices=scope.filter(p=>p.avatar===key||p.name===key);
-            const inGroup=choices.filter(p=>group.members.includes(p.avatar));
-            const saved=c.chatMetadata.rpeCardChoices?.[chatKey]?.[key]?.avatar;
-            const ch=scope.find(p=>p.avatar===key)??(inGroup.length===1?inGroup[0]:scope.find(p=>p.avatar===saved)??(choices.length===1?choices[0]:null));
-            if(!ch)continue;
-            const status=typeof value==='object'?value.status:value;
-            if(!['在场','远程','不在','外头'].includes(status))continue;
-            const fp=fingerprintMessage(m,speakerOf(m,fallbackAvatar(c)));
-            wanted.set(`${ch.avatar}:${pos}:${fp}`,{avatar:ch.avatar,name:ch.name,pos,fp,status});
-        }
-    }
+    const journal=c.chatMetadata.rpeBoardApplied??={}, wanted=readBoardMarks(c,state,group,fallbackAvatar(c));
     const anchor=avatar=>c.chatMetadata.contextIsolation?.anchors?.[avatar];
     const dates=wanted.size?c.chat.map(m=>m.send_date==null?null:String(m.send_date)):null;
     const editFor=(segments,record)=>{
@@ -5479,9 +5492,11 @@ async function reconcileBoardState() {
             ||(r.edit?.before.some(s=>s.fromDate||s.toDate)&&editFor(r.edit.before,r).end!==r.edit.end))rebase.add(r.avatar);
     }
     for(const [id,w] of wanted)if(!journal[id])rebase.add(w.avatar);
+    const blocked=frozenBoardAvatars(c.chatMetadata);
     try{
         // 来源失效只更新自动基础及其在人工 journal 中的依赖，不撤销未变化的人工纠正。
         for(const {e,r,live,laterCame,ownReplies} of automatic){
+            if(blocked.has(e.avatar))continue;
             if(live&&r.live!==false&&!rebase.has(e.avatar)){r.live=live;continue;}
             const chain=Object.values(journal).filter(x=>x.avatar===e.avatar&&x.edit&&x.applied&&!x.undone).sort((a,b)=>a.pos-b.pos);
             const actual=anchor(e.avatar)?.segments??[];
@@ -5543,8 +5558,15 @@ async function reconcileBoardState() {
             await save();
         }
         for(const [id,r] of Object.entries(journal).sort((a,b)=>b[1].pos-a[1].pos)){
-            if(!rebase.has(r.avatar))continue;
-            if(r.edit&&!r.undone){const undo=undoBoardSegmentEdit(anchor(r.avatar)?.segments??[],r.edit);if(!undo.ok)throw Error(undo.reason);if(anchor(r.avatar))anchor(r.avatar).segments=undo.segments;r.undone=true;await save();}
+            if(!rebase.has(r.avatar)||blocked.has(r.avatar))continue;
+            if(r.edit&&!r.undone){
+                const undo=undoBoardSegmentEdit(anchor(r.avatar)?.segments??[],r.edit);
+                if(!undo.ok){
+                    const mark=wanted.get(id);
+                    r.review={reason:undo.reason,markKey:mark?.status===r.status?mark.markKey:null};blocked.add(r.avatar);await save();continue;
+                }
+                if(anchor(r.avatar))anchor(r.avatar).segments=undo.segments;r.undone=true;await save();
+            }
             const later=Object.values(journal).some(x=>x!==r&&x.avatar===r.avatar&&x.pos>r.pos)
                 ||(anchor(r.avatar)?.segments??[]).some(s=>s.from>r.pos||s.to!=null&&s.to>r.pos);
             if(r.muteChanged&&!later){
@@ -5553,8 +5575,8 @@ async function reconcileBoardState() {
             }
             delete journal[id];await save();
         }
-        for(const [id,w] of [...wanted].sort((a,b)=>a[1].pos-b[1].pos)){
-            if(journal[id]?.applied)continue;
+        for(const [id,{markKey,...w}] of [...wanted].sort((a,b)=>a[1].pos-b[1].pos)){
+            if(blocked.has(w.avatar)||journal[id]?.applied)continue;
             const before=anchor(w.avatar);
             const initial=before?.segments??(residentFromStart(c,{avatar:w.avatar,name:w.name,firstSnapshot:state.firstMemberSnapshot})?[{from:0,fromDate:'',to:null,toDate:''}]:[]);
             const edit=journal[id]?.edit??editFor(initial,w);
@@ -5571,8 +5593,9 @@ async function reconcileBoardState() {
             }
             record.applied=true;await save();
         }
-        state.boardReconcile=null;followBase();
-    }catch(error){state.boardReconcile=`场面纠正待落实：${error.message}`;await save();throw error;}
+        const pending=Object.values(journal).find(r=>r.review)?.review;
+        state.boardReconcile=pending?`场面纠正待落实：${pending.reason}`:null;followBase();
+    }catch(error){guard();state.boardReconcile=`场面纠正待落实：${error.message}`;await save();throw error;}
 }
 async function recoverOpeningMuted() {
     const c=ctx(),group=currentGroup(c),chatKey=state.chatKey,epoch=state.epoch;
@@ -5581,7 +5604,9 @@ async function recoverOpeningMuted() {
     const board=await api('board',{chatKey});
     if(state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==c.chat)return;
     const recovered=c.chatMetadata.rpeMuteRecovery??={};
+    const frozen=frozenBoardAvatars(c.chatMetadata);
     for(const avatar of [...owned]){
+        if(frozen.has(avatar))continue;
         const p=board.people?.find(p=>p.avatar===avatar);
         if(!p||!['present','remote'].includes(p.status)||c.chatMetadata.rpeManualMuted?.[avatar])continue;
         const at=group.members.indexOf(avatar);if(at<0)continue;

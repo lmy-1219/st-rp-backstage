@@ -169,6 +169,7 @@ export function openRecords(db) {
     try { db.exec('alter table records add column keys text'); } catch {}
     try { db.exec('alter table records add column source_basis text'); } catch {}
     try { db.exec('alter table extract_jobs add column served_model text'); } catch {}
+    try { db.exec('alter table extract_jobs add column provider text'); } catch {}
     try { db.exec('alter table records add column money text'); } catch {}   // 钱型记录：{from, to, amount, raw, stage, every, monthly}
     try { db.exec('alter table records add column relation text'); } catch {}   // 关系型记录：{with, now}（说话人和谁、从这条起是什么关系）
     try { db.exec('alter table records add column wide text'); } catch {}
@@ -209,9 +210,9 @@ export function openRecords(db) {
         return !!q('select 1 from extract_done where story_id = ? and fp = ?').get(storyId, fp);
     }
 
-    function startJob({ storyId, chatKey, positions, model }) {
-        return Number(q(`insert into extract_jobs(story_id, chat_key, positions, model, status, started_at)
-                         values (?, ?, ?, ?, 'running', ?)`).run(storyId, chatKey, JSON.stringify(positions), model, now()).lastInsertRowid);
+    function startJob({ storyId, chatKey, positions, model, provider = 'api' }) {
+        return Number(q(`insert into extract_jobs(story_id, chat_key, positions, model, status, started_at, provider)
+                         values (?, ?, ?, ?, 'running', ?, ?)`).run(storyId, chatKey, JSON.stringify(positions), model, now(), provider).lastInsertRowid);
     }
 
     // 接口自报答题的模型（和请求的对不上＝可能被偷换）。
@@ -220,9 +221,9 @@ export function openRecords(db) {
     }
 
     // 模型答了但没过（格式坏了、整段放弃）的，这次调用照样花了钱：带上用量，记进当天的账。
-    function failJob(jobId, error, raw = null, { usage = null, costUsd = null } = {}) {
-        q(`update extract_jobs set status = 'failed', error = ?, raw = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, finished_at = ? where id = ?`)
-            .run(String(error).slice(0, 2000), raw, usage?.input ?? null, usage?.output ?? null, costUsd, now(), jobId);
+    function failJob(jobId, error, raw = null, { usage = null, costUsd = null, retryable = true } = {}) {
+        q(`update extract_jobs set status = ?, error = ?, raw = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, finished_at = ? where id = ?`)
+            .run(retryable ? 'failed' : 'aborted', String(error).slice(0, 2000), raw, usage?.input ?? null, usage?.output ?? null, costUsd, now(), jobId);
     }
 
     // 一次抽取的结果整体落账：记录（含被拦下的，留痕不丢）＋这些消息标记为已记账。
@@ -490,7 +491,7 @@ export function openRecords(db) {
     }
 
     function recentFailures(chatKey, since = '') {
-        const rows = q(`select status from extract_jobs where chat_key = ? and started_at >= ? order by id desc`).all(chatKey, since);
+        const rows = q(`select status from extract_jobs where chat_key = ? and status <> 'aborted' and started_at >= ? order by id desc`).all(chatKey, since);
         let n = 0;
         for (const row of rows) { if (row.status !== 'failed') break; n++; }
         return n;

@@ -559,6 +559,7 @@ export function openStore(file) {
         return aligned;
     }
 
+    const syncRevision = chatKey => q('select value from meta where key = ?').get(`sync_rev:${chatKey}`)?.value ?? 0;
     // 浏览器报来当前序列（每条的指纹）。缺正文 ⇒ 列出来让它补传；齐了 ⇒ 整体替换该窗口的序列。
     function sync({ chatKey, seq, members = null, anchors = null, force = false }) {
         const chat = requireChat(chatKey);
@@ -649,6 +650,7 @@ export function openStore(file) {
             if (chat.parent_key && chat.branch_len == null && newFps.length) branchLen(chat, newFps);
             // 接入时自动开了记账的（extract_from＝-1）：第一次同步时，带着一大段旧聊天的只从接入以后记（旧的要不要补记，面板上给估价由用户点，D-100）。
             if (chat.extract_from === -1) q('update chats set extract_from = ? where key = ?').run(newFps.length > 3 ? newFps.length : 0, chatKey);
+            setMeta(`sync_rev:${chatKey}`, String(Number(syncRevision(chatKey)) + 1));
             return { committed: true, need: [], total: newFps.length, ...change, ...(edits.length ? { edited: edits.map(e => e.pos) } : {}), ...(repaired ? { repaired } : {}) };
         });
     }
@@ -784,10 +786,15 @@ export function openStore(file) {
     }
 
     // 窗口当前可见的消息（按位置）。后续的抽取、选料都从这里取。
-    function currentMessages(chatKey) { return memo('messages', chatKey, () => readMessages(chatKey), copyArr); }
+    function currentMessages(chatKey, { revision, refresh } = {}) {
+        const cache = memoStore.get('messages')?.map;
+        if (refresh || (revision !== undefined && cache?.get(chatKey)?.revision !== revision)) cache?.delete(chatKey);
+        return copyArr(memo('messages', chatKey, () => readMessages(chatKey)).rows);
+    }
     function readMessages(chatKey) {
-        const drafts = fromJson(getRawMeta(`door_handoffs:${chatKey}`)) ?? [];
-        return q(`select s.pos, s.fp, s.hidden, s.sent_at, s.mark, s.sw, s.swipes, s.board_mark as boardMark, m.is_user, m.speaker, m.name, m.text, m.lore, m.vis
+        const meta = q('select (select value from meta where key = ?) drafts, (select value from meta where key = ?) revision').get(`door_handoffs:${chatKey}`, `sync_rev:${chatKey}`);
+        const drafts = fromJson(meta.drafts) ?? [];
+        const rows = q(`select s.pos, s.fp, s.hidden, s.sent_at, s.mark, s.sw, s.swipes, s.board_mark as boardMark, m.is_user, m.speaker, m.name, m.text, m.lore, m.vis
                   from chat_seq s join chats c on c.key = s.chat_key
                   join messages m on m.story_id = c.story_id and m.fp = s.fp
                   where s.chat_key = ? order by s.pos`).all(chatKey).map(r => {
@@ -796,6 +803,7 @@ export function openStore(file) {
             if (!r.vis) return r;
             try { return { ...r, extra: { rp_vis: JSON.parse(r.vis) } }; } catch { return r; }
         });
+        return { rows, revision: meta.revision ?? 0 };
     }
 
     // ver：钉住时那一版代码的指纹（slot.SLOT_CODE）；给了 ver 就只认同一版钉的（旧版本钉的、没记版本的都当没钉过）
@@ -1807,5 +1815,5 @@ export function openStore(file) {
 
     setSourceContext(db, chatKey => ({ limits: historyOf(chatKey).limits, dependencies: (basis, options) => memo('arrival_dependencies', JSON.stringify([chatKey, basis, options.rawBasis ?? false, options.through ?? null]), () => arrivalDependencies(chatKey, basis, options)) }));
     return { declarationsOf: readDeclarations, cachedDeclarations, putDeclarations,
-        deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+        deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, syncRevision, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

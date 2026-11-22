@@ -1,6 +1,6 @@
 // 记账调度：打开了"后台记账"的窗口，有定稿但没记过的消息就一小窗一小窗地抽；
 // 一次只跑一个；当天估算花费到上限就交给窗口（外援，不花 API 的钱；设了 fallback: off 才停）。回填老窗口走同一条路，只是待记的多。
-import { planWindows, estimateCost, runWindow, prepareWindow, applyReply, knownItems } from './extract.mjs';
+import { planWindows, estimateCost, runWindow, prepareWindow, applyReply, knownItems, replyWindow } from './extract.mjs';
 import { isTransient } from './handoff.mjs';
 import { extractorReady } from './config.mjs';
 import { createModelClient } from './model.mjs';
@@ -26,9 +26,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     const lastError = new Map();   // 记账出错提示按窗口记（N-441/D-260）：A 出错不影响 B 的 plan().lastError
     const startedAt = new Date().toISOString();   // 失败次数只算这次启动以后的：改了代码重启后给坏段落一次新机会
 
-    function messagesFor(chatKey) {
-        return store.currentMessages(chatKey).map(m => ({ ...m, displayName: m.name || m.speaker }));
-    }
+    const messagesFor = (chatKey, options) => store.currentMessages(chatKey, options).map(m => ({ ...m, displayName: m.name || m.speaker }));
     function userName(messages) {
         for (let i = messages.length - 1; i >= 0; i--) if (messages[i].is_user && messages[i].name) return messages[i].name;
         return null;
@@ -137,7 +135,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
             kind: 'extract', key: `${chat.key}:${window[0].fp}:${window.length}`, chatKey: chat.key, why,
             system: prepared.system, user: prepared.user,
             checks: '原文片段逐字核对、持有人和在场的人由程序定、每条消息最多记几条；不合格的条目会被拦下留痕',
-            meta: { chatKey: chat.key, fps: window.map(m => m.fp), ...(budget ? { budget: true } : {}), ...(transient ? { transient: true } : {}) },
+            meta: { chatKey: chat.key, fps: window.map(m => m.fp), positions: window.map(m => m.pos), ...(budget ? { budget: true } : {}), ...(transient ? { transient: true } : {}) },
         });
     }
     // 今天的花费到没到上限；到了而且能交给窗口（没设 fallback: off）：记账交给窗口接着记（试玩 10/12：到了上限就停，落了八十多条）
@@ -148,18 +146,18 @@ export function createWorker({ store, records, getConfig, clientFactory = create
         stale: meta => {
             const chat = store.db.prepare('select story_id from chats where key = ?').get(meta.chatKey);
             const have = new Set(store.currentMessages(meta.chatKey).map(m => m.fp));
-            return !chat || !meta.fps.every(fp => have.has(fp)) || meta.fps.every(fp => records.isDone(chat.story_id, fp));
+            return !chat || !Array.isArray(meta.positions) || !meta.fps.every(fp => have.has(fp)) || meta.fps.every(fp => records.isDone(chat.story_id, fp));
         },
         apply: (text, meta) => {
             const chat = store.requireChat(meta.chatKey);
             const messages = messagesFor(meta.chatKey);
-            const window = meta.fps.map(fp => messages.find(m => m.fp === fp));
-            if (window.some(m => !m)) throw Object.assign(new Error('messages_changed'), { status: 409 });
-            const start = messages.indexOf(window[0]);
+            const window = replyWindow(meta.positions, meta.fps, messages);
+            if (!window) throw Object.assign(new Error('messages_changed'), { status: 409 });
+            const start = messages.findIndex(m => m.pos === window[0].pos);
             const context = messages.slice(Math.max(0, start - 2), start);
             const config = getConfig();
             const prepared = prepareWindow({ records, config, chat, window, context, names: { user: userName(messages) }, pocket: candidatesOf(meta.chatKey), known: knownOf(chat, userName(messages)), remoteOf: remoteOf(chat, messages), facePresentOf: facePresentOf(chat) });
-            const jobId = records.startJob({ storyId: chat.story_id, chatKey: chat.key, positions: window.map(m => m.pos), model: 'window' });
+            const jobId = records.startJob({ storyId: chat.story_id, chatKey: chat.key, positions: meta.positions, model: 'window', provider: 'window' });
             try {
                 const r = applyReply({ records, config, chat, window, prepared, jobId, raw: text });
                 markShown(meta.chatKey, r.shown, r.voided, r.unshown);
@@ -168,7 +166,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                 kick();
                 return { accepted: r.accepted, rejected: r.rejected };
             } catch (error) {
-                records.failJob(jobId, error.message, text);
+                records.failJob(jobId, error.message, text, { retryable: error.invalidReply === true });
                 throw Object.assign(error, { status: 400 });
             }
         },
@@ -194,7 +192,8 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                 const chat = store.requireChat(chatKey);
                 const over = !byWindow && overBudget(config);
                 if (over && (ownClient || !windowOnBudget(config))) { results.push({ stopped: 'budget' }); break; }
-                const messages = messagesFor(chatKey);
+                const revision = store.syncRevision(chatKey);
+                const messages = messagesFor(chatKey, { revision });
                 let [window] = planWindows(messages, fp => records.isDone(chat.story_id, fp), { from: fromOf(chat), through: throughOf(chatKey) });
                 if (!window) break;
                 // 一段失败两次就对半切（整段送进去会触发中转/模型整段放弃，切小了往往就过了）；
@@ -214,7 +213,17 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                 if (byWindow) { results.push({ handoff: handOff({ chat, messages, window, context, names, why: '设成了把记账交给窗口做（不走 API）' }) }); break; }
                 if (over) { results.push({ handoff: handOff({ chat, messages, window, context, names, budget: true, why: `今天的花费到了上限（约 ${records.spentToday().toFixed(2)} / ${config.extractor.dailyBudgetUsd}），这一段交给窗口记` }) }); break; }
                 try {
-                    const r = await runWindow({ records, client, config, chat, window, context, names, pocket: candidatesOf(chatKey), known: knownOf(chat, names.user), remoteOf: remoteOf(chat, messages), facePresentOf: facePresentOf(chat) });
+                    const fps = new Set(window.map(m => m.fp));
+                    const originalWindow = messages.filter(m => fps.has(m.fp)).length === fps.size ? window : null;
+                    const currentView = () => {
+                        if (revision === store.syncRevision(chatKey)) return { window: originalWindow };
+                        const current = messagesFor(chatKey, { refresh: true });
+                        return { window: replyWindow(window.map(m => m.pos), window.map(m => m.fp), current), positionContext: () => {
+                            const liveChat = store.requireChat(chatKey);
+                            return { chat: liveChat, remoteOf: remoteOf(liveChat, current), facePresentOf: facePresentOf(liveChat) };
+                        } };
+                    };
+                    const r = await runWindow({ records, client, config, chat, window, currentView, context, names, pocket: candidatesOf(chatKey), known: knownOf(chat, names.user), remoteOf: remoteOf(chat, messages), facePresentOf: facePresentOf(chat) });
                     markShown(chatKey, r.shown, r.voided, r.unshown);
                     noteFaces(chat);
                     await afterCommit(chatKey);

@@ -767,15 +767,38 @@ export function boardSegmentEdit(segments, { at, until = null, present, dates = 
     // until 是纠正意图的后继界限；end 只是本轮投影结果，不能作为下轮输入。
     return {before,after,at,until,end};
 }
+export function frozenBoardAvatars(metadata) {
+    return new Set(Object.values(metadata?.rpeBoardApplied ?? {}).filter(r => r.review).map(r => r.avatar));
+}
+export function readBoardMarks(c, { boardCast, chatKey }, group, fallback, positions = c.chat.keys()) {
+    const wanted = new Map();
+    const scope = (boardCast?.length ? boardCast : c.characters ?? []).filter(p => p.role !== '不用' && !isCamera(p));
+    for (const pos of positions) {
+        const m = c.chat[pos];
+        if (!m || m.is_system) continue;
+        for (const [key, value] of Object.entries(m.extra?.rp_board?.people ?? {})) {
+            const choices = scope.filter(p => p.avatar === key || p.name === key);
+            const inGroup = choices.filter(p => group.members.includes(p.avatar));
+            const saved = c.chatMetadata.rpeCardChoices?.[chatKey]?.[key]?.avatar;
+            const ch = scope.find(p => p.avatar === key) ?? (inGroup.length === 1 ? inGroup[0] : scope.find(p => p.avatar === saved) ?? (choices.length === 1 ? choices[0] : null));
+            const status = typeof value === 'object' ? value?.status : value;
+            if (!ch || !['在场','远程','不在','外头'].includes(status)) continue;
+            const fp = fingerprintMessage(m, speakerOf(m, fallback));
+            wanted.set(ch.avatar + ':' + pos + ':' + fp, { avatar: ch.avatar, name: ch.name, pos, fp, status, markKey: key });
+        }
+    }
+    return wanted;
+}
 export function undoBoardSegmentEdit(segments, edit) {
-    const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+    const same=({fromDate='',toDate='',...a},{fromDate:from='',toDate:to='',...b})=>
+        fromDate===from&&toDate===to&&Object.keys(a).length===Object.keys(b).length&&Object.keys(a).every(k=>Object.hasOwn(b,k)&&JSON.stringify(a[k])===JSON.stringify(b[k]));
     const removed=edit.before.filter(s=>!edit.after.some(a=>same(a,s)));
     const added=edit.after.filter(s=>!edit.before.some(a=>same(a,s)));
     const kept=structuredClone(segments??[]);
     let later=null;
     for(const s of added){
         let i=kept.findIndex(a=>same(a,s));
-        if(i<0&&s.to==null){i=kept.findIndex(a=>a.from===s.from&&a.to!=null&&a.to>s.from);if(i>=0)later=kept[i];}
+        if(i<0&&s.to==null){i=kept.findIndex(a=>a.to!=null&&a.to>s.from&&same({...a,to:null,toDate:''},{...s,to:null,toDate:''}));if(i>=0)later=kept[i];}
         if(i<0)return {ok:false,reason:'纠正所属区间已被后续操作修改，请核对'};
         kept.splice(i,1);
     }

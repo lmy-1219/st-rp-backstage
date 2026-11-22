@@ -286,10 +286,25 @@ export function closestSentence(body, text) {
 // 猜的（用户 10/7：一定防住猜测被写成真的，防不住就宁愿不记）：内容里得看得出是猜的；引文是猜测、内容却写成别人的事的，拦下
 const GUESS_WORD = /猜|以为|估计|怀疑|认为|觉得|看样子|料定|想必|推测|判断|八成|多半|恐怕|怕是|准是|看来|兴许|没准/;
 const GUESS_CUE = /听这动静|听这声|听动静|听着像|看样子|看这样子|八成|多半|估计|恐怕|想必|怕是|准是|看来|兴许|没准|我猜|猜你|以为你/;
+// 回包的楼号只认出包时的窗；身份和相对次序都对上才整窗交给核对。
+export function replyWindow(positions, fps, messages) {
+    if (!Array.isArray(positions) || !fps.length || positions.length !== fps.length || new Set(fps).size !== fps.length) return null;
+    const byFp = new Map();
+    for (const m of messages) byFp.set(m.fp, byFp.has(m.fp) ? null : m);
+    const window = [];
+    for (const [i, fp] of fps.entries()) {
+        const pos = positions[i], m = byFp.get(fp);
+        if (!m || !Number.isSafeInteger(pos) || pos < 0 || (i && (pos <= positions[i - 1] || m.pos <= window[i - 1].pos))) return null;
+        window.push(m.pos === pos ? m : { ...m, replyPos: pos });
+    }
+    return window;
+}
+const replyPosOf = m => m.replyPos ?? m.pos;
+
 // linkRows：这次给过的【还开着的】各条 {holder, guess}（证实、否定只接猜的那几条，而且猜的那个人得在场）
 export function verify(items, { window, clean, presenceOf, remoteOf = () => [], facePresentOf = () => [], openIdeaIds, perMessageCap = 4, windowCap = null, onlyTypes = null, linkIds = new Set(), linkRows = new Map(), recent = [], known = [] }) {
     const knownByN = new Map(known.map(k => [k.n, k]));
-    const byPos = new Map(window.map(m => [m.pos, m]));
+    const byPos = new Map(window.map(m => [replyPosOf(m), m]));
     const accepted = [], rejected = [];
     const perMessage = new Map(), perLong = new Map();
     const cap = windowCap ?? Math.min(16, 4 + window.length);
@@ -359,7 +374,7 @@ export function verify(items, { window, clean, presenceOf, remoteOf = () => [], 
         }
         if (record.type === '时间' && item?.['时间证据'] != null && !Array.isArray(item['时间证据'])) record.clock = { ...record.clock, unsure: true };
         if (record.type === '时间' && Array.isArray(item?.['时间证据'])) {
-            const ref = item['时间点'] == null ? m : window.find(x => x.pos === item['时间点'] && x.pos <= m.pos);
+            const ref = item['时间点'] == null ? m : window.find(x => replyPosOf(x) === item['时间点'] && x.pos <= m.pos);
             record.clock = { ...record.clock, source: ref?.fp, point: ref?.pos,
                 evidence: item['时间证据'].map(f => ({ type: f?.type, now: f?.now === true,
                     quote: typeof f?.quote === 'string' ? f.quote.trim() : '', date: f?.date,
@@ -624,11 +639,15 @@ export function openItemsFor({ records, chatKey, window, clean, people = null, s
 // 跑一个小窗：组提示词 → 调模型 → 核对 → 落账。失败就记失败，不标"已记账"，下次重试。
 // 一小窗要问模型的全部东西（提示词、在场的人、开着的想法）。外援包也用它：窗口拿到的输入和模型拿到的一字不差。
 // remoteOf(pos)：那条时隔着电话、消息的人（worker 照进场记录算好传进来；不传就当没有）
-export function prepareWindow({ records, config, chat, window, context, names, onlyTypes = null, pocket = [], known = [], remoteOf = () => [], facePresentOf = () => [] }) {
-    const clean = stripper(config.strip);
+function windowPresence(chat, names, remoteOf) {
     const members = chat.members ? JSON.parse(chat.members) : [];
     const anchors = chat.anchors ? JSON.parse(chat.anchors) : null;
-    const presenceOf = (m, rec = null) => presentAt(m.pos, { members, anchors, userName: names.user, speakerName: m.displayName, remote: remoteOf(m.pos), type: rec?.type ?? null, holderName: rec?.holderName ?? null });
+    return (m, rec = null) => presentAt(m.pos, { members, anchors, userName: names.user, speakerName: m.displayName, remote: remoteOf(m.pos), type: rec?.type ?? null, holderName: rec?.holderName ?? null });
+}
+
+export function prepareWindow({ records, config, chat, window, context, names, onlyTypes = null, pocket = [], known = [], remoteOf = () => [], facePresentOf = () => [] }) {
+    const clean = stripper(config.strip);
+    const presenceOf = windowPresence(chat, names, remoteOf);
     const openIdeas = records.openIdeas(chat.key);
     const speakers = [...new Set(window.map(m => m.displayName).filter(Boolean))];
     const people = [...new Set([...speakers, ...window.flatMap(m => presenceOf(m)), ...window.flatMap(m => [...remoteWays(remoteOf(m.pos)).keys()])])];
@@ -651,7 +670,7 @@ export function prepareWindow({ records, config, chat, window, context, names, o
 function showProofs(items, window, prepared) {
     const shown = [], unshown = [];
     for (const i of items.filter(i => i?.['型'] === '露面')) {
-        const m = window.find(w => w.pos === Number(i['消息号'])), id = Number(String(i['对应'] ?? '').trim().replace(/^袋/, ''));
+        const m = window.find(w => replyPosOf(w) === Number(i['消息号'])), id = Number(String(i['对应'] ?? '').trim().replace(/^袋/, ''));
         const ref = prepared.menuRefs?.get(id), conditioned = prepared.conditionItems?.has(id);
         const miss = why => unshown.push({ id: Number.isSafeInteger(id) ? id : null, pos: m?.pos ?? null, fp: m?.fp ?? null, why });
         if (!m || !Number.isSafeInteger(id) || !ref || !prepared.menuIds?.has(id)) { miss('露面对不上这次给的件或消息'); continue; }
@@ -691,13 +710,14 @@ function bindMenuClaim(r, window, prepared) {
 
 // 拿到回答以后：解析、核对、落账。模型答的和窗口交回的走同一条路。
 export function applyReply({ records, config, chat, window, prepared, jobId, raw, usage = null, onlyTypes = null }) {
-    const items = parseOutput(raw);
+    let items;
+    try { items = parseOutput(raw); } catch (error) { error.invalidReply = true; throw error; }
     // 一大段一条都没记，多半是模型整段放弃（比如碰到敏感内容），不当作"记完了"，让它重试或最终跳过留痕。
-    if (!onlyTypes && !items.length && window.length >= 4 && window.reduce((s, m) => s + m.text.length, 0) >= 2000) throw new Error('suspicious_empty');
+    if (!onlyTypes && !items.length && window.length >= 4 && window.reduce((s, m) => s + m.text.length, 0) >= 2000) throw Object.assign(new Error('suspicious_empty'), { invalidReply: true });
     // "露面"不是记录：认出哪条消息把哪件拿了出来；要有本楼引文，只证明露面（showProofs）。
     const { shown, unshown } = showProofs(items, window, prepared);
     // "作废"：要记的消息让口袋里或排着的哪件已经不成立了（一单已经交了，"催这单"那件就撤掉），记在让它不成立的那条消息上。
-    const voided = items.filter(i => i?.['型'] === '作废').map(i => ({ m: window.find(w => w.pos === Number(i['消息号'])), id: Number(String(i['对应'] ?? '').replace(/^袋/, '')), why: String(i['为什么'] ?? '').slice(0, 200) }))
+    const voided = items.filter(i => i?.['型'] === '作废').map(i => ({ m: window.find(w => replyPosOf(w) === Number(i['消息号'])), id: Number(String(i['对应'] ?? '').replace(/^袋/, '')), why: String(i['为什么'] ?? '').slice(0, 200) }))
         .filter(x => x.m && (prepared.menuIds ?? prepared.pocketIds)?.has(x.id) && !shown.some(s => s.id === x.id)).map(x => ({ id: x.id, pos: x.m.pos, fp: x.m.fp, why: x.why }));
     items.forEach((x, i) => { if (x && typeof x === 'object') x.__n = i + 1; });
     const { accepted, rejected } = verify(items.filter(i => i?.['型'] !== '露面' && i?.['型'] !== '作废'), { window, clean: prepared.clean, presenceOf: prepared.presenceOf, remoteOf: prepared.remoteOf, facePresentOf: prepared.facePresentOf, openIdeaIds: new Set(prepared.openIdeas.map(r => r.id)), onlyTypes, linkIds: prepared.linkIds, linkRows: prepared.linkRows, recent: prepared.recent, known: prepared.known ?? [] });
@@ -711,22 +731,30 @@ export function applyReply({ records, config, chat, window, prepared, jobId, raw
     return { jobId, accepted: accepted.length, rejected: rejected.length, costUsd, usage: used, shown, voided, unshown: [...unshown, ...unbound] };
 }
 
-export async function runWindow({ records, client, config, chat, window, context, names, onlyTypes = null, pocket = [], known = [], remoteOf = () => [], facePresentOf = () => [] }) {
+export async function runWindow({ records, client, config, chat, window, currentView = null, context, names, onlyTypes = null, pocket = [], known = [], remoteOf = () => [], facePresentOf = () => [] }) {
     const prepared = prepareWindow({ records, config, chat, window, context, names, onlyTypes, pocket, known, remoteOf, facePresentOf });
     const jobId = records.startJob({ storyId: chat.story_id, chatKey: chat.key, positions: window.map(m => m.pos), model: client.model });
-    let raw = null, usage = null;
+    let raw = null, usage = null, modelFailed = true;
     try {
         const reply = await client.complete({ system: prepared.system, user: prepared.user });
+        modelFailed = false;
         raw = reply.text;
         records.setServed?.(jobId, reply.servedModel);
         usage = {
             input: reply.usage.input ?? Math.ceil((prepared.system.length + prepared.user.length) * 1.4),
             output: reply.usage.output ?? Math.ceil(raw.length * 1.4),
         };
-        return { ...applyReply({ records, config, chat, window, prepared, jobId, raw, usage, onlyTypes }), measured: reply.usage.input != null };
+        const current = currentView?.() ?? { window };
+        const live = current.window;
+        if (!live) throw new Error('messages_changed');
+        if (current.positionContext && live.some(m => m.replyPos != null)) {
+            const { chat, remoteOf, facePresentOf } = current.positionContext();
+            Object.assign(prepared, { presenceOf: windowPresence(chat, names, remoteOf), remoteOf, facePresentOf });
+        }
+        return { ...applyReply({ records, config, chat, window: live, prepared, jobId, raw, usage, onlyTypes }), measured: reply.usage.input != null };
     } catch (error) {
         const e = config.extractor;
-        records.failJob(jobId, error.message, raw, usage ? { usage, costUsd: (usage.input * e.priceInPerM + usage.output * e.priceOutPerM) / 1e6 } : {});
+        records.failJob(jobId, error.message, raw, { usage, costUsd: usage ? (usage.input * e.priceInPerM + usage.output * e.priceOutPerM) / 1e6 : null, retryable: modelFailed || error.invalidReply === true });
         throw error;
     }
 }
