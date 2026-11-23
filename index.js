@@ -4,10 +4,11 @@
 // ③ 设置面板里的开关与状态。后台连不上时什么都不做，ST 照常。
 import { visibleTo, filterVisible, knockHtml, autoDoorHtml, guideHtml, guideStaleOn, guideClosed, freshDoorNotices, soloDoorToast, createArrivalBatcher, sealArrival, sealedHolds, unsealArrival, sortArrivals, arrivalToastLines, unmutedMembers, autoTurnEnabled, playerTyping, automodeHintDue, applyLeaveEvent, classify, openSegment, closeSegment, residentFromStart, ensureCameraPresence, repairResidentSegment, restoreSegment, runLeaveAttempt, leaveRetryView } from './sync.mjs';   // 自动进离场与调度（1c）：谁看得见、候着那一行
 import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, keepRecentRounds, olderReplies, filterLore, planPlacement, SLOT_MACROS, CAMERA_FLAG, cameraPromptPlan, cameraBookPlan, cardNamedInGroup, isCamera, setCamera, loreHash, narratorSaysI, namedIn, doorMark, captureDoorHandoff, doorHandoffs, doorHtml, cameraJoinPoint, addedMembers, arriveOpts, personaPayload, createPersonaWatch } from './sync.mjs';
-import { observeManualLeaveCommand } from './sync.mjs';
+import { observeManualLeaveCommand, visibilityTag } from './sync.mjs';
 import { cutByPresence, storyTimeAt } from './presence.mjs';
+import { importLegacyPresence } from './presence-import.mjs';
 import { captureManualLeave, captureSegmentOpen, manualLeaveCardMatches, manualLeaveWriter, segmentOpenArrivalFailure, segmentOpenFailure, writeSegmentOpen } from './presence-write.mjs';
-import { boardSegmentEdit, undoBoardSegmentEdit, frozenBoardAvatars, readBoardMarks } from './sync.mjs';
+import { undoBoardSegmentEdit, frozenBoardAvatars, readBoardMarks, boardDecision, boardEditFor, boardRecordMatches } from './sync.mjs';
 import { failureView, setStage, stageHtml, cardChoiceHtml } from './lifecycle.mjs';
 
 const MODULE = 'rp_emergence';
@@ -31,7 +32,8 @@ const ctx = () => new Proxy(SillyTavern.getContext(), { get(target, name) {
 // 用户把写着这些宏的条目放进 ST 的"提示词管理"（面板上一键加），就能像别的条目一样拖拽、改深度、在外面加自己的话；
 // 当前预设里没有的那几块，按面板"提示词位置"里设的位置用扩展提示放。
 const live = Object.fromEntries(SLOT_MACROS.map(k => [k, '']));
-for (const k of SLOT_MACROS) { try { ctx().registerMacro?.(`rpe_${k}`, () => live[k] ?? '', '后台那一格（RP：幕后）'); } catch { /* 老版本 ST 没有宏：只用扩展提示 */ } }
+const readMacro = k => () => live[k] && state.livePermission?.() ? live[k] : '';
+for (const k of SLOT_MACROS) { try { ctx().registerMacro?.(`rpe_${k}`, readMacro(k), '后台那一格（RP：幕后）'); } catch { /* 兼容旧版 ST */ } }
 // {{rpe_soft}}：展开成空。开：身体决定权与防贬低提醒；关：只按本人状态照常相处；无标记：兼容开。
 try { ctx().registerMacro?.('rpe_soft', () => '', '记号：收着点开时提醒身体决定权与防贬低；关时照常相处；无标记兼容开（RP：幕后）'); } catch { /* 老版本 ST 没有宏 */ }
 // ST 自己的提示词管理（只在对话补全类的 API 下有）：动态取，取不到就只用扩展提示
@@ -151,7 +153,7 @@ function cardHash(text) {
 
 const API_TIMEOUT = 30000;
 async function api(route, body, timeout = 30000, { background = false, keep, origin, prepare } = {}) {
-    const confirmation = route === 'presence-check';
+    const confirmation = route === 'presence-check', requestEpoch = route === 'status' && state.epoch;
     const t0 = performance.now();
     let ok = false;
     const changesCast = route === 'cast' && (Array.isArray(body?.cards) || Array.isArray(body?.set))
@@ -181,6 +183,7 @@ async function api(route, body, timeout = 30000, { background = false, keep, ori
         if (response.status === 409 && data.error === 'window-mismatch') throw windowRejected('本页聊天和后台登记不符，请重新打开聊天', 409);
         if (!confirmation) backendConnection.observe(response.status === 404 && data.error === 'unknown_chat' ? 200 : response.status);
         if (!response.ok) throw Object.assign(new Error(data.error || String(response.status)), { status: response.status, code: data.error === 'window-mismatch' ? undefined : data.error });
+        if (route === 'status' && data.enabled === false && requestEpoch === state.epoch && body.chatKey === state.chatKey) invalidatePermission();
         ok = true;
         return data;
     } catch (error) {
@@ -293,7 +296,7 @@ async function refreshPlan() {
 }
 
 // 单聊（T070）：不管自动进离场开没开都取门——单聊里不叩门，到时候了的人只能挂在门上、弹一次提示；群聊照旧（自动进离场开着时不取）
-async function refreshDoor() {
+async function refreshDoor(valid) {
     const solo = !currentGroup(ctx());
     if (!state.chatKey || !settings().enabled || (!solo && auto.on !== false)) { state.door = { items: [], lit: null }; render(); return; }
     const c = ctx(), present = members(c).filter(m => !m.disabled).map(m => m.name).filter(Boolean);
@@ -301,8 +304,10 @@ async function refreshDoor() {
     const chatKey = state.chatKey;
     try {
         const r = await api('door', { chatKey: state.chatKey, present, recentUser });
+        if (typeof valid === 'function' && !valid()) return;
         if (state.chatKey) { state.door = r; if (solo && state.chatKey === chatKey) noticeSoloDoor(r.items ?? [], r.lit); }
-    } catch { state.door = { items: [], lit: null }; }
+    } catch { if (typeof valid === 'function' && !valid()) return;
+        state.door = { items: [], lit: null }; }
     render();
 }
 // 单聊门上某人第一次到时候了：弹一次提示；同一件只弹一次，记在聊天元数据里（换页面不重复弹）
@@ -1365,11 +1370,13 @@ async function openPlaces() {
     const box = document.createElement('div');
     box.style.textAlign = 'left';
     let preview = null;
+    const window = state.loadedWindow;
     const draw = () => {
         const m = promptManagerNow();
         const covered = coveredByPreset();
         const places = settings().places ?? {};
         const presetName = c.chatCompletionSettings?.preset_settings_openai ?? '（不明）';
+        const previewText = preview?.();
         const ours = id => BLOCKS.some(b => b.id === id);
         const cameraRows = m?.activeCharacter ? m.getPromptOrderForCharacter(m.activeCharacter).map(e => { const q = m.serviceSettings.prompts.find(p => p.identifier === e.identifier) ?? { name: e.identifier }; return `<label style="display:block"><input type="checkbox" data-camera-keep="${escapeHtml(e.identifier)}" ${settings().cameraKeep.includes(e.identifier) ? 'checked' : ''}> 旁白也用：${escapeHtml(ST_NAMES[e.identifier] ?? q.name ?? e.identifier)}</label>`; }).join('') : '<small>提示词管理还没载好。</small>';
         const selectedBooks = Array.isArray(stWorldInfo?.selected_world_info) ? stWorldInfo.selected_world_info : [];
@@ -1420,7 +1427,8 @@ async function openPlaces() {
               ${state.chatKey ? '<button class="menu_button" style="flex:0 0 auto;white-space:nowrap" data-p="preview" type="button" title="查看本轮供料，建议排错时用。">看这一轮每块的内容</button>' : ''}
             </div>
             <p><small>加进预设以后要永久存进预设文件，在 ST 的预设那里点"更新当前预设"；不存的话换预设就没了。</small></p>
-            ${preview ? `<div style="white-space:pre-wrap;font-size:.9em;opacity:.9;max-height:40vh;overflow:auto;border:1px solid var(--SmartThemeBorderColor,#555);padding:.4em">${escapeHtml(preview)}</div>` : ''}`;
+            ${previewText ? `<div style="white-space:pre-wrap;font-size:.9em;opacity:.9;max-height:40vh;overflow:auto;
+                border:1px solid var(--SmartThemeBorderColor,#555);padding:.4em">${escapeHtml(previewText)}</div>` : ''}`;
     };
     box.addEventListener('change', event => {
         const cameraKeep = event.target?.dataset?.cameraKeep;
@@ -1481,11 +1489,7 @@ async function openPlaces() {
             }
             if (act === 'preview') {
                 const who = document.querySelector('#rp_emergence_panel [data-role="preview-who"]');
-                const member = (who?.value === CAMERA_PICK ? { avatar: 'narrator', name: '旁白' } : null) ?? members(c).find(x => x.avatar === who?.value) ?? members(c)[0];
-                if (member) {
-                    const r = await api('slot-preview', { chatKey: state.chatKey, speaker: member.avatar, speakerName: member.name, recent: c.chat.slice(-3).map(x => String(x.mes ?? '')), recentUser: String([...c.chat].reverse().find(x => x.is_user)?.mes ?? ''), present: [c.name1, ...members(c).filter(x => !x.disabled).map(x => x.name)], soft: softFlag() });
-                    preview = r.text || '（这一轮他没有要给的）';
-                }
+                preview = await previewMaterial(c, window, who).catch(() => null);
             }
         } catch (error) { globalThis.toastr?.error(error.message); }
         draw();
@@ -1824,6 +1828,16 @@ function localTarget(c, window = state.loadedWindow, { requireHead = false } = {
         && ids.stChatId === window.ids.stChatId && (ids.groupId == null ? null : String(ids.groupId)) === window.ids.groupId
         && (ids.groupId == null ? now.characters?.[now.characterId]?.avatar === window.avatar : currentGroup(now)?.chat_id === ids.stChatId);
 }
+export function importCurrentPresence({ through, materials } = {}) {
+    const c = ctx(), window = state.loadedWindow;
+    if (!localTarget(c, window)) return null;
+    const chatKey = state.opened && state.openedWindow === window ? state.chatKey : null;
+    return importLegacyPresence({
+        chat: c.chat, through, roster: state.boardCast?.length ? state.boardCast : c.characters ?? [], fallbackAvatar: fallbackAvatar(c),
+        generating: activeGeneration({ readOnly: true }), openingSnapshot: state.firstMemberSnapshot,
+        localWindow: { ...window.ids, avatar: window.avatar }, chatKey, chatMetadata: c.chatMetadata, materials,
+    });
+}
 // 单聊里旧消息可能没记 original_avatar，缺的就算这张卡的。
 function fallbackAvatar(c) {
     return c.groupId ? null : c.characters?.[c.characterId]?.avatar ?? null;
@@ -1851,6 +1865,7 @@ function members(c) {
 }
 
 function clearPrompts() {
+    state.restoreHistoryMemory?.(); state.restoreHistoryMemory = null;
     restoreCameraPrompts();
     state.cameraGenerating = false;
     const prompts = ctx().extensionPrompts;
@@ -1859,6 +1874,51 @@ function clearPrompts() {
 }
 
 // ---------- 同步 ----------
+
+const permissionClock = () => (state.panelMessageChange ?? 0) + (state.permissionChanges ?? 0);
+function invalidatePermission() {
+    state.confirmed = null;
+    state.permissionChanges = (state.permissionChanges ?? 0) + 1;
+}
+function permissionView(c) {
+    const fallback = fallbackAvatar(c), meta = c.chatMetadata;
+    const rows = c.chat.map(m => [speakerOf(m, fallback), !!m.is_user, m.name, String(m.mes ?? ''), m.send_date?.toString(),
+        !!m.is_system, !!m.hidden, m.swipe_id ?? 0, m.swipes, visibilityTag(m.extra?.rp_vis), m.extra?.rp_board,
+        m.extra?.rp_day, m.extra?.rp_door, m.extra?.rpeArrival]);
+    const cast = c.chat.some(m => m.extra?.rp_door) ? (state.boardCast ?? []).map(({ avatar, name, role }) => [avatar, name, role]) : null;
+    return JSON.stringify([rows, members(c), cast, anchorMap(c), meta?.rpeBoardApplied], (_, v) =>
+        v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v);
+}
+function samePermission(c, p) {
+    return !!p && p.epoch === state.epoch && p.chatKey === state.chatKey && localTarget(c, p.window)
+        && p.clock === permissionClock() && p.rows.length === c.chat.length && p.rows.every((m, i) => m === c.chat[i])
+        && p.view === permissionView(c);
+}
+function confirmedPermission(c = ctx(), p = state.confirmed) {
+    const ready = settings().enabled && state.opened !== false && state.status?.enabled !== false && !state.leaveWindow?.changes;
+    if (p && p === state.confirmed && (!ready || !samePermission(c, p))) invalidatePermission();
+    const pending = state.collapsed || state.pendingSyncEpoch === state.epoch;
+    const reason = state.syncFlight || state.dirty ? '同步中' : pending ? '待确认' : projectionGap(c) ? '权限投影不全' : '未确认';
+    if (reason === '未确认' && ready && p && p === state.confirmed) return p;
+    const counts = state.materialSkips ??= {};
+    counts[reason] = (counts[reason] ?? 0) + 1;
+}
+function canAdopt(p) { return !!p && !!confirmedPermission(ctx(), p); }
+function anchorMap(c) {
+    const anchors = c.chatMetadata?.contextIsolation?.anchors;
+    const record = value => value && Object.getPrototypeOf(value) === Object.prototype;
+    const validSegment = s => s && Number.isInteger(s.from) && s.from >= 0 && (s.to == null || Number.isInteger(s.to) && s.to >= s.from);
+    return record(anchors) && Object.values(anchors).every(a => record(a) && Array.isArray(a.segments) && a.segments.every(validSegment)) ? anchors : null;
+}
+function anchorsUnknown(c) {
+    if (anchorMap(c)) return false;
+    if (!c.chatMetadata || c.chatMetadata.contextIsolation !== undefined) return true;
+    if (!state.chatKey || !settings().enabled || state.opened === false || state.status?.enabled === false) return false;
+    const { synced } = state;
+    return synced?.epoch !== state.epoch
+        || synced.chatKey !== state.chatKey || synced.hasAnchorProjection !== false;
+}
+const projectionGap = c => anchorsUnknown(c) || c.chat.length !== state.synced?.seq.length || c.chat.some(m => m.hidden && !m.is_system);
 
 function scheduleSync(delay = 1500) {
     if (!state.chatKey || !settings().enabled) return;
@@ -1891,12 +1951,19 @@ function trackIsolateLeave() {
         },
     });
 }
-function syncNow(force = false, light = false) {
+function syncNow(force = false, light = false, preparing = null) {
     if (!state.chatKey || !settings().enabled) return Promise.resolve(false);
     if (state.openEpoch === state.epoch && state.opened === false) return Promise.resolve(false);
     // 调度必须等正在同步的那次连同撤销一起做完，不能只记 dirty 就拿旧场面排人。
-    if (state.syncFlight?.epoch === state.epoch) { state.dirty = true; return state.syncFlight.promise; }
-    const flight = { epoch: state.epoch, promise: null };
+    if (!light && state.syncFlight?.epoch === state.epoch) state.syncFlight.full = true;
+    const running = state.syncFlight;
+    if (running?.epoch === state.epoch) {
+        if (preparing) running.preparing = preparing;
+        if (!preparing || running.packetReady) state.dirty = true;
+        return running.promise;
+    }
+    state.confirmed = null;
+    const flight = state.syncOwner = { epoch: state.epoch, promise: null, full: !light, preparing };
     state.syncFlight = flight;
     flight.promise = syncOnce(force, light);
     void flight.promise.finally(() => { if (state.syncFlight === flight) state.syncFlight = null; }).catch(() => {});
@@ -1906,61 +1973,78 @@ function syncNow(force = false, light = false) {
 async function syncOnce(force = false, light = false) {
     state.syncing = true;
     clearTimeout(state.timer);   // 这就同步了：排着的那一次不用再来（一轮里同步四次，一半是重复的）
-    const epoch = state.epoch;
+    const { epoch, chatKey, loadedWindow: window, syncFlight: flight } = state;
+    const here = () => epoch === state.epoch && chatKey === state.chatKey && window === state.loadedWindow && flight === state.syncFlight;
+    let candidate;
     const tStart = performance.now();
     let changed = force;
     setStage(state, 'sync', '进行中', '核对人设与撤销');
     try {
         do {
             state.dirty = false;
+            flight.packetReady = false;
             const c = ctx();
             if (c.SlashCommandParser?.commands?.['isolate-leave']) trackIsolateLeave();
             await sendPersona();
             if (epoch !== state.epoch) return false;
+            const owned = !force && Object.values(c.chatMetadata?.rpeBoardApplied ?? {}).some(r => r.decision || r.takesOver);
+            const before = owned && (state.synced?.epoch === epoch ? state.synced.seq.length : (await api('status', { chatKey: state.chatKey })).total);
+            if (epoch !== state.epoch) return false;
+            const after = c.chat.length;
+            if (before >= 20 && after < before * 0.5 && before - after >= 10) {
+                state.collapsed = { before, after }; setStage(state, 'sync', '等待', '聊天缩短，等待确认'); return false;
+            }
             if (typeof reconcileBoardState === 'function') await reconcileBoardState();
             if (epoch !== state.epoch) return false;
             cameraOf(c);   // 旁白卡写的记 narrator：先认出它再算指纹
             const tb = performance.now();
-            const generating = activeGeneration();
-            const { seq, bodies, pending, doorHandoffs } = buildSequence(c.chat, fallbackAvatar(c), generating, state.boardCast ?? []);
+            flight.packetReady = true;
+            const preparing = flight.preparing && flight.preparing === state.generation;
+            const generating = preparing ? { ...flight.preparing, preparing: true } : activeGeneration();
+            const reviews = Object.values(c.chatMetadata?.rpeBoardApplied ?? {}).filter(r => {
+                const row = c.chat[r.pos], mark = row?.extra?.rp_board?.people?.[r.review?.markKey];
+                return mark && boardRecordMatches({ status: mark.status ?? mark, decision: mark.rpeDecision?.id }, r)
+                    && fingerprintMessage(row, speakerOf(row, fallbackAvatar(c))) === r.fp;
+            });
+            const ignoredMarks = new Map([...Map.groupBy(reviews, r => r.pos)].map(([pos, records]) => [pos, new Set(records.map(r => r.review.markKey))]));
+            const { seq, bodies, pending, doorHandoffs } = buildSequence(c.chat, fallbackAvatar(c), generating, state.boardCast ?? [], ignoredMarks);
             tick('同步:算指纹', performance.now() - tb, `${seq.length} 条`);
             if (pending) { state.pendingSyncEpoch = epoch; setStage(state, 'sync', '等待', '消息或生成状态尚未稳定'); return false; }
             const payload = {
                 chatKey: state.chatKey, seq, force, members: members(c),
-                anchors: c.chatMetadata?.contextIsolation?.anchors ?? null,
+                anchors: anchorMap(c) ?? undefined,
                 // 历史交接稿本也同步；执行亮门仍使用后台原有四楼窗口。
                 doorHandoffs: c.chat.flatMap((m, pos) => (buildSequence([m], fallbackAvatar(c), null, state.boardCast ?? []).doorHandoffs ?? []).map(d => ({ ...d, pos }))),
                 arrivalReceipts: c.chat.flatMap((m, pos) => m.extra?.rpeArrival ? [{ ...m.extra.rpeArrival, pos }] : []),
             };
+            candidate = { epoch, chatKey, window, clock: permissionClock(), rows: c.chat.slice(), view: permissionView(c), packet: JSON.stringify(payload) };
             setStage(state, 'sync', '进行中', '提交消息');
-            let result = await api('sync', payload);
+            let result = await api('sync', JSON.parse(candidate.packet));
             if (result.need?.length) {
                 for (const batch of batches(result.need.map(f => bodies.get(f)).filter(Boolean))) {
-                    if (epoch !== state.epoch) return false;
+                    if (!here()) return false;
                     await api('messages', { chatKey: state.chatKey, messages: batch });
                 }
-                if (epoch !== state.epoch) return false;
-                result = await api('sync', payload);
+                if (!here()) return false;
+                if (window && !samePermission(c, candidate)) { state.dirty = true; continue; }
+                result = await api('sync', JSON.parse(candidate.packet));
             }
-            if (epoch !== state.epoch) return false;
+            if (!here()) return false;
             state.collapsed = result.collapsed ?? null;
-            if (!result.committed) { setStage(state, 'sync', '等待', result.collapsed ? '聊天缩短，等待确认' : '后台尚未提交'); return false; }
+            if (result.committed !== true || result.need?.length || state.collapsed) { setStage(state, 'sync', '等待', '后台提交待确认'); return false; }
             if (state.pendingSyncEpoch === epoch) state.pendingSyncEpoch = null;
             // 记下后台这次认得的序列：生成前用它判断锚点那条是不是已经同步过（anchorCovered）
-            state.synced = { chatKey: state.chatKey, epoch, seq: seq.map(s => ({ f: s.f, w: s.w })) };
+            state.synced = { chatKey, epoch, seq: seq.map(s => ({ f: s.f, w: s.w })), hasAnchorProjection: result.hasAnchorProjection };
             if (result.added || result.removed || result.edited || result.repaired) changed = true;
             // 删改、换稿后不等下一句排队：沿现有事件账落实 undo，不认新离场、不叫人说话。
             // 撤销开回的区间和取消静音后的名单也同步回后台，之后的场面才是新状态。
             // light 且没有删改换稿时，undo 这趟只是顺手补做（上次没落实的重试），放到后面跑，不挡生成。
+            const synced = state.synced;
+            const round = () => state.syncOwner === flight && state.synced === synced && samePermission(c, candidate);
+            light &&= !flight.full;
             if (light && !(result.removed || result.edited || result.repaired)) {
-                void autoPeek({ onlyUndo: true }).then(done => { if (done && epoch === state.epoch) return syncNow(); }).catch(() => {});
-            } else if (await autoPeek({ onlyUndo: true })) {
-                if (epoch !== state.epoch) return false;
-                const live = ctx();
-                result = await api('sync', { ...payload, force: false, members: members(live), anchors: live.chatMetadata?.contextIsolation?.anchors ?? {} });
-                if (epoch !== state.epoch) return false;
-                if (!result.committed) { setStage(state, 'sync', '等待', '撤销后同步尚未提交'); return false; }
-            }
+                void autoPeek({ onlyUndo: true, round }).then(done => { if (done && window === state.loadedWindow) return syncNow(); }).catch(() => {});
+            } else if (await autoPeek({ onlyUndo: true, round })) state.dirty = true;
             force = false;
             state.note = '';
         } while (state.dirty && epoch === state.epoch);
@@ -2004,6 +2088,17 @@ async function syncOnce(force = false, light = false) {
             }
         };
         if (light) void tail().catch(() => {}); else await tail();
+        if (here() && state.dirty) scheduleSync(0);
+        if (flight.full && here() && !state.leaveWindow?.changes && state.status?.enabled !== false
+            && !state.dirty && !projectionGap(ctx()) && samePermission(ctx(), candidate)) {
+            state.confirmed = candidate;
+            const resume = state.resumeAuto;
+            if (resume) void flight.promise.then(() => {
+                if (state.resumeAuto !== resume) return;
+                state.resumeAuto = null;
+                return resume(candidate);
+            }).catch(() => {});
+        }
         return epoch === state.epoch;
     } catch (error) {
         if (epoch === state.epoch) {
@@ -2164,7 +2259,7 @@ async function openCurrent(c, epoch, mark, manual) {
     if (!here()) return false;
     const { stChatId, groupId } = chatIds(c);
     const gate = state.leaveWindow = { changes: 0 };
-    state.openEpoch = epoch; state.opened = false;
+    state.openEpoch = epoch; state.opened = false; state.confirmed = null;
     setStage(state, 'open', '进行中'); render();
     try {
         let result;
@@ -2292,11 +2387,17 @@ async function join(epoch = state.epoch) {
 function anchorSynced(rows, c) {
     const s = state.synced;
     if (!s || s.chatKey !== state.chatKey || s.epoch !== state.epoch || state.syncFlight || state.dirty) return false;
+    if (state.confirmed && rows.every((row, i) => row === state.confirmed.rows[i])) return true;
     const { seq, pending } = buildSequence(rows, fallbackAvatar(c), activeGeneration());
     if (pending || seq.length !== rows.length || s.seq.length < seq.length) return false;
     return seq.every((x, i) => x.f === s.seq[i].f && x.w === s.seq[i].w);
 }
 
+function currentBoardDecision(c, avatar, through) {
+    if ((!c.chat?.some(m => m.extra?.rp_board?.people) && !c.chatMetadata?.main_chat) || !localTarget(c)) return null;
+    const group = currentGroup(c), imported = group && importCurrentPresence({ through, materials: state.presenceMaterials });
+    return group ? boardDecision(c, state, group, avatar, fallbackAvatar(c), { through, imported }) : null;
+}
 function oldIsolationActive(c) {
     return typeof globalThis.contextIsolationInterceptor === 'function'
         && !c.extensionSettings?.disabledExtensions?.includes('third-party/context-isolation');
@@ -2307,23 +2408,102 @@ globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
     const c = ctx();
     const character = c.characters?.[c.characterId];
     const camera = character && isCamera(character);
+    const characterHistory = c.groupId && character && !camera && type !== 'quiet' && type !== 'impersonate';
+    const through = () => c.chat.length - (['swipe', 'continue'].includes(type) && !c.chat.at(-1)?.is_user
+        && speakerOf(c.chat.at(-1) ?? {}, fallbackAvatar(c)) === character?.avatar ? 2 : 1);
+    const decide = () => typeof currentBoardDecision === 'function' && settings().enabled && characterHistory
+        ? currentBoardDecision(c, character.avatar, through()) : null;
+    let decision = decide();
+    const origins = new WeakMap(), history = new WeakMap();
+    const { epoch, chatKey, loadedWindow } = state, { chat } = c, avatar = character?.avatar;
+    const rowKey = m => JSON.stringify([m.mes, m.send_date?.toString(), m.name, m.original_avatar, !!m.is_user, m.swipe_id ?? 0]);
+    const originals = Map.groupBy(chat, rowKey);
+    for (const row of _chat) {
+        const key = rowKey(row), matches = originals.get(key), exact = matches?.filter(m => m === row || row.extra && m.extra === row.extra);
+        history.set(row, { sources: exact?.length === 1 ? exact : matches, key });
+    }
+    const windowChanged = () => epoch !== state.epoch || chatKey !== state.chatKey || loadedWindow !== state.loadedWindow || ctx().chat !== chat;
+    const reader = () => ctx().characters?.[ctx().characterId];
+    const readAnchors = () => JSON.stringify(ctx().chatMetadata?.contextIsolation);
+    let anchors = readAnchors();
+    const visibleNow = () => {
+        const now = ctx(), who = reader(), viewer = isCamera(who ?? {}) ? '旁白' : who ?? {};
+        const restrict = now.groupId && who && viewer === who && type !== 'quiet' && type !== 'impersonate';
+        if (restrict && anchorsUnknown(now)) return new Set();
+        const current = chat.filter(m => !m.is_system);
+        if (restrict && (who.avatar !== avatar || anchors !== readAnchors()))
+            cutByPresence(current, now.chatMetadata?.contextIsolation?.anchors?.[who?.avatar], { full: chat });
+        return new Set(current.filter(m => !m.hidden && visibleTo(m, viewer, now.name1, now.characters)));
+    };
+    const lost = ({ sources, key }, visible) => sources?.some(m => !visible.has(m) || rowKey(m) !== key);
+    const recut = () => {
+        if (windowChanged()) { _chat.length = 0; return; }
+        const visible = visibleNow();
+        for (let i = _chat.length - 1; i >= 0; i--) {
+            const copy = history.get(_chat[i]);
+            if (copy && lost(copy, visible)) _chat.splice(i, 1);
+        }
+    };
     // 删改、撤回复后的 undo 和重投影必须先落实；生成数组只按最新区间裁剪。
-    if(settings().enabled&&state.chatKey&&INJECT_TYPES.has(type??'normal')) {
-        const epoch=state.epoch,chatKey=state.chatKey;
-        await syncNow(false, false);
-        if(epoch!==state.epoch||chatKey!==state.chatKey||ctx().chat!==c.chat)return;
+    if (settings().enabled && state.chatKey && INJECT_TYPES.has(type ?? 'normal') && !(state.generation && confirmedPermission(c))) {
+        await syncNow(false, false, state.generation);
+        if (windowChanged() || reader()?.avatar !== avatar) { recut(); if (decision) _abort?.(true); return; }
     }
-    if (c.groupId && character && !camera && type !== 'quiet' && type !== 'impersonate' && !oldIsolationActive(c)) {
+    anchors = readAnchors();
+    decision = decide();
+    const other = oldIsolationActive(c) && globalThis.contextIsolationInterceptor;
+    const ceiling = decision ? _chat.slice() : _chat;
+    if (characterHistory && !other) {
         const rec = c.chatMetadata?.contextIsolation?.anchors?.[character.avatar];
-        cutByPresence(_chat, rec, { full: c.chat, storyTimeAt: (index, back) => storyTimeAt(c.chat ?? [], index, back) });
+        cutByPresence(ceiling, rec, { full: c.chat, storyTimeAt: (index, back) => storyTimeAt(c.chat ?? [], index, back) });
     }
-    if (!settings().enabled || !state.chatKey || !INJECT_TYPES.has(type ?? 'normal')) return;
+    if (decision) {
+        const protectedCut = (rows, ceiling) => cutByPresence(rows, decision, { full: c.chat, protectedView: {
+            ceiling, through: through(), origins, thirdParty: !!other,
+            visible: row => visibleTo(row, character, c.name1, c.characters),
+            privateTo: row => !visibleTo(row, {}, c.name1, c.characters),
+        } });
+        if (other) {
+            const late = other.rpeFinal ?? new WeakMap();
+            if (!other.rpeFinal) {
+                const wrapped = async (rows, ...args) => {
+                    const finish = late.get(rows), ceiling = finish && rows.map(row => ({ ...row }));
+                    late.delete(rows);
+                    try { return await other(rows, ...args); } finally { finish?.(rows, ceiling); }
+                };
+                (globalThis.contextIsolationInterceptor = wrapped).rpeFinal = late;
+            }
+            late.set(_chat, (rows, ceiling) => {
+                if (windowChanged() || reader()?.avatar !== avatar || decide()?.version !== decision.version) {
+                    rows.length = 0; _abort?.(true); return; }
+                protectedCut(rows, ceiling);
+                recut();
+            });
+        }
+        if (!other && state.chatKey && INJECT_TYPES.has(type ?? 'normal')) keepRecentRounds(ceiling, Number(settings().historyRounds) || 0);
+        if (state.chatKey && settings().digestOld && INJECT_TYPES.has(type ?? 'normal'))
+            for (const at of olderReplies(ceiling, Number(settings().digestKeep) || 8)) ceiling.splice(at, 1);
+        protectedCut(_chat, ceiling);
+        const conflict = decision.ownFragments.find(p => !c.chat[p.at]?.extra?.rp_vis && decision.ranges.some(r => r.channel && r.from <= p.at && p.at < r.to));
+        if (conflict) globalThis.toastr?.warning(character.name + '（' + character.avatar + '）第 ' + conflict.at + ' 楼：本人当面原句与远程标记冲突，保留已核原句。');
+        const memory = c.extensionPrompts?.['1_memory'];
+        if (memory) {
+            const filter = memory.filter;
+            const hide = memory.filter = () => false;
+            state.restoreHistoryMemory = () => { if (memory.filter === hide) memory.filter = filter; };
+        }
+    }
+    if (!settings().enabled || !state.chatKey || decision && state.opened === false || !INJECT_TYPES.has(type ?? 'normal')) { recut(); return; }
     keepRecentRounds(_chat, Number(settings().historyRounds) || 0);
-    if (settings().digestOld) await digestOld(_chat).catch(() => {});
+    const p = confirmedPermission(c), viewer = camera ? '旁白' : character;
+    const stillHere = () => canAdopt(p) && reader()?.avatar === avatar && !windowChanged();
+    const original = (text, copy) => !windowChanged() && copy?.sources && !lost(copy, visibleNow()) ? text : '';
+    if (p && !decision && settings().digestOld) await digestOld(_chat, p, history, stillHere, original).catch(() => {});
+    recut();
     if (!character) return;
     cameraOf(c);
     // 发消息、打电话来的那几条（extra.rp_vis）同屋别的有卡的人看不见：发出去的这份按开口的人筛（方案 自动进离场与调度，N-377）
-    filterVisible(_chat, camera ? '旁白' : { name: character.name, avatar: character.avatar }, c.name1, c.characters,
+    filterVisible(_chat, viewer, c.name1, c.characters,
         () => globalThis.toastr?.warning('有旧私信的身份未能唯一确认，已暂时隔离。请按卡文件核对发送者或收件人。'));
     if (camera) {
         setCamera(character.avatar);
@@ -2333,34 +2513,42 @@ globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
     // 组格前先让后台认得锚点那条（T080）：anchor 是你刚发的那句的指纹，后台不认得它就只能退回上一条，
     // "接住"这类交给谁的判定会记在上一轮的回复上，那句同步进来以后判定就失效。
     // 返工：锚点那条（连同它前面的）后台上次同步已经认得时不同步（左滑、续写、同一句下的第二个人）；
-    // 要同步时只等提交（light），状态、门、日期这些刷新放到后面跑。同步失败不拦生成，照旧去组格。
-    const epoch = state.epoch, chatKey = state.chatKey, speaker = camera ? 'narrator' : character.avatar;
+    const speaker = camera ? 'narrator' : character.avatar;
     // 左滑重生成/续写时，被替换的那条不算上文 ⇒ 和第一次生成拿到同一格。
     let rows = c.chat;
     const last = rows.at(-1);
     if ((type === 'swipe' || type === 'continue') && last && !last.is_user && speakerOf(last, fallbackAvatar(c)) === speaker) rows = rows.slice(0, -1);
-    const before = rows.at(-1);
-    const anchor = before ? `${rows.length}:${fingerprintMessage(before, speakerOf(before, fallbackAvatar(c)))}` : 'start';
+    const source = row => rows[origins.get(row)];
+    const visibleEnd = decision ? Math.max(-1, ..._chat.map(row => source(row)?.mes === row.mes ? origins.get(row) : -1)) : rows.length - 1;
+    const before = rows[visibleEnd];
+    const anchor = before ? `${visibleEnd + 1}:${fingerprintMessage(before, speakerOf(before, fallbackAvatar(c)))}` : 'start';
+    if (!stillHere()) return;
     if (!anchorSynced(rows, c)) await syncNow(false, true).catch(() => {});
     const tSlot = performance.now();
+    const stale = () => (decision || decide()) && (epoch !== state.epoch || chatKey !== state.chatKey || ctx().chat !== c.chat
+        || ctx().characters?.[ctx().characterId]?.avatar !== speaker || decide()?.version !== decision?.version);
+    const stop = () => { if (!stale()) return false; _abort?.(true); return true; };
+    if (stop() || !stillHere()) { recut(); return; }
     // 最近几句正文（后台拿来找相关的旧事；你刚发的那句可能还没同步过去）和此刻在场的人。
-    const recent = rows.slice(-3).map(m => String(m.mes ?? ''));
-    const recentUser = String([...rows.slice(-6)].reverse().find(m => m.is_user)?.mes ?? '');
+    const recentBase = rows.slice(-3), user = rows.slice(-6).findLast(m => m.is_user), eligible = other ? [] : _chat;
+    const recent = (decision ? eligible.filter(m => recentBase.includes(source(m))) : recentBase).map(m => String(m.mes ?? ''));
+    const recentUser = String((decision ? eligible.find(m => user && source(m) === user) : user)?.mes ?? '');
     const present = [c.name1, ...members(c).filter(m => !m.disabled).map(m => m.name)].filter(Boolean);
     // 开了叙事组装时后台要先调一次模型（它自己 40 秒超时就退回纯程序那一格），这里多等一会儿。
-    let slot;
+    let slot, usable;
     // 这一次能发多长（ST 给的：上下文减回复长度）、上一次实际发了多长（N-288）：后台照这个放宽或收窄"想起的"
     const room = { tokens: Number(_contextSize) || null, ...(state.lastPrompt ?? {}) };
     // 要不到就隔一秒半再要一次（试玩 10/11：左滑正撞上导入规划，后台那一下没答上，这一条什么料都没拿到，只能照聊天记录往下写）
     const ask = () => api('slot', { chatKey, speaker, speakerName: camera ? '旁白' : character.name, anchor, recent, recentUser, present, room, soft: softFlag(), frontModel: stPrompts?.getChatCompletionModel?.() ?? null }, 60000);
     try { slot = await ask(); }
     catch (error) {
-        if (error?.name === 'TimeoutError' || error.code === 'window-mismatch' || epoch !== state.epoch) return;
+        if (stop() || error?.name === 'TimeoutError' || error.code === 'window-mismatch' || epoch !== state.epoch) return;
         await new Promise(resolve => setTimeout(resolve, 1500));
-        try { slot = await ask(); } catch { globalThis.toastr?.warning('这一条没拿到后台的料，角色只看聊天记录写。', 'RP：幕后', { timeOut: 6000 }); return; }
-    }
-    if (epoch !== state.epoch || ctx().characterId !== c.characterId) return;
-    const stillHere = () => state.epoch === epoch && state.chatKey === chatKey && settings().enabled;
+        if (stop() || !stillHere()) return;
+        try { slot = await ask(); } catch { if (!stop()) globalThis.toastr?.warning('这一条没拿到后台的料，角色只看聊天记录写。', 'RP：幕后', { timeOut: 6000 }); return; }
+    } finally { usable = stillHere(); if (!usable) recut(); }
+    if (stop() || !slot || !usable || (decision && visibleEnd < 0)) return;
+    if (decision && other) slot = { rule: slot.rule };
     // 当前预设里有条目的几块交给宏（位置由预设定）；没有的按面板设的位置放：0＝跟在主提示词后面，1＝插进聊天里、倒数第几条之前。
     // 调度排的第二个人起（noRepeat）：这一格末尾带一句，前一条已经答了的不重复、只接自己的那一截
     if (auto.noRepeat && auto.noRepeat === character.avatar && !camera) {
@@ -2371,6 +2559,7 @@ globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
     auto.noRepeat = null;
     const plan = planPlacement({ rule: slot.rule, text: slot.text, parts: slot.parts ?? null, covered: coveredByPreset(), places: settings().places ?? {}, depths: slot.depths ?? {} });
     Object.assign(live, plan.live);
+    state.livePermission = stillHere;
     for (const [key, text, position, depth] of plan.puts) c.setExtensionPrompt(KEYS[key], text, position, depth, false, 0, stillHere);
     tick('那一格:到放好', performance.now() - tSlot, character.name);
     // 这一次后台放进去多少字，等 ST 拼好提示词时一起量（下面 CHAT_COMPLETION_PROMPT_READY）
@@ -2383,12 +2572,40 @@ globalThis.rpEmergenceIntercept = async (_chat, _contextSize, _abort, type) => {
 
 // 早些的回复换成大意（N-231）：前台照着上文的样子写，上文里攒的原文越多越像。最近几条角色回复照原文，
 // 更早的换成后台记账记下的那几件事（事还在，句子和节奏不在了）。只改这一次发出去的那份，不动聊天记录；后台没回就原样发。
-async function digestOld(rows) {
+async function digestOld(rows, p, history, stillHere, original) {
     const c = ctx(), idx = olderReplies(rows, Number(settings().digestKeep) || 8);
     if (!idx.length || !state.chatKey) return;
+    const byFp = Map.groupBy(JSON.parse(p.packet).seq, row => row.f);
     const fps = idx.map(i => fingerprintMessage(rows[i], speakerOf(rows[i], fallbackAvatar(c))));
-    const r = await api('digest', { chatKey: state.chatKey, fps: [...new Set(fps)] }, 5000);
-    idx.forEach((i, k) => { const t = r?.items?.[fps[k]]; if (t) rows[i] = { ...rows[i], mes: t }; });
+    const safe = new Set(fps.filter(f => byFp.get(f)?.length === 1 && [null, '上门'].includes(byFp.get(f)[0].v?.way ?? byFp.get(f)[0].v)
+        && !byFp.get(f)[0].h));
+    if (!safe.size || !stillHere()) return;
+    const r = await api('digest', { chatKey: p.chatKey, fps: [...safe] }, 5000);
+    const summaries = new Map(idx.map((i, k) => [i, safe.has(fps[k]) && r?.items?.[fps[k]]]).filter(([, text]) => text));
+    if (summaries.size && stillHere()) rows.forEach((row, i) => {
+        const copy = history.get(row);
+        if (!copy?.sources) return;
+        let text = row.mes, summary = summaries.get(i);
+        const guarded = {
+            ...row,
+            get mes() { return stillHere() ? summary ?? text : original(text, copy); },
+            set mes(value) { text = value; summary = undefined; },
+        };
+        history.set(rows[i] = guarded, copy);
+    });
+}
+async function previewMaterial(c, window, who, userLimit = c.chat.length) {
+    const p = confirmedPermission(c), selected = who?.value;
+    const member = selected === CAMERA_PICK && currentGroup(c)?.members.includes(cameraOf(c)?.avatar)
+        ? { avatar: 'narrator', name: '旁白' } : members(c).find(m => m.avatar === selected && m.name && !m.disabled);
+    if (!member || !p || p.window !== window) return;
+    const reader = () => ctx().characters?.[ctx().characterId]?.avatar, avatar = reader(), selection = state.previewSelection;
+    const r = await api('slot-preview', { chatKey: p.chatKey, speaker: member.avatar, speakerName: member.name, recent: c.chat.slice(-3).map(m => m.mes),
+        recentUser: String(c.chat.slice(-userLimit).findLast(m => m.is_user)?.mes ?? ''), present: presentNames(c), soft: softFlag() });
+    return () => {
+        if (who?.value !== selected || reader() !== avatar || selection !== state.previewSelection || !canAdopt(p)) return (who = null);
+        return r.text || '（空：没有他知道的、和眼下有关的事）';
+    };
 }
 
 // ---------- 面板 ----------
@@ -2550,7 +2767,7 @@ export function boardLabelText(board, marked = false) {
 export function boardPeopleAfterEdit(previous = {}, selected = {}, clear = false) {
     const people = clear ? {} : { ...previous };
     for (const [name, value] of Object.entries(selected)) {
-        if (['在场', '远程', '不在'].includes(value)) people[name] = value;
+        if (['在场', '远程', '不在'].includes(value) && (people[name]?.status ?? people[name]) !== value) people[name] = value;
         else if (value === '' && (clear || (typeof previous[name] === 'object' ? previous[name]?.status : previous[name]) !== '外头')) delete people[name];
     }
     return people;
@@ -2629,6 +2846,7 @@ async function changeWindowEnabled(enabled, setEnabled, readStatus) {
         gate.changes++;
         gate.change = change;
     }
+    if (!enabled) invalidatePermission();
     try {
         await setEnabled({ chatKey, enabled });
         if (!here() || gate && gate.change !== change) return;
@@ -3002,14 +3220,10 @@ function mountPanel() {
                 await refreshPlan();
             }
             if (action === 'preview') {
-                const c = ctx(), avatar = panel.querySelector('[data-role="preview-who"]').value;
-                // 旁白：后台按镜头组那一格（说话的人记成 narrator，同发言时一样）
-                const member = avatar === CAMERA_PICK ? { avatar: 'narrator', name: '旁白' } : members(c).find(m => m.avatar === avatar);
-                if (member) {
-                    const present = [c.name1, ...members(c).filter(m => !m.disabled).map(m => m.name)].filter(Boolean);
-                    const { text } = await api('slot-preview', { chatKey: state.chatKey, speaker: member.avatar, speakerName: member.name, recent: c.chat.slice(-3).map(m => String(m.mes ?? '')), recentUser: String([...c.chat.slice(-6)].reverse().find(m => m.is_user)?.mes ?? ''), present, soft: softFlag() });
-                    await c.callGenericPopup(`<h3>${escapeHtml(member.name)}此刻会拿到的场记</h3><p><small>按最近 3 条消息找相关的旧事；实际发言时还会按那时的上文再算一次。</small></p><pre style="white-space:pre-wrap">${escapeHtml(text || '（空：没有他知道的、和眼下有关的事）')}</pre>`, c.POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
-                }
+                const c = ctx(), who = panel.querySelector('[data-role="preview-who"]');
+                const preview = await previewMaterial(c, state.loadedWindow, who, 6), text = preview?.();
+                if (text) await c.callGenericPopup(`<h3>所选角色此刻会拿到的场记</h3><pre style="white-space:pre-wrap">${escapeHtml(text)}</pre>`,
+                    c.POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
             }
             if (action === 'records') await showRecords(false);
             if (action === 'timings') await showTimings();
@@ -3088,6 +3302,7 @@ function mountPanel() {
         render();
     });
     panel.addEventListener('change', async event => {
+        if (event.target?.dataset?.role === 'preview-who') state.previewSelection = (state.previewSelection ?? 0) + 1;
         const progressIndex = event.target?.dataset?.intimateProgress;
         if (progressIndex !== undefined) {
             const chatKey = state.chatKey;
@@ -3575,7 +3790,7 @@ const MANUAL_STRATEGY = 2;   // ST 群的 activation_strategy：0 自然 1 列�
 const auto = { on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null };
 function presentNames(c) { return [c.name1, ...members(c).filter(m => !m.disabled).map(m => m.name)].filter(Boolean); }
 // 群的回复方式：开了改成手动（记下原来的），关了改回去。改的是 ST 的群设置，记在搬迁清单
-async function autoStrategy(enable) {
+async function autoStrategy(enable, valid = () => true) {
     const c=ctx(),current=currentGroup(c),saved=settings().autoStrategy??={};
     const groups=!enable&&!settings().enabled?(c.groups??(current?[current]:[])):(current?[current]:[]);
     for(const g of groups){
@@ -3585,14 +3800,20 @@ async function autoStrategy(enable) {
             if(!stGroups?.editGroup)throw Error('群设置尚未准备好');
             saved[g.id]=now;saveExtensionSettings();g.activation_strategy=MANUAL_STRATEGY;
             try{await stGroups.editGroup(g.id,true,false);if(Number(g.activation_strategy)!==MANUAL_STRATEGY)throw Error('群回复方式保存后核实失败');}
-            catch(error){g.activation_strategy=now;throw error;}
+            catch (error) { if (!valid()) return;
+                g.activation_strategy = now;
+                throw error; }
+            if (!valid()) return;
             globalThis.toastr?.info('这个群的回复方式改成了"手动"：你发一句 ST 不叫人，谁接话由后台排。关掉"谁接话"或"自动进离场"会改回原来的。','RP：幕后',{timeOut:10000});
         }else if(!enable&&Object.hasOwn(saved,g.id)){
             if(now===MANUAL_STRATEGY){
                 if(!stGroups?.editGroup)throw Error('群设置尚未准备好');
                 g.activation_strategy=Number(saved[g.id]);
                 try{await stGroups.editGroup(g.id,true,false);if(Number(g.activation_strategy)!==Number(saved[g.id]))throw Error('群回复方式恢复后核实失败');}
-                catch(error){g.activation_strategy=now;throw error;}
+                catch (error) { if (!valid()) return;
+                    g.activation_strategy = now;
+                    throw error; }
+                if (!valid()) return;
             }
             delete saved[g.id];saveExtensionSettings();
             globalThis.toastr?.info('群回复方式已核对，系统接管已关闭。','RP：幕后',{timeOut:6000});
@@ -3607,30 +3828,42 @@ function automodeHint() {
     globalThis.toastr?.warning('这个群开着 ST 自带的“自动模式”：ST 会每隔几秒自己随便叫一个人说话，和后台排的谁接话抢。建议在群设置里关掉“自动模式”。', 'RP：幕后', { timeOut: 15000 });
 }
 // 开没开、谁候着、谁刚作废：打开窗口时问一次；关着时每条之后也问一下（便宜，纯程序），开了就立刻跟上
-async function autoPeek({ onlyUndo = false, returnReply = false } = {}) {
+async function autoPeek({ onlyUndo = false, returnReply = false, round, drive = false } = {}) {
     if (!state.chatKey || !settings().enabled) return false;
-    const chatKey = state.chatKey, epoch = state.epoch;
+    const { chatKey, epoch, synced } = state, origin = editOrigin(), clock = permissionClock();
+    const ticket = state.autoTicket = (state.autoTicket ?? 0) + 1;
+    const valid = () => settings().enabled && epoch === state.epoch && ticket >= (state.autoAdopted?.ticket ?? 0)
+        && (round ? round() : localEdit(origin) && clock === permissionClock() && synced === state.synced);
     let r = null;
-    try { r = await api('turn', { chatKey, peek: true }); } catch (error) { if(chatKey===state.chatKey&&epoch===state.epoch){auto.unavailable=true;render();} if (onlyUndo) throw error; return false; }
-    if (chatKey !== state.chatKey || epoch !== state.epoch) return false;
+    try { r = await api('turn', { chatKey, peek: true }); }
+    catch (error) { if (!valid()) return drive ? 'expired' : false;
+        auto.unavailable = true;
+        render();
+        if (onlyUndo) throw error;
+        return false; }
+    if (!valid()) return drive ? 'expired' : false;
+    state.autoAdopted = { ticket, enabled: !!r?.enabled, synced };
     if (onlyUndo) {
         const c = ctx(), frozen = frozenBoardAvatars(c.chatMetadata);
         const undo = (r?.left ?? []).filter(l => l.action === 'undo' && (!frozen.size || !frozen.has(l.avatar || cardNamed(c, l.who)?.avatar)));
         if (!undo.length && !(r?.enabled === false && auto.on !== false)) return false;
-        if (await autoApply({ ...r, left: undo, lapsed: [] }) === false) {
+        if (await autoApply({ ...r, left: undo, lapsed: [] }, valid) === false) {
             const error = new Error('离场撤销尚未落实');
             error.code = 'LEAVE_APPLY_FAILED';
             throw error;
         }
         return undo.length > 0;
     }
-    const applied=await autoApply(r);
-    return returnReply ? r : applied===false ? false : !!r.enabled;
+    const applied=await autoApply(r, valid);
+    if (!valid()) return drive ? 'expired' : false;
+    if (returnReply || applied === false) return returnReply ? r : false;
+    return !!r.enabled || (drive ? { off: valid } : false);
 }
 // 后台答的里头：开没开（变了就改群策略）、候着的那一个（画按钮）、谁作废了（关区间、静音）
-async function autoApply(r) {
+async function autoApply(r, valid = () => true) {
     const enableTurn=autoTurnEnabled(r);
-    await autoStrategy(enableTurn);
+    await autoStrategy(enableTurn, valid);
+    if (!valid()) return 'expired';
     const was=auto.on;
     auto.on = !!r?.enabled;
     if (r?.enabled === false) {
@@ -3643,24 +3876,27 @@ async function autoApply(r) {
     auto.turnEnabled=enableTurn;
     automodeHint();
     auto.buttons=r?.buttons!==false;
-    if (typeof recoverOpeningMuted === 'function') await recoverOpeningMuted();
+    if (typeof recoverOpeningMuted === 'function') await recoverOpeningMuted(valid);
+    if (!valid()) return 'expired';
     auto.waiting = r?.waiting ?? null;
     if (Array.isArray(r?.remote)) auto.remote = new Map(r.remote.map(x => [x.avatar ?? x.who, { who: x.who, way: x.way }]));
-    if (auto.on===false && was!==false) refreshDoor().catch(() => {});
+    if (auto.on===false && was!==false) refreshDoor(valid).catch(() => {});
     let applied = true;
     const handled=new Set();
     for (const l of [...(r?.left??[]),...(r?.lapsed??[])]) {
         const key=l.id?`${l.id}:${l.version}:${l.action}`:null;
         if(key&&handled.has(key))continue;if(key)handled.add(key);
         // 连败三次的事件已在面板暂停并可手动再试；不挡其他事件和接话。
-        try { await autoClose(l,l.id&&!l.id.startsWith('lapsed:')?'走了':'作废'); }
-        catch(error) { applied = false; console.warn('[RP：幕后] 离场未落实，将重试',l.who,error); }
+        try { await autoClose(l,l.id&&!l.id.startsWith('lapsed:')?'走了':'作废',valid); }
+        catch (error) { applied = false;
+            if (valid()) console.warn('[RP：幕后] 离场未落实，将重试', l.who, error); }
+        if (!valid()) return 'expired';
     }
     render();
     return applied;
 }
 // 你发一句、某人答完：问后台谁接；该叩门就叩；谁走了关区间
-async function autoDrive(type) {
+async function autoDrive(type, handoff, ready) {
     if (!settings().enabled || !state.chatKey) return 'off';
     if (type && type !== 'normal') return false;
     const c = ctx(), group = currentGroup(c);
@@ -3677,7 +3913,7 @@ async function autoDrive(type) {
     const version = () => JSON.stringify([ctx().chat?.map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null,m.extra?.rp_door??null,m.swipe_id??0]),state.boardCast?.map(p=>[p.avatar,p.role]),currentGroup(ctx())?.members,currentGroup(ctx())?.disabled_members,ctx().chatMetadata?.contextIsolation?.anchors]);
     let localVersion = version();
     if (auto.blocked?.key === key && auto.blocked.version === localVersion) return false;
-    const chatKey = state.chatKey, epoch = state.epoch, length = c.chat.length;
+    const { chatKey, epoch, loadedWindow } = state, length = c.chat.length;
     const driving = auto.driving ??= new Set(), claim = `${chatKey}:${epoch}:${key}`;
     const withdrawn=Object.values(c.chatMetadata?.rpeExecution??{}).some(e=>e.chatKey===chatKey&&e.result==='delivered'
         &&e.q?.execution?.through===length-1&&!c.chat.slice(e.at).some(m=>!m.is_user&&!m.is_system
@@ -3686,9 +3922,19 @@ async function autoDrive(type) {
     driving.add(claim); // 第一个 await 之前占住，peek、同步、落实期间的重入也不能再排。
     const current = () => {
         const now = ctx(), tip = now.chat?.at(-1);
-        return state.epoch === epoch && state.chatKey === chatKey && now.chat.length === length && !now.is_group_generating
-            && tip && sourceKey() === key;
+        return state.epoch === epoch && state.chatKey === chatKey && loadedWindow === state.loadedWindow && now.chat === c.chat
+            && now.chat.length === length && !now.is_group_generating && tip === last && sourceKey() === key;
     };
+    state.resumeAuto = null;
+    const resume = permission => current() && autoDrive(type, handoff, permission).then(handoff);
+    const pending = prior => {
+        const next = prior && current() && confirmedPermission(ctx());
+        if (next && next !== prior && next.clock <= prior.clock + 1 && next.view === prior.view) void Promise.resolve(next).then(resume).catch(() => {});
+        else if (current()) state.resumeAuto = resume;
+        return 'pending-confirmation';
+    };
+    const off = valid => ({ off: () => current() && valid() && !state.leaveWindow?.changes
+        && !state.collapsed && state.pendingSyncEpoch !== epoch });
     try {
         // ST 分支会复制元数据。跨窗或无法确认归属的记录只在本窗核对消息。
         const journal=c.chatMetadata?.rpeExecution??{};
@@ -3702,7 +3948,9 @@ async function autoDrive(type) {
             journalChanged=true;
         }
         if(journalChanged){await c.saveMetadata();if(!current())return false;}
-        if (!auto.on || auto.unavailable) { await autoPeek(); if (auto.unavailable || auto.on===null) return false; if (!auto.on) return 'off'; }
+        const peek = ready || (auto.on && !auto.unavailable) ? true : await autoPeek({ drive: true });
+        if (peek?.off) return off(peek.off);
+        if (peek !== true && peek !== 'expired') return current() ? peek : false;
         // 同步会重放系统区间，执行基线取同步之后；正文、裁决和人工静音仍须保持。
         const inputs=()=>JSON.stringify([ctx().chat.map(m=>[fingerprintMessage(m,speakerOf(m,fallbackAvatar(ctx()))),!!m.is_system,m.extra?.rp_board??null,m.extra?.rp_door??null,m.swipe_id??0]),
             state.boardCast?.map(p=>[p.avatar,p.name,p.role]),currentGroup(ctx())?.members,ctx().chatMetadata?.rpeManualMuted??null,
@@ -3710,18 +3958,33 @@ async function autoDrive(type) {
                 .map(([avatar,r])=>[avatar,r.rpeManualRevision])]);
         const sourceInputs=inputs();
         for(let pass=0;pass<3;pass++){
-            if (!current() || await syncNow(true) === false || !current()) return false;
+            if (state.collapsed?.before > length) return pending();
+            if (!current() || ((!ready || pass) && await syncNow() === false) || !current()) return pending();
             if(inputs()!==sourceInputs)return false;
+            const permission = confirmedPermission(ctx());
+            if (!permission || (!pass && ready && permission !== ready)) return pending();
+            const ticket = state.autoTicket = (state.autoTicket ?? 0) + 1;
+            const adopt = () => ticket >= (state.autoAdopted?.ticket ?? 0) && canAdopt(permission);
+            const enabled = state.autoAdopted?.synced === state.synced ? state.autoAdopted?.enabled : undefined;
+            if (!pass && (ready || peek === 'expired') && enabled === false) return off(adopt);
+            if (!pass && peek === 'expired' && enabled !== true) return pending();
             localVersion=version();
             let r = null;
             try { r = await api('turn', { chatKey, present: presentNames(ctx()), recentUser: [...ctx().chat].reverse().find(m => m.is_user)?.mes ?? '' }, 240000); }
-            catch { if (state.epoch === epoch && state.chatKey === chatKey) { auto.unavailable=true;render(); } return false; }
-            if (!current() || inputs()!==sourceInputs) return false;
-            if(version()!==localVersion)continue;
+            catch { if (!adopt() || !current()) return false;
+                auto.unavailable = true;
+                render();
+                return false; }
+            const adopted = adopt(), sameInputs = current() && inputs() === sourceInputs;
+            if (sameInputs && version() !== localVersion) continue;
+            if (!adopted || !sameInputs) return pending(sameInputs && permission);
+            state.autoAdopted = { ticket, enabled: !!r?.enabled, synced: state.synced };
             console.log('[RP：幕后] 谁接', JSON.stringify({ queue: r.queue, knock: r.knock, waiting: r.waiting, left: r.left, lapsed: r.lapsed, why: r.why }));
-            if (await autoApply(r)===false) return false;
-            if (!current()) return false;
-            if (!auto.on) return 'off';
+            const applied = await autoApply(r, adopt);
+            if (applied === 'expired' && current() && inputs() === sourceInputs && version() !== localVersion) continue;
+            if (!adopt()) return pending(current() && inputs() === sourceInputs && permission);
+            if (applied === false || !current()) return false;
+            if (!auto.on) return off(adopt);
             const complete = async work => {
                 let ok = false;
                 try { ok = await work(); }
@@ -3735,7 +3998,7 @@ async function autoDrive(type) {
                 if(ok||auto.executionStatus?.result!=='replan')return ok;
                 auto.blocked=null;continue;
             }
-            if (!auto.turnEnabled) return 'off';
+            if (!auto.turnEnabled) return off(adopt);
             const next = (r.queue ?? [])[0];
             // 问回来这会儿玩家开始打字了：不叫下一个（叩门在上面已经照旧让他写那一条）
             if (next && afterReply && typingNow()) { auto.executionStatus={result:'waiting',reason:'你在输入，接话停在这里'}; render(); return false; }
@@ -3872,8 +4135,13 @@ async function runScheduled(q, prepare) {
             throw Object.assign(Error(replan?'系统在重新核对在场，稍后接上':'发令前角色已静音，接话停下'),{result:replan?'replan':'muted'});
         }
         if(userChanged)throw Error('发令前在场设置被手动修改，请重新核对');
+        const decision=!camera&&typeof currentBoardDecision==='function'?currentBoardDecision(now,target):null;
         const segments=now.chatMetadata.contextIsolation?.anchors?.[target]?.segments;
-        if(!camera&&(segments?.length||systemProjection)&&!segments?.some(s=>s.from<=length&&(s.to==null||s.to>length)))throw Object.assign(Error(systemProjection?'系统在重新核对在场，稍后接上':'发令前角色已离场，接话停下'),{result:systemProjection?'replan':'muted'});
+        const open = spans => spans?.some(s => s.from <= length && (s.to == null || s.to > length));
+        const allowed = !(segments?.length || systemProjection) || open(segments);
+        if (!camera && (!allowed || decision?.blocks(length)))
+            throw Object.assign(Error(systemProjection ? '系统在重新核对在场，稍后接上' : '发令前角色已离场，接话停下'),
+                { result: systemProjection ? 'replan' : 'muted' });
         if(chat.length!==length||now.is_group_generating)throw Error('发令前已有新消息或生成，请重新核对');
         if(!chat.at(-1)?.is_user&&q.execution?.kind!=='knock'&&typeof typingNow==='function'&&typingNow())throw Object.assign(Error('你在输入，接话停在这里'),{result:'waiting'});
         issued=true;
@@ -3904,7 +4172,8 @@ function scheduledStatusHtml() {
     const status=off&&auto.executionStatus?.source!=='camera'?null:auto.executionStatus??(saved?{...saved[1],id:saved[0]}:null);
     const lines=[status?.reason];
     const review = state.boardReconcile ? '<div style="color:var(--warning,#d33)">' + escapeHtml(state.boardReconcile)
-        + Object.entries(c.chatMetadata?.rpeBoardApplied ?? {}).filter(([, r]) => r.review).map(([id, r]) =>
+        + Object.entries(c.chatMetadata?.rpeBoardApplied ?? {}).filter(([id, r], _, entries) => r.review
+            && !entries.some(([, next]) => next.applied && !next.undone && next.takesOver?.includes(id))).map(([id, r]) =>
             ` <span>${escapeHtml(r.name)} · 第 ${escapeHtml(r.pos)} 楼 </span><button type="button" class="menu_button" data-action="board-abandon" data-board-id="${escapeHtml(id)}" title="保留当前在场区间，停止自动撤回。">放弃这条纠正</button>`).join('') + '</div>' : '';
     const board=boardLabels.at(-1);
     for(const p of board?.people??[])if(['present','remote'].includes(p.status)&&currentGroup(c)?.disabled_members?.includes(p.avatar))lines.push(`${p.name}在场，${c.chatMetadata?.rp_emergence?.openingMuted?.includes(p.avatar)?'系统静音待核对':'手动静音，暂停发言'}`);
@@ -4001,7 +4270,7 @@ async function autoKnock(k) {
 }
 // 他走了（后台已经记了去向）、这次叩门作废了（他没进过场）：关区间、静音，不移出群
 const ackLeave=(chatKey,receipt)=>api('leave-ack',{chatKey,receipts:[receipt]});
-async function autoClose(l, why) {
+async function autoClose(l, why, valid = () => true) {
     const chatKey=state.chatKey, jobs=auto.jobs, key=l.id??`${l.who}:${l.at}`;
     if(jobs.has(key)) return jobs.get(key);
     if (!localTarget()) throw windowRejected();
@@ -4014,11 +4283,17 @@ async function autoClose(l, why) {
         const decision=classify({kind:'close',segments:segs??[],at:l.at,disabled:!!currentGroup(c)?.disabled_members?.includes(ch?.avatar),resident:ch?residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot}):false});
         if(decision.status==='superseded'||decision.status==='achieved'&&!decision.needsMute)delete failures[key];
     }
-    const task=runLeaveAttempt({failures,key,event:l,attempt:()=>applyAutoClose(l,why,chatKey),save:async()=>{if(state.chatKey!==chatKey||ctx().chat!==c.chat)throw Error('聊天已切换');await c.saveMetadata();}});
+    const retries = { [key]: failures[key] };
+    const task = runLeaveAttempt({ failures: retries, key, event: l, attempt: () => applyAutoClose(l, why, chatKey, valid), save: async () => {
+        if (!valid() || state.chatKey !== chatKey || ctx().chat !== c.chat) return;
+        if (retries[key]) failures[key] = retries[key];
+        else delete failures[key];
+        await c.saveMetadata();
+    } });
     jobs.set(key,task);
     try {return await task;} finally {jobs.delete(key);}
 }
-async function applyAutoClose(l,why,chatKey) {
+async function applyAutoClose(l,why,chatKey,valid = () => true) {
     const c=ctx(),group=currentGroup(c),ch=cardNamed(c,l.who,l.avatar);
     if(!group || !ch) throw new Error('找不到离场角色');
     if(l.avatar && ch.avatar!==l.avatar) throw new Error('离场角色的卡身份未对上，请确认卡文件');
@@ -4026,8 +4301,11 @@ async function applyAutoClose(l,why,chatKey) {
     const key=l.id??`lapsed:${ch.avatar}:${at}`;
     const journal=c.chatMetadata.rpeLeaveEvents??={};
     const epoch=state.epoch;
-    const guard=()=>{if(state.chatKey!==chatKey || state.epoch!==epoch || !localTarget(c)) throw windowRejected();};
-    const save=async()=>{guard();await c.saveMetadata();};
+    const guard = (fresh = true) => {
+        if (state.chatKey !== chatKey || state.epoch !== epoch || !localTarget(c) || fresh && !valid()) throw windowRejected();
+    };
+    const save = async () => { guard(false);
+        await c.saveMetadata() };
     const anchor=()=>c.chatMetadata.contextIsolation?.anchors?.[ch.avatar];
     const copy=x=>x==null?null:JSON.parse(JSON.stringify(x));
     const receipt=journal[key];
@@ -4042,6 +4320,7 @@ async function applyAutoClose(l,why,chatKey) {
         if(decision.status==='superseded') {
             journal[key]={...(receipt??{}),avatar:ch.avatar,status:'superseded',observed:true};
             await save();
+            guard();
             if(l.id) await ackLeave(chatKey,{id:l.id,version:l.version,action:l.action,result:'superseded'});
             return;
         }
@@ -4064,6 +4343,7 @@ async function applyAutoClose(l,why,chatKey) {
             const r=await closeSegment(c,{avatar:ch.avatar,name:ch.name,at,
                 resident:residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot}),
                 disabled:!!currentGroup(c)?.disabled_members?.includes(ch.avatar)});
+            guard(false);
             if(r.status==='superseded') throw Error('离场已被后来进场取代，请重新核对');
             rec.boundaryMethod='metadata';
             rec.status=r.status;
@@ -4075,7 +4355,11 @@ async function applyAutoClose(l,why,chatKey) {
         mute:async()=>{
             guard();
             const g=currentGroup(ctx()),i=g?.members.indexOf(ch.avatar)??-1;
-            if(i>=0 && !g.disabled_members?.includes(ch.avatar)) {rec.muting=true;await save();await setMemberMuted(ch.avatar,true,cmd=>c.executeSlashCommandsWithOptions(cmd));}
+            if (i >= 0 && !g.disabled_members?.includes(ch.avatar)) { rec.muting = true;
+                await save();
+                guard();
+                await setMemberMuted(ch.avatar, true, cmd => c.executeSlashCommandsWithOptions(cmd)); }
+            guard(false);
             if(i>=0 && !currentGroup(ctx())?.disabled_members?.includes(ch.avatar)) throw new Error('角色未静音');
             rec.muted=true;await save();
         },
@@ -4090,12 +4374,15 @@ async function applyAutoClose(l,why,chatKey) {
             const g=currentGroup(ctx()),i=g?.members.indexOf(ch.avatar)??-1;
             const unmute=(rec.muted||rec.muting)&&!rec.wasDisabled&&!laterClose()&&!c.chatMetadata.rpeManualMuted?.[ch.avatar]&&i>=0;
             if(unmute && g.disabled_members?.includes(ch.avatar))await setMemberMuted(ch.avatar,false,cmd=>c.executeSlashCommandsWithOptions(cmd));
+            guard(false);
             if(unmute && currentGroup(ctx())?.disabled_members?.includes(ch.avatar)) throw new Error('角色未取消静音');
             rec.undone=true;await save();
         },
-        ack:receipt=>ackLeave(chatKey,{...receipt,result:rec?.status??'applied'})
+        ack: receipt => { guard();
+            return ackLeave(chatKey, { ...receipt, result: rec?.status ?? 'applied' }); }
     });
-    if(l.action!=='undo') {if(state.remote?.avatar===ch.avatar)state.remote=null;auto.remote.delete(ch.avatar);}
+    if (valid() && l.action !== 'undo') { if (state.remote?.avatar === ch.avatar) state.remote = null;
+        auto.remote.delete(ch.avatar); }
 }
 // 快捷按钮：接／让他进来＝进场，不理＝作废（后台定，这里只传信号）
 async function autoAnswer(who, answer, avatar = null) {
@@ -4249,7 +4536,7 @@ for (const name of ['MESSAGE_SENT', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSA
         if (name === 'MESSAGE_EDITED' || name === 'MESSAGE_SWIPED' || name === 'MESSAGE_RECEIVED') {
             stripDoorMark(id, name === 'MESSAGE_EDITED' ? 'edit' : 'read').catch(() => {});
         }
-        if (name === 'GROUP_UPDATED') watchMembers();
+        if (name === 'GROUP_UPDATED') { state.permissionChanges = (state.permissionChanges ?? 0) + 1; watchMembers(); }
         scheduleSync();
         if (name !== 'MESSAGE_SENT') refreshDoor();
         if (name === 'MESSAGE_RECEIVED') askGuide(false).catch(() => {});
@@ -4305,7 +4592,12 @@ on('CHAT_COMPLETION_PROMPT_READY', (e = {}) => {
 });
 // 一个人的时候（N-276）：群里的人都静音了、玩家这句没人接——旁白卡在这个群里就让它写周围的动静
 // 有卡的人在场时（场记章程 #7、B4）：他们答完以后问后台一次，玩家这句是冲着没卡的人的，旁白接一手（cameraJoin）
-on('GROUP_WRAPPER_FINISHED', (e = {}) => { setTimeout(() => autoDrive(e.type).then(r => { if (r === 'off') return cameraTurn(e.type); }).catch(() => {}), 50); });
+on('GROUP_WRAPPER_FINISHED', (e = {}) => {
+    const origin = editOrigin(), epoch = state.epoch, last = ctx().chat?.at(-1);
+    const here = () => state.epoch === epoch && localEdit(origin) && ctx().chat?.at(-1) === last;
+    const handoff = result => here() && result?.off?.() && cameraTurn(e.type);
+    setTimeout(() => here() && autoDrive(e.type, handoff).then(handoff).catch(() => {}), 50);
+});
 async function cameraTurn(type, { force = false } = {}) {
     if (!settings().enabled || !state.chatKey || settings().camera === false) return false;
     if (type && type !== 'normal') return false;
@@ -5065,11 +5357,13 @@ function watchDraft() {
     box.addEventListener('input', e => {
         if (e?.isTrusted) lastKeyAt = Date.now();
         clearTimeout(draftTimer);
+        const window = state.loadedWindow, epoch = state.epoch;
         draftTimer = setTimeout(() => {
             if (!settings().enabled || !state.chatKey) return;
             const draft = box.value.trim();
             if (!draft || draft.startsWith('/')) return;
             const c = ctx();
+            if (epoch !== state.epoch || window !== state.loadedWindow || !confirmedPermission(c)) return;
             const recent = [...(c.chat ?? []).slice(-2).map(m => String(m.mes ?? '')), draft];
             const present = [c.name1, ...members(c).filter(m => !m.disabled).map(m => m.name)].filter(Boolean);
             api('prefetch', { chatKey: state.chatKey, draft, recent, present }, 5000, { background: true }).catch(() => {});
@@ -5361,7 +5655,7 @@ async function pickBoard(id) {
     const c = ctx(), m = c.chat?.[id];
     if (!m) return;
     if (!state.chatKey || !settings().enabled) { globalThis.toastr?.warning('这个窗口还没接入 RP：幕后。'); return; }
-    const current = m.extra?.rp_board ?? {};
+    const originalMark = m.extra?.rp_board, current = originalMark ?? {};
     const l = boardLabels.find(x => x.pos === id);
     const known = [...new Set(boardLabels.map(x => x.place).filter(Boolean))].slice(-6);
     const chatKey = state.chatKey;
@@ -5372,8 +5666,8 @@ async function pickBoard(id) {
     const ambiguous = Object.keys(current.people ?? {}).filter(name => cards.filter(p=>p.name===name).length>1);
     if (ambiguous.length) globalThis.toastr?.warning(`旧场面纠正有同名身份待确认：${ambiguous.join('、')}。请按卡文件选择。`);
     const now = avatar => l?.people?.find(p => p.avatar === avatar)?.status ?? null;
-    const currentValue = card => current.people?.[card.avatar] ?? (cards.filter(p => p.name === card.name).length === 1 ? current.people?.[card.name] : null);
-    const statusValue = card => { const v=currentValue(card); return typeof v === 'object' ? v?.status : v; };
+    const legacyValue = name => ambiguous.includes(name) || current.people?.[name]?.rpeDecision ? null : current.people?.[name];
+    const statusValue = ({ avatar, name }) => { const value = current.people?.[avatar] ?? legacyValue(name); return value?.status ?? value; };
     const nowWord = s => ({ present: '在场', remote: '远程', away: '不在眼前', absent: '不在', never: '没来过' })[s] ?? '？';
     const row = card => { const name=card.name, avatar=card.avatar, value=statusValue(card); return `<div style="padding:.35em 0;border-bottom:1px solid currentColor">` +
         `<div>${escapeHtml(name)} <small>${escapeHtml(avatar)}（系统认的：${nowWord(now(avatar))}）</small></div>` +
@@ -5388,10 +5682,14 @@ async function pickBoard(id) {
         </div>
         <button type="button" class="menu_button" data-role="rpe-board-reset" title="撤销本条纠正，建议确认识别无误再用。">清除此条场面纠正</button>
         <p><small>你定的算数，排在后台自己认的前面；从这条往后，直到之后又有人走了、来了、换了地方。存在这条消息里，跟着聊天文件走，也同步给后台。</small></p>`;
+    const epoch = state.epoch, fp = c.groupId && fingerprintMessage(m, speakerOf(m)), sw = m.swipe_id ?? 0;
+    const touched = new Set();
     let picked = null, clear = false;
     const ok = await c.callGenericPopup(html, c.POPUP_TYPE.CONFIRM, '', {
         okButton: '保存', cancelButton: '关闭',
         onOpen: popup => { popup.dlg.addEventListener('click', e => {
+            const radio = e.target?.closest?.('input[type="radio"]');
+            if (radio?.name.startsWith('rpe-bp-')) touched.add(radio.name.slice(7));
             const b = e.target?.closest?.('[data-role="rpe-board-pick"]');
             if (b) { const i = popup.dlg.querySelector('[data-role="rpe-board-place"]'); if (i) i.value = b.textContent; }
             if (e.target?.closest?.('[data-role="rpe-board-reset"]')) { clear = true; popup.dlg.querySelector('[data-role="rpe-board-place"]').value = ''; for (const radio of popup.dlg.querySelectorAll('input[type="radio"]')) radio.checked = false; }
@@ -5401,29 +5699,47 @@ async function pickBoard(id) {
             const selected = {};
             for (const card of cards) { const v = dlg.querySelector(`input[name="rpe-bp-${CSS.escape(card.avatar)}"]:checked`)?.value; if (v !== undefined) selected[card.avatar] = v; }
             const previous = { ...(current.people ?? {}) };
-            for (const card of cards) if (cards.filter(p => p.name === card.name).length === 1 && Object.hasOwn(previous,card.name)) {
-                previous[card.avatar] ??= { name: card.name, status: previous[card.name] }; delete previous[card.name];
+            for (const { avatar, name } of cards) if (avatar !== name && legacyValue(name) != null) {
+                const value = previous[name];
+                previous[avatar] ??= { ...(typeof value === 'object' ? value : {}), name, status: value?.status ?? value };
+                delete previous[name];
             }
             const people = boardPeopleAfterEdit(previous, selected, clear);
             for (const card of cards) if (typeof people[card.avatar] === 'string') people[card.avatar] = { name: card.name, status: people[card.avatar] };
+            for (const card of cards) {
+                const { avatar } = card, value = people[avatar];
+                if (fp && value && (touched.has(avatar) || selected[avatar] && selected[avatar] !== statusValue(card)))
+                    people[avatar] = { ...value, rpeDecision: { id: crypto.randomUUID(), fp, sw, window: JSON.stringify(state.loadedWindow.ids) } };
+            }
             picked = { place: dlg.querySelector('[data-role="rpe-board-place"]')?.value?.trim() ?? '', people };
             return true;
         },
     });
     if (!ok || !picked || ctx().chat?.[id] !== m || !localTarget(c)) return;
-    const extra = { ...(m.extra ?? {}) };
+    if (state.epoch !== epoch || m.extra?.rp_board !== originalMark
+        || fp && fingerprintMessage(m, speakerOf(m)) !== fp || (m.swipe_id ?? 0) !== sw) return;
+    const previous = m.extra, extra = { ...previous };
     const mark = { ...(picked.place ? { place: picked.place } : {}), ...(Object.keys(picked.people).length ? { people: picked.people } : {}) };
     if (Object.keys(mark).length) extra.rp_board = mark; else delete extra.rp_board;
+    state.permissionChanges = (state.permissionChanges ?? 0) + 1;
     m.extra = extra;
     ctx().updateMessageBlock(id, m);
-    await ctx().saveChat();
-    await reconcileBoardState();
+    try { await c.saveChat(); }
+    catch (error) { if (localTarget(c) && m.extra === extra) { m.extra = previous; c.updateMessageBlock(id, m); } throw error; }
+    const savedHere = () => localTarget(c) && state.epoch === epoch && c.chat[id] === m && m.extra === extra;
+    if (!savedHere()) return;
+    const disk = fp && await readOpeningChat(currentGroup(c));
+    if (fp && !savedHere()) return;
+    if (disk && JSON.stringify(disk.messages[id]?.extra?.rp_board ?? {}) !== JSON.stringify(mark)) throw Error('原楼纠正尚未保存');
+    if (!fp) await reconcileBoardState();
     if (await syncNow() === false) throw Error('纠正已保存，静音或隔离对账尚未完成，请查看面板');
+    if (!localTarget(c) || state.epoch !== epoch) return;
     const resume=!!auto.blocked||['paused','muted','waiting'].includes(auto.executionStatus?.result);
     auto.blocked = null;
     await refreshDays();
-    globalThis.toastr?.[state.boardReconcile ? 'warning' : 'success'](state.boardReconcile ?? (Object.keys(mark).length ? '改好了，从这条往后照它算。' : '这条跟着系统认的了。'), 'RP：幕后');
-    if(resume)await autoDrive('normal');
+    if (state.epoch === epoch && localTarget(c)) globalThis.toastr?.success(Object.keys(mark).length
+        ? '本次选择已保存，请查看场面。' : '这条跟着系统认的了。', 'RP：幕后');
+    if(resume&&state.epoch===epoch&&localTarget(c))await autoDrive('normal');
 }
 async function abandonBoardCorrection(id) {
     const c = ctx(), epoch = state.epoch, journal = c.chatMetadata?.rpeBoardApplied, record = journal?.[id];
@@ -5449,14 +5765,16 @@ async function reconcileBoardState() {
     const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,group=currentGroup(c);
     if(!group||!chatKey)return;
     if (!localTarget(c)) return;
-    const guard=()=>{if(state.chatKey!==chatKey||state.epoch!==epoch)throw Error('聊天已切换');if(!localTarget(c))throw windowRejected();};
+    const source = () => JSON.stringify(c.chat.map(m => [m.extra?.rp_board, m.swipe_id, m.is_system, m.mes]));
     const journal=c.chatMetadata.rpeBoardApplied??={}, wanted=readBoardMarks(c,state,group,fallbackAvatar(c));
+    const prefix = (wanted.size || Object.keys(journal).length) ? source() : null, metadata = c.chatMetadata;
+    const guard=()=>{if(state.chatKey!==chatKey||state.epoch!==epoch)throw Error('聊天已切换');
+        if(!localTarget(c)||ctx().chatMetadata!==metadata||prefix!==null&&source()!==prefix)throw windowRejected('场面纠正的原楼或聊天头已改变');};
+    const covered=id=>Object.values(journal).some(r=>r.applied&&!r.undone&&r.takesOver?.includes(id));
     const anchor=avatar=>c.chatMetadata.contextIsolation?.anchors?.[avatar];
     const dates=wanted.size?c.chat.map(m=>m.send_date==null?null:String(m.send_date)):null;
-    const editFor=(segments,record)=>{
-        const until=[...wanted.values()].filter(x=>x.avatar===record.avatar&&x.pos>record.pos).sort((a,b)=>a.pos-b.pos)[0]?.pos??null;
-        return boardSegmentEdit(segments,{at:record.pos,until,present:['在场','远程'].includes(record.status),dates});
-    };
+    const imported = wanted.size && typeof importCurrentPresence === 'function' ? importCurrentPresence() : null;
+    const editFor=(segments,record)=>boardEditFor(segments,record,[...wanted.values()],dates,imported?.byAvatar?.[record.avatar]);
     const save=async()=>{guard();await c.saveMetadata();guard();};
     // 自动准备只保留来源所有权和段指纹；段指纹只用于识别人工接管，不能用来恢复区间。
     const automatic=[];
@@ -5489,8 +5807,9 @@ async function reconcileBoardState() {
     // 后续记录因此不会沿用已经失去前提的 before / wasDisabled。
     const rebase=new Set();
     for(const [id,r] of Object.entries(journal)){
-        if(wanted.get(id)?.status!==r.status||r.undone||!r.applied
-            ||(r.edit?.before.some(s=>s.fromDate||s.toDate)&&editFor(r.edit.before,r).end!==r.edit.end))rebase.add(r.avatar);
+        if(r.review)continue;
+        if(!boardRecordMatches(wanted.get(id),r)||r.undone||!r.applied&&!r.decision&&!r.takesOver
+            ||(r.applied && r.edit && JSON.stringify(editFor(r.edit.before, r).after) !== JSON.stringify(r.edit.after)))rebase.add(r.avatar);
     }
     for(const [id,w] of wanted)if(!journal[id])rebase.add(w.avatar);
     const blocked=frozenBoardAvatars(c.chatMetadata);
@@ -5559,51 +5878,74 @@ async function reconcileBoardState() {
             await save();
         }
         for(const [id,r] of Object.entries(journal).sort((a,b)=>b[1].pos-a[1].pos)){
-            if(!rebase.has(r.avatar)||blocked.has(r.avatar))continue;
+            if(!rebase.has(r.avatar)||r.review||blocked.has(r.avatar)&&!r.takesOver&&!r.decision
+                ||!r.applied&&!r.undone&&(r.decision||r.takesOver)&&boardRecordMatches(wanted.get(id),r))continue;
             if(r.edit&&!r.undone){
                 const undo=undoBoardSegmentEdit(anchor(r.avatar)?.segments??[],r.edit);
                 if(!undo.ok){
                     const mark=wanted.get(id);
                     r.review={reason:undo.reason,markKey:mark?.status===r.status?mark.markKey:null};blocked.add(r.avatar);await save();continue;
                 }
-                if(anchor(r.avatar))anchor(r.avatar).segments=undo.segments;r.undone=true;await save();
+                const rec = anchor(r.avatar);
+                if (rec && c.chatMetadata.main_chat && !wanted.has(id) && !undo.segments.length) rec.rpeBoardClosed = true;
+                if (rec) rec.segments = undo.segments;
+                r.undone = true; await save();
             }
             const later=Object.values(journal).some(x=>x!==r&&x.avatar===r.avatar&&x.pos>r.pos)
                 ||(anchor(r.avatar)?.segments??[]).some(s=>s.from>r.pos||s.to!=null&&s.to>r.pos);
             if(r.muteChanged&&!later){
                 const i=group.members.indexOf(r.avatar),disabled=!!group.disabled_members?.includes(r.avatar);
-                if(i>=0&&disabled===r.disabledAfter){await setMemberMuted(r.avatar,r.wasDisabled);if(!!group.disabled_members?.includes(r.avatar)!==r.wasDisabled)throw Error('撤销纠正的静音核实失败');}
+                if (i >= 0 && disabled === r.disabledAfter && !c.chatMetadata.rpeManualMuted?.[r.avatar]) {
+                    await setMemberMuted(r.avatar, r.wasDisabled);
+                    if (!!group.disabled_members?.includes(r.avatar) !== r.wasDisabled) throw Error('撤销纠正的静音核实失败');
+                }
             }
             delete journal[id];await save();
         }
         for(const [id,{markKey,...w}] of [...wanted].sort((a,b)=>a[1].pos-b[1].pos)){
-            if(blocked.has(w.avatar)||journal[id]?.applied)continue;
+            const reviews=Object.entries(journal).filter(([key,r])=>r.review&&r.avatar===w.avatar
+                && (r.pos<w.pos&&!wanted.get(key)||!!w.decision&&r.pos<=w.pos) && !covered(key));
+            if (journal[id]?.applied && !journal[id].review) continue;
+            if (blocked.has(w.avatar) && (w.status === '远程' || !reviews.length && !journal[id]?.takesOver && !w.decision)) continue;
+            if(journal[id]?.review){
+                if(!w.decision||boardRecordMatches(w,journal[id]))continue;
+                const legacy=id+':'+(journal[id].decision??'legacy');
+                journal[legacy]=journal[id];delete journal[id];
+                for(const entry of reviews)if(entry[0]===id)entry[0]=legacy;
+            }
             const before=anchor(w.avatar);
             const initial=before?.segments??(residentFromStart(c,{avatar:w.avatar,name:w.name,firstSnapshot:state.firstMemberSnapshot})?[{from:0,fromDate:'',to:null,toDate:''}]:[]);
-            const edit=journal[id]?.edit??editFor(initial,w);
-            const record=journal[id]??{...w,edit,wasDisabled:!!group.disabled_members?.includes(w.avatar),disabledAfter:['不在','外头'].includes(w.status),muteChanged:false};
-            journal[id]=record;await save();
+            const prior=journal[id], same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+            const edit=prior?.edit&&(same(initial,prior.edit.before)||same(initial,prior.edit.after))?prior.edit:editFor(initial,w);
+            const record = prior ?? { ...w, edit, wasDisabled: !!group.disabled_members?.includes(w.avatar),
+                disabledAfter: ['不在', '外头'].includes(w.status), muteChanged: false,
+                ...(reviews.length ? { takesOver: reviews.map(([key])=>key) } : {})};
+            record.edit=edit;journal[id]=record;await save();
             const anchors=(c.chatMetadata.contextIsolation??={anchors:{}}).anchors??={};
-            anchors[w.avatar]={...(before??{name:w.name}),segments:structuredClone(edit.after)};await save();
+            const actual=JSON.stringify(anchor(w.avatar)?.segments??initial);
+            if(actual!==JSON.stringify(edit.after)&&actual!==JSON.stringify(edit.before))throw Error('隔离区间已被后续操作修改，请核对');
+            if(actual!==JSON.stringify(edit.after)||!anchor(w.avatar)){
+                anchors[w.avatar]={...(anchor(w.avatar)??{name:w.name}),segments:structuredClone(edit.after)};await save();
+            }
             if(JSON.stringify(anchor(w.avatar)?.segments)!==JSON.stringify(edit.after))throw Error('纠正隔离区间保存后核实失败');
             const laterBoundary=edit.end!=null;
             const i=group.members.indexOf(w.avatar);
-            if(!laterBoundary&&i>=0&&record.wasDisabled!==record.disabledAfter){
-                await setMemberMuted(w.avatar,record.disabledAfter);
+            if(!laterBoundary&&i>=0&&!c.chatMetadata.rpeManualMuted?.[w.avatar]&&record.wasDisabled!==record.disabledAfter){
+                if(!!group.disabled_members?.includes(w.avatar)!==record.disabledAfter)await setMemberMuted(w.avatar,record.disabledAfter);
                 guard();if(!!group.disabled_members?.includes(w.avatar)!==record.disabledAfter)throw Error('纠正静音状态核实失败');record.muteChanged=true;
             }
             record.applied=true;await save();
         }
-        const pending=Object.values(journal).find(r=>r.review)?.review;
+        const pending=Object.entries(journal).find(([id,r])=>r.review&&!covered(id))?.[1].review;
         state.boardReconcile=pending?`场面纠正待落实：${pending.reason}`:null;followBase();
     }catch(error){guard();state.boardReconcile=`场面纠正待落实：${error.message}`;await save();throw error;}
 }
-async function recoverOpeningMuted() {
+async function recoverOpeningMuted(valid = () => true) {
     const c=ctx(),group=currentGroup(c),chatKey=state.chatKey,epoch=state.epoch;
     const owned=c.chatMetadata.rp_emergence?.openingMuted??[];
     if(!group||!owned.length)return;
     const board=await api('board',{chatKey});
-    if(state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==c.chat)return;
+    if(!valid()||state.chatKey!==chatKey||state.epoch!==epoch||ctx().chat!==c.chat)return;
     const recovered=c.chatMetadata.rpeMuteRecovery??={};
     const frozen=frozenBoardAvatars(c.chatMetadata);
     for(const avatar of [...owned]){
@@ -5613,12 +5955,17 @@ async function recoverOpeningMuted() {
         const at=group.members.indexOf(avatar);if(at<0)continue;
         try{
             if(group.disabled_members?.includes(avatar))await setMemberMuted(avatar,false);
+            if(!valid())return;
             if(group.disabled_members?.includes(avatar))throw Error(`${p.name}的系统静音恢复核实失败`);
             recovered[avatar]={sourceVersion:board.sourceVersion,disabled:false,at:Date.now()};
             c.chatMetadata.rp_emergence.openingMuted=owned.filter(a=>!recovered[a]);await c.saveMetadata();
+            if(!valid())return;
             auto.blocked=null;globalThis.toastr?.info(`${p.name}已恢复发言，已核实群里解除静音；原因为系统开局静音与当前在场证据冲突。`);
-        }catch(error){state.boardReconcile=`系统静音待恢复：${error.message}`;render();throw error;}
-        finally{followBase();}
+        } catch (error) { if (!valid()) return;
+            state.boardReconcile = `系统静音待恢复：${error.message}`;
+            render();
+            throw error;
+        } finally { if (state.epoch === epoch && ctx().chat === c.chat) followBase(); }
     }
 }
 document.addEventListener('click', event => {

@@ -134,9 +134,22 @@ function readSourceProjection(db, chatKey) {
         const basis = typeof row.source_basis === 'string' ? json(row.source_basis) : row.source_basis;
         if (row.source_basis != null && !basis) return { state: 'unknown', reason: '来源 JSON 无效', pos: null };
         const source = basis ?? legacy.get(row.id);
-        return source ? evaluate(source, options) : { state: 'live', reason: '普通正文来源', pos: row.pos };
+        if (source) return evaluate(source, options);
+        if (row.job_id == null) return { state: 'live', reason: '普通正文来源', pos: row.pos };
+        const ref = json(row.source_instance), candidates = index.byFp.get(row.fp) ?? [];
+        const positions = ref?.pos == null ? json(q('select positions from extract_jobs where id = ?').get(row.job_id)?.positions, []) : [];
+        const instance = uniqueOrdinarySource(row, candidates, ref, Array.isArray(positions) ? positions : []);
+        if (instance && !meta(`ordinary_collision:${chatKey}:${row.fp}:${instance.sent_at}`)) return { state: 'live', pos: instance.pos };
+        return { state: 'unknown', reason: '普通账来源实例不唯一', pos: ref?.pos ?? (positions.length === 1 ? positions[0] : null) };
     };
     return { index, entries, legacy, legacyMenus, arrivalBasis, evaluate, arrival, record };
+}
+
+function uniqueOrdinarySource(row, candidates, ref, positions) {
+    if (row.source_instance == null) return candidates.length === 1 && candidates[0].sent_at && positions.includes(candidates[0].pos) ? candidates[0] : null;
+    if (ref?.fp !== row.fp || ref.ambiguous || !ref.sentAt || !Number.isInteger(ref.pos) || (ref.legacy && candidates.length !== 1)) return null;
+    const [m, duplicate] = candidates.filter(m => m.sent_at === ref.sentAt);
+    return m && !duplicate && (m.sw === ref.sw || ref.legacy && ref.sw == null) && (ref.revision == null || m.doorRevision === ref.revision) ? m : null;
 }
 
 // 基础候选先补入有明确旧关联的 ID；gone: / 被搬过的 fp 不能在 SQL join 时丢失。
@@ -150,10 +163,10 @@ export function sourceRows(db, chatKey, { status = 'ok', type = null, through = 
     const visible = [], rejected = [];
     for (const row of rows) {
         const state = projection.record(row, { through, rawBasis });
-        if (state.state !== 'live') { rejected.push({ id: row.id, fp: row.fp, status: row.status, ...state, recoverable: state.state !== 'unknown' }); continue; }
-        if (state.pos == null || state.pos > through) continue;
+        if (state.state !== 'live') rejected.push({ id: row.id, fp: row.fp, status: row.status, ...state, recoverable: state.state !== 'unknown' });
+        if (state.pos == null || state.pos > through || state.state === 'not-live') continue;
         const source_basis = json(row.source_basis) ?? projection.legacy.get(row.id) ?? null;
-        visible.push({ ...row, original_fp: row.fp, fp: source_basis?.delivery?.fp ?? row.fp, pos: state.pos, source_basis });
+        visible.push({ ...row, original_fp: row.fp, fp: source_basis?.delivery?.fp ?? row.fp, pos: state.pos, source_basis, source_unknown: state.state === 'unknown' });
     }
     visible.sort((a, b) => a.pos - b.pos || a.id - b.id);
     return { rows: visible, rejected, projection };

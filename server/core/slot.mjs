@@ -9,7 +9,7 @@ import { registerPromptDefaults, promptText, promptOptionsFor, DEFAULT_TIER, DEF
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { selectMaterial, renderPlain, finish, dayIndex, relativeDay, timeSkipIn, expiredTodo, placeRecall, faceRecall, recordKnownTo } from './recall.mjs';
-import { isPrivate } from './visibility.mjs';
+import { isPrivate, visibleTo } from './visibility.mjs';
 import { declarationGroupsOf } from './store.mjs';
 import { renderNarrative, narrativeState } from './assemble.mjs';
 import { matchPrices, priceLines, talksMoney, talksJobs, tiersNamed, tierPrice, standingLines, scopeOf, planPriceLines, matchHousing, housingLines } from './pricing.mjs';
@@ -207,14 +207,14 @@ function testContent({ speakerName, total }) {
 const ahead = new Map();
 const AHEAD_TTL_MS = 15 * 60 * 1000;
 // 用户那句去掉首尾空白再比（打字时预跑用的草稿和发出去的那条，ST 会修掉首尾空白）。
-const aheadKey = (store, chatKey, speaker, recentUser, rev = correctionRev(store, chatKey), timeKey = '') => `${chatKey}\u0001${speaker}\u0001${String(recentUser ?? '').trim()}\u0001fix:${rev}\u0001time:${timeKey}`;
+const aheadKey = (store, chatKey, speaker, recentUser, rev = correctionRev(store, chatKey), timeKey = '') => JSON.stringify([storeId(store), chatKey, speaker, String(recentUser ?? '').trim(), rev, timeKey]);
 // 显式传递请求内缓存，避免全局缓存漏掉供料变化。store 的消息数组是浅拷贝，
 // 因此同一 total_changes 快照只取一次；记账、手标、撤回等任一落库写入都换快照。
 // 版本戳只管计算复用，不进入 ahead 键；前缀数组在 WeakMap 中独立计算，不能借全历史依据。
 function recallSnapshot(store, chatKey, cache) {
     // 无落库版本戳的内存供料保持实时计算，不猜它是否仍是同一快照。
     if (!store.db?.prepare) return { messages: store.currentMessages(chatKey), bases: null };
-    const changes = store.db.prepare('select total_changes() n').get().n;
+    const changes = `${store.db.prepare('select total_changes() n').get().n}:${store.externalVersion?.()}`;
     if (!cache.messages || cache.changes !== changes) {
         cache.changes = changes;
         cache.messages = store.currentMessages(chatKey);
@@ -255,15 +255,16 @@ const recallTimeKey = (store, records, chatKey, cache = {}) => {
     return JSON.stringify([basis?.version, basis?.pos, basis?.fp, basis?.sentAt]);
 };
 // 草稿只承接紧接原历史的同句用户发送；首次承接后绑定该发送实例。
-function recallKeyFor(store, records, chatKey, speaker, recentUser, rev, timeKey, cache = {}) {
-    const key = aheadKey(store, chatKey, speaker, recentUser, rev, timeKey);
+function recallKeyFor(store, records, chatKey, speaker, recentUser, rev, timeKey, cache, input) {
+    const auth = captureAccess(store, chatKey, { reader: speaker });
+    const key = aheadKey(store, chatKey, speaker, recentUser, rev, [timeKey, auth.stamp, auth.epoch, auth.external, input]);
     if (ahead.has(key)) return key;
     const { messages, bases } = recallSnapshot(store, chatKey, cache), last = messages.at(-1);
     const basis = recallBasisFor(store, records, chatKey, messages, bases);
     for (const entry of ahead.values()) {
         const d = entry.draft;
         if (!d || d.store !== store || d.chatKey !== chatKey || d.speaker !== speaker || d.rev !== rev
-            || d.text !== String(recentUser ?? '').trim() || Date.now() - entry.at > AHEAD_TTL_MS
+            || d.input !== input || !d.access.valid() || d.text !== String(recentUser ?? '').trim() || Date.now() - entry.at > AHEAD_TTL_MS
             || messages.length !== d.messages.length + 1 || !last?.is_user || !last.sent_at
             || String(last.text ?? '').trim() !== d.text || basis?.version !== d.basis?.version
             || !d.basis?.sentAt || messages[d.basis.pos]?.fp !== d.basis.fp || messages[d.basis.pos]?.sent_at !== d.basis.sentAt
@@ -278,6 +279,12 @@ function recallKeyFor(store, records, chatKey, speaker, recentUser, rev, timeKey
     return key;
 }
 const KEYS = '\u0002keys';
+async function whileAuthorized(valid, run) {
+    if (!valid()) throw Error('slot authorization changed');
+    const result = await run();
+    if (!valid()) throw Error('slot authorization changed');
+    return result;
+}
 function once(key, start) {
     const now = Date.now();
     for (const [k, v] of ahead) if (now - v.at > AHEAD_TTL_MS) ahead.delete(k);
@@ -295,13 +302,34 @@ function memberList(store, chatKey) {
     try { return JSON.parse(store.requireChat(chatKey).members ?? '[]').filter(m => m?.avatar); } catch { return []; }
 }
 
+function turnInput(store, chatKey, speaker, anchor, recentUser = '', recent = [], draft = false) {
+    const messages = store.currentMessages(chatKey);
+    const match = /^(\d+):(.+)$/.exec(anchor ?? '');
+    const end = match ? Number(match[1]) - 1 : Infinity;
+    const upto = anchor === 'start' ? [] : messages.filter(m => m.pos <= end);
+    const confirmed = !anchor || upto.at(-1)?.pos === end && upto.at(-1)?.fp === match?.[2];
+    const roster = [...new Map([...(store.getCast?.(store.requireChat(chatKey).story_id) ?? []), ...memberList(store, chatKey)].map(m => [m.avatar, m])).values()];
+    const sees = message => !message.hidden && visibleTo({ message, viewer: speaker === CAMERA ? CAMERA : { avatar: speaker }, roster });
+    const matches = m => String(m.text ?? '').slice(-4000).trim() === recentUser.trim();
+    if (recentUser && messages.some(m => matches(m) && (m.pos > end || anchor === 'start' || !sees(m)))) recentUser = '';
+    const tail = upto.slice(draft ? -2 : -3);
+    const visible = tail.filter(sees).map(m => String(m.text ?? '').slice(-4000));
+    const supplied = (Array.isArray(recent) ? recent : [recent].filter(Boolean))
+        .filter(text => text === recentUser || visible.includes(text) || !store.db);
+    const rebuild = confirmed && tail.some(isPrivate);
+    if (rebuild && draft && recentUser) visible.push(recentUser);
+    return { recent: rebuild ? visible : supplied, recentUser, through: upto.at(-1)?.pos ?? -1 };
+}
+
 // 用户那句话的检索词（没配模型、没有用户的话、出错都返回 []）。
-async function queryKeysFor(store, keyMaker, { chatKey, recent, recentUser, present }) {
+async function queryKeysFor(store, keyMaker, { chatKey, recent, recentUser, present, through }) {
     if (!keyMaker || !recentUser?.trim()) return [];
     // 只有"嗯""好""（点头）"这种：配不出词（T-22 实测模型回一段"我需要更多信息"，被当成检索词），不调，旧事按上文挑。
     if (recentUser.replace(/[（(][^）)]*[）)]/g, '').replace(/[\s\p{P}]/gu, '').length < 3) return [];
     const names = [...new Set([...present, ...memberList(store, chatKey).map(m => m.name)].filter(Boolean))];
-    try { return (await once(aheadKey(store, chatKey, KEYS, recentUser), () => keyMaker({ chatKey, recent, recentUser, names }))) ?? []; }
+    const access = captureAccess(store, chatKey, { reader: KEYS, through });
+    try { return (await once(aheadKey(store, chatKey, KEYS, recentUser, undefined, [access.stamp, access.epoch, access.external, recent, names]),
+        () => whileAuthorized(access.valid, () => keyMaker({ chatKey, recent, recentUser, names }, access.valid)))) ?? []; }
     catch { return []; }
 }
 
@@ -515,20 +543,52 @@ function stripNul(out) {
     for (const key of Object.keys(out.parts ?? {})) out.parts[key] = clean(out.parts[key]);
 }
 const canWitness = stance => !stance || stance.status === 'present';
-export async function composeSlot(store, records, args, opts = {}) {
+const staleSlot = () => ({ text: '', mode: 'stale', final: false });
+function captureAccess(store, chatKey, scope = {}) {
+    const external = store.externalVersion?.();
+    let changes = store.changeVersion?.();
+    const read = () => store.authorizationVersion ? store.authorizationVersion(chatKey, scope, external) : '';
+    const epoch = store.authorizationEpoch?.(chatKey, external), stamp = read();
+    const valid = () => {
+        if (stamp === null || store.externalVersion?.() !== external) return false;
+        const current = store.changeVersion?.();
+        if (current !== undefined && current === changes && !store.db?.isTransaction) return true;
+        if (store.authorizationEpoch?.(chatKey, external) !== epoch || read() !== stamp) return false;
+        if (!store.db?.isTransaction) changes = current;
+        return true;
+    };
+    valid.commit = store.commitSlot;
+    return { stamp, epoch, external, valid };
+}
+function slotComposer(prepare, finish) {
+    return async (store, records, args, opts = {}, valid = null, deliver = null) => {
+        if (valid) return prepare(store, records, args, opts, valid, deliver, finish);
+        const capture = () => captureAccess(store, args.chatKey, { reader: args.speaker });
+        const result = await prepare(store, records, args, opts, capture().valid, out => ({ out, access: capture() }), finish);
+        return result?.access.valid() ? result.out : staleSlot();
+    };
+}
+export const composeSlot = slotComposer(
+async function prepareSlot(store, records, args, opts, valid, deliver, finishSlot) {
+    const settle = finish => {
+        const write = () => valid() && (opts.canDeliver?.() ?? true) ? deliver(finish()) : null;
+        return store.commitSlot ? store.commitSlot(write) : write();
+    };
     const { chatKey, speaker, speakerName } = args;
     opts = playOptions(store, chatKey, opts);
     const chat = store.requireChat(chatKey);
-    if (chat.test_slot) return { text: testContent({ speakerName: speakerName || speaker, total: store.status({ chatKey }).total }), final: true, mode: 'test' };
-    if (!records) return { text: '', final: true, mode: 'none' };
+    if (chat.test_slot) return settle(() => ({ text: testContent({ speakerName: speakerName || speaker, total: store.status({ chatKey }).total }), final: true, mode: 'test' }));
+    if (!records) return settle(() => ({ text: '', final: true, mode: 'none' }));
     // 离开记一笔、世界往前走的那些写，都在折那一步（advance，buildSlot 组格前、同步后各跑一次）；这里只读
     const messages = store.currentMessages(chatKey);
+    args = { ...args, ...turnInput(store, chatKey, speaker, args.anchor, args.recentUser, args.recent) };
     // 镜头（N-276）：照玩家的眼睛看——旧事、此刻的样子、约定按玩家拿；口袋按镜头递
     const camera = speaker === CAMERA;
     // 玩家的名字：新窗口头一句可能还没同步过来，镜头就用扩展传来的在场名单的头一个（就是玩家）
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? (camera ? args.present?.[0] : undefined);
     const eyes = camera ? { ...args, speakerName: userName ?? '玩家', present: args.present?.length ? args.present : [userName].filter(Boolean), camera: true } : args;
     const pending = camera ? false : await awaitAway(store, chatKey, args.speaker, opts.absence);
+    if (!valid()) return null;
     let pendingLedger = null;
     try {
         const upto = args.anchor ? uptoAnchor(messages, args.anchor) : messages;
@@ -545,8 +605,13 @@ export async function composeSlot(store, records, args, opts = {}) {
     const groups = store.cachedDeclarations ? declarationGroupsOf(store, chat.story_id) : [];
     const withoutKnowledge = camera && groups.length ? {} : null;
     const protectAfter = groups.length === 0 ? false : declaredCard(groups, speaker);
-    const base = await memorySlot(store, records, eyes, { ...opts, skipOpen: promised?.shownIds ?? null, pendingLedger, scale: fit.s, episodes: store.episodesOf?.(chatKey) ?? [], guard }, withoutKnowledge, protectAfter);
+    const base = await memorySlot(store, records, eyes, { ...opts, skipOpen: promised?.shownIds ?? null, pendingLedger, scale: fit.s, episodes: store.episodesOf?.(chatKey) ?? [], guard, valid }, withoutKnowledge, protectAfter);
+    if (!base || !valid()) return null;
     const backstoryPick = await backstorySense(store, chatKey, args.recentUser, opts.vectors);
+    return settle(() => finishSlot(store, records, args, opts, { chat, messages, camera, eyes, userName, pending, pendingLedger, promised, fit, guard, scene, protectAfter, base, backstoryPick, withoutKnowledge }));
+},
+function finishSlot(store, records, args, opts, { chat, messages, camera, eyes, userName, pending, pendingLedger, promised, fit, guard, scene, protectAfter, base, backstoryPick, withoutKnowledge }) {
+    const { chatKey, speaker, speakerName } = args;
     const { lines: extra, blocks = null, contact, carry = [], linger = [], dayOf: seenDayOf = null, historyTimeline, stance = null } = extrasFor(store, records, eyes, { ...opts, pendingAway: pending, pendingLedger, backstoryPick, promised, guard, scene, protectAfter }, base);
     const name = camera ? CAMERA_NAME : speakerName || speaker;
     // 隔着消息、电话的人没"进门"：旧事那段开头那句换成人不在这儿（试玩 10/13：他发消息来，场记写他刚到场、进门之前的事没看见）
@@ -721,7 +786,7 @@ export async function composeSlot(store, records, args, opts = {}) {
     // final 只决定这格能否缓存；程序回退和等待推演时的文字同样已经交给前台。
     for (const p of all) if (kept.has(p) && (p === chosen || p.candidate?.carry)) p.candidate?.commit?.();
     return out;
-}
+});
 
 function recallHistory(parts, partsChecked, history) {
     return partsChecked > Object.keys(parts).indexOf('recall') ? history : text => text;
@@ -983,10 +1048,10 @@ export function cameraKnowledgeLines({ roster, board, visible = [], rel = null, 
 // 叙事组装限时（D-100：前台速度是用户的硬要求；实测配检索词＋组装一般 16 秒、慢时近 30 秒）：从这里起至多等 assembler.budgetMs，
 // 到点先给纯程序那一格、不钉住；配词和组装照旧在后台跑完，结果留在 ahead 里，左滑重来时直接用上。
 // 后开口的人多半已经提前组装好（prefetchOthers），不用等。
-async function memorySlot(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { assembler = null, keyMaker = null, vectors = null, skipOpen = null, pendingLedger = null, scale = 1, episodes = [], guard = null, recallCache = {} }, withoutKnowledge = null, protectPlain = false) {
+async function memorySlot(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { assembler = null, keyMaker = null, vectors = null, skipOpen = null, pendingLedger = null, scale = 1, episodes = [], guard = null, recallCache = {}, valid }, withoutKnowledge = null, protectPlain = false) {
     const name = speakerName || speaker;
     // 异步配词、组装期间玩家可能纠正；迟到的结果只留在开始时的版本里。
-    const recallKey = recallKeyFor(store, records, chatKey, speaker, recentUser, correctionRev(store, chatKey), recallTimeKey(store, records, chatKey, recallCache), recallCache);
+    const recallKey = recallKeyFor(store, records, chatKey, speaker, recentUser, correctionRev(store, chatKey), recallTimeKey(store, records, chatKey, recallCache), recallCache, JSON.stringify([recent, present]));
     if (camera) {
         // 旁白的旧事按地方和眼前没卡的人来，不走玩家的关键词召回（召回来的是她的衣服鞋子）
         const messages = store.currentMessages(chatKey);
@@ -1042,15 +1107,17 @@ async function memorySlot(store, records, { chatKey, speaker, speakerName, ancho
     let keysSoFar = [], senseSoFar = null;
     const full = (async () => {
         const sense = await senseFor();
+        if (!valid()) return null;
         senseSoFar = sense;
-        const queryKeys = sense ? [] : await queryKeysFor(store, keyMaker, { chatKey, recent, recentUser, present });
+        const queryKeys = sense ? [] : await queryKeysFor(store, keyMaker, { chatKey, recent, recentUser, present, through: ahead.get(recallKey)?.draft?.basis.pos });
+        if (!valid()) return null;
         keysSoFar = queryKeys;
         const { material, messageText } = pick(queryKeys, true, sense);
         // 程序连一条相关的都没挑出来，就不花钱请模型了。
         if (!material.hits.length || !material.pool.length) return plain(material, queryKeys, true, 'plain');
         try {
             const r = await once(recallKey,
-                () => assembler({ chatKey, speaker, anchor, name, present, recent, recentUser, material, messageText }));
+                () => whileAuthorized(valid, () => assembler({ chatKey, speaker, anchor, name, present, recent, recentUser, material, messageText }, valid)));
             if (r && (r.lines.length || r.none)) return out(material, queryKeys, renderNarrative(material, r.lines), true, 'narrative', [...r.lines.flatMap(l => l.ids), ...narrativeState(material, r.lines).map(s => s.id), ...material.open.map(o => o.id)]);
             // 模型给了东西却一句都没过核对：多半是格式乱了，用纯程序的，钉住（免得左滑一次花一次）。
             if (r) return plain(material, queryKeys, true, 'plain_after_rejected');
@@ -1064,7 +1131,7 @@ async function memorySlot(store, records, { chatKey, speaker, speakerName, ancho
     let timer;
     const done = await Promise.race([full, new Promise(r => { timer = setTimeout(() => r(null), budget); })]);
     clearTimeout(timer);
-    if (done) return done;
+    if (done || !valid()) return done;
     // 到点了：检索词已经配好就用上，没好就只用程序的字组召回。
     return plain(pick(keysSoFar, false, senseSoFar).material, keysSoFar, false, 'plain_budget');
 }
@@ -3838,7 +3905,8 @@ export function prefetchDraft(store, records, deps, { chatKey, draft, recent = [
     // 只承接的一句（"嗯""好"）也预跑：组装主要靠上文，一轮至多两份草稿兜着花费。
     if (!deps.assembler || !records || !text) return { ok: true, skipped: 'empty' };
     const recallCache = {};
-    const base = `${store.currentMessages(chatKey).at(-1)?.fp ?? 'start'}:${recallTimeKey(store, records, chatKey, recallCache)}`;
+    const access = captureAccess(store, chatKey);
+    const base = JSON.stringify([access.stamp, access.epoch, recallTimeKey(store, records, chatKey, recallCache)]);
     const seen = drafts.get(chatKey);
     const round = seen?.base === base ? seen : { base, count: 0, last: null };
     if (round.last === text) return { ok: true, skipped: 'same' };
@@ -3857,37 +3925,47 @@ export function prefetchFor(store, records, deps, { chatKey, recentUser, present
     prefetchOthers(store, records, deps, { chatKey, speaker: null, recent, recentUser, present, only }).catch(() => {});
 }
 
-async function prefetchOthers(store, records, { assembler, keyMaker }, { chatKey, speaker, recent, recentUser, present, only = null, draftBasis = null, recallCache = {} }) {
+async function prefetchOthers(store, records, { assembler, keyMaker }, { chatKey, speaker, anchor, recent: supplied, recentUser, present, only = null, draftBasis = null, recallCache = {} }) {
     if (!assembler || !records || !recentUser) return;
     const rev = correctionRev(store, chatKey);
     const timeKey = recallTimeKey(store, records, chatKey, recallCache);
-    const keyFor = avatar => recallKeyFor(store, records, chatKey, avatar, recentUser, rev, timeKey, recallCache);
     const picked = Array.isArray(only) ? new Set(only.filter(Boolean)) : null;
-    const others = memberList(store, chatKey).filter(m => !m.disabled && m.avatar !== speaker && !ahead.has(keyFor(m.avatar))
+    const others = memberList(store, chatKey).filter(m => !m.disabled && m.avatar !== speaker
         && (!picked || picked.has(m.avatar) || picked.has(m.name)));
-    if (!others.length) return;
-    const queryKeys = await queryKeysFor(store, keyMaker, { chatKey, recent, recentUser, present });
     const boardAt = lazyBoardAt(store, records, chatKey);
-    for (const m of others) {
-        if (ahead.has(keyFor(m.avatar))) continue;
+    await Promise.all(others.map(async m => {
+        const { recent, recentUser: said, through } = turnInput(store, chatKey, m.avatar, anchor, recentUser, supplied, !!draftBasis);
+        const input = JSON.stringify([recent, present]);
+        const key = recallKeyFor(store, records, chatKey, m.avatar, said, rev, timeKey, recallCache, input);
+        if (ahead.has(key)) return;
+        const access = captureAccess(store, chatKey, { reader: m.avatar, through });
+        const draft = speaker && ahead.get(recallKeyFor(store, records, chatKey, speaker, said, rev, timeKey, recallCache, input))?.draft;
+        const queryKeys = await queryKeysFor(store, keyMaker, { chatKey, recent, recentUser: said, through: draft?.basis.pos ?? through, present });
+        if (!access.valid() || ahead.has(key)) return;
         const name = m.name || m.avatar;
-        const { material, messageText } = materialFor(store, records, { chatKey, speaker: m.avatar, name, recent, recentUser, present, queryKeys, pool: true, boardAt });
-        if (!material.hits.length || !material.pool.length) continue;
-        const key = keyFor(m.avatar);
+        const { material, messageText } = materialFor(store, records, { chatKey, speaker: m.avatar, name, anchor, recent, recentUser: said, present, queryKeys, pool: true, boardAt });
+        if (!material.hits.length || !material.pool.length) return;
         once(key,
-            () => assembler({ chatKey, speaker: m.avatar, anchor: 'ahead', name, present, recent, recentUser, material, messageText })).catch(() => {});
-        if (draftBasis) ahead.get(key).draft = { ...draftBasis, store, chatKey, speaker: m.avatar, rev, text: String(recentUser).trim() };
-    }
+            () => whileAuthorized(access.valid, () => assembler({ chatKey, speaker: m.avatar, anchor: 'ahead', name, present, recent, recentUser: said, material, messageText }, access.valid))).catch(() => {});
+        if (draftBasis) ahead.get(key).draft = { ...draftBasis, access, input, store, chatKey, speaker: m.avatar, rev, text: said.trim() };
+    }));
 }
 
 // 同一格同时被要了两次（比如扩展重复触发）只组装一次。
-const inflight = new Map();
+const inflight = new Map(), storeIds = new WeakMap();
+let nextStoreId = 0;
+function storeId(store) {
+    if (!storeIds.has(store)) storeIds.set(store, ++nextStoreId);
+    return storeIds.get(store);
+}
 
 export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, recent = [], recentUser = '', present = [], room = null, soft = true }, records = null, { assembler = null, keyMaker = null, economy = null, contacts = null, absence = null, planner = null, world = null, mood = null, fresh = null, slot = null, vectors = null, pace = null, factions = null, situation = null, drift = null } = {}) {
     const chat = store.requireChat(chatKey);
     if (!chat.enabled) return { text: '', rule: '' };
     // 先折一次（世界往前走的那些写），再组格（只读）；预览（slot-preview）走 composeSlot，不经这里，什么都不写
-    await measure('advance', () => advance(store, records, chatKey, { planner, situation, absence }, { present }));
+    const advancing = measure('advance', () => advance(store, records, chatKey, { planner, situation, absence }, { present }));
+    const access = captureAccess(store, chatKey, { reader: speaker, anchor });
+    await advancing;
     // 分块放（slot.split）：各块的文字和中段、"玩家最后一句之前"各插在倒数第几条；扩展不认分块时照旧用 text 整格放最后
     const split = slot?.split !== false;
     const depths = { mid: slot?.midDepth ?? 4, recall: slot?.recallDepth ?? -1, now: slot?.nowDepth ?? 4 };
@@ -3921,6 +3999,11 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
         const sceneVersion = ':scene-v2:' + createHash('sha1').update(JSON.stringify([scene.person, scene.people.map(p => [p.avatar, p.status, p.way, p.since]), scene.arr])).digest('hex').slice(0, 16);
         return sceneVersion + (instance ? ':instance:' + createHash('sha1').update(String(instance)).digest('hex').slice(0, 16) : '') + intimateSlotVersion(store, chatKey, (v => v ? ':time:' + v : '')(timeStateFor(store, records, chatKey, uptoAnchor(store.currentMessages(chatKey), anchor)).version)) + (playModeOf(store, chatKey) === 'memory' ? ':memory' : '') + (leaks.length ? ':secrets:' + leaks.map(x => `${x.proof}:${x.事}:${x.谁知道了}`).join('|') : '') + arrivalsVersion + causalVersion + mindVersion + conditionVersion + checkVersion + (repair ? `:swipe:${repair}` : '') + (correction ? `:fix:${correction}` : '');
     };
+    const stale = { ...shape('', null), pinned: false, mode: 'stale' };
+    const retry = () => access.valid()
+        ? buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift })
+        : stale;
+    if (!access.valid()) return stale;
     const version = versionNow();
     const pinned = store.getSlot({ chatKey, speaker, anchor, ver: version });
     if (pinned !== null) {
@@ -3929,27 +4012,25 @@ export async function buildSlot(store, { chatKey, speaker, speakerName, anchor, 
             && (!validReplayRanges(pinned, replay?.text) || (parts?.now && !validReplayRanges(parts.now, replay?.now)))
             && store.cachedDeclarations && declaredCard(declarationGroupsOf(store, chat.story_id), speaker);
         const again = rebuild ? null : chat.test_slot ? { text: pinned, parts } : refreshPinned(store, records, { chatKey, speaker, speakerName, present, anchor }, pinned, parts, { fresh, pace, replay });
-        if (again && versionNow() === version) return { ...shape(again.text, again.parts), pinned: true };
-        if (again) return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
+        if (again && versionNow() === version && access.valid()) return { ...shape(again.text, again.parts), pinned: true };
+        if (again) return retry();
     }
-    const key = `${chatKey}\u0001${speaker}\u0001${anchor}\u0001${version}`;
+    const key = JSON.stringify([storeId(store), chatKey, speaker, anchor, version, access.stamp, access.epoch, access.external]);
     if (!inflight.has(key)) {
         const recallCache = {};
-        inflight.set(key, measure('compose', () => composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift, recallCache, recordReplay: true }))
-            .then(result => {
-                if (versionNow() !== version) return result;
-                if (result.final) store.putSlot({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.replay ? { parts: result.parts ?? null, replay: result.replay } : result.parts ?? null, ver: version });
+        inflight.set(key, measure('compose', () => composeSlot(store, records, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift, recallCache, recordReplay: true, canDeliver: () => versionNow() === version }, access.valid, result => {
+                if (result.final) store.putSlot({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.replay ? { parts: result.parts ?? null, replay: result.replay } : result.parts ?? null, ver: version, authorization: access.stamp });
                 // 没钉住的（组装超时先给了纯程序那一格）也记下给了什么，标成 given：不当钉住的用（getSlot 认版本），
                 // 回头查得到、去复读核对时拿得到"想起的"那块（质量窗 10/5：从 10/4 早上起常常没钉住，后台查不到那几轮给了什么）
-                else if (result.text && result.mode !== 'test' && result.mode !== 'none') store.putGiven?.({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.parts ?? null });
-                if (result.mode !== 'test' && result.mode !== 'none') store.putCarry?.({ chatKey, speaker, anchor, carry: result.carry ?? [] });   // 余波钉没钉住都记
-                return result;
-            })
-            .finally(() => inflight.delete(key)));
-        prefetchOthers(store, records, { assembler, keyMaker }, { chatKey, speaker, recent, recentUser, present, recallCache }).catch(() => {});
+                else if (result.text && result.mode !== 'test' && result.mode !== 'none') store.putGiven?.({ chatKey, speaker, anchor, text: result.text, ids: [...new Set(result.ids ?? [])], parts: result.parts ?? null, authorization: access.stamp });
+                if (result.mode !== 'test' && result.mode !== 'none') store.putCarry?.({ chatKey, speaker, anchor, carry: result.carry ?? [], authorization: access.stamp });   // 余波钉没钉住都记
+                return { result, changes: store.changeVersion?.(), access: captureAccess(store, chatKey, { reader: speaker, anchor }) };
+            })).finally(() => inflight.delete(key)));
+        prefetchOthers(store, records, { assembler, keyMaker }, { chatKey, speaker, anchor, recent, recentUser, present, recallCache }).catch(() => {});
     }
-    const { text, mode, contact = null, parts = null } = await inflight.get(key);
+    const delivered = await inflight.get(key);
     // 正在等组装时喊停：旧版本不返回给前台，重新取暂停后的那一格。
-    if (versionNow() !== version) return buildSlot(store, { chatKey, speaker, speakerName, anchor, recent, recentUser, present, room, soft }, records, { assembler, keyMaker, economy, contacts, absence, planner, world, mood, fresh, slot, vectors, pace, factions, situation, drift });
+    if (!delivered?.access.valid() || (delivered.changes !== store.changeVersion?.() && versionNow() !== version)) return retry();
+    const { text, mode, contact = null, parts = null } = delivered.result;
     return { ...shape(text, parts), pinned: false, mode, contact };
 }

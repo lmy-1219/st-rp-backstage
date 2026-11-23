@@ -1,4 +1,6 @@
 import { freshChain } from './store.mjs';
+import { isPrivate, visibilityTag, visOf, visibleTo } from './visibility.mjs';
+import { parseOutput } from './extract.mjs';
 import { sameIdentity } from './cast.mjs';
 import { sourceRows, emptySegment } from './landing.mjs';
 import { menuMatterNeedsResult } from './menu-evidence.mjs';
@@ -123,18 +125,26 @@ export function legacyMenuCopies(db, chatKey) {
     return out;
 }
 
+function canAuthorizeListener(channel, proof, name, legacyReaders) {
+    if (channel?.way !== '电话' || !proof) return channel?.way === '电话' && legacyReaders.includes(name);
+    const prior = visibilityTag(proof.channel);
+    return prior?.way === channel.way && proof.bystanders.includes(name)
+        && (prior.fromAvatar && channel.fromAvatar ? prior.fromAvatar === channel.fromAvatar : !!prior.from && prior.from === channel.from);
+}
+
 // 证据投影与普通记账共用现有身份/在场口径，不另认一套受众。
-export function absentRecordMembers(db, chatKey) {
+export function recordAudienceFor(db, chatKey) {
     const q = sql => db.prepare(sql);
-    const chat = q('select members, anchors from chats where key = ?').get(chatKey);
+    const chat = q('select members, anchors, story_id from chats where key = ?').get(chatKey);
     let members = [], anchors = null, arrivals = [];
     try {
         members = JSON.parse(chat?.members ?? '[]') ?? [];
         anchors = JSON.parse(chat?.anchors ?? 'null') ?? {};
         arrivals = JSON.parse(q('select value from meta where key = ?').get(`arrivals:${chatKey}`)?.value ?? '[]') ?? [];
-    } catch { return null; }
-    if (!Array.isArray(members) || !members.length) return null;
-    const fps = new Map(q('select pos, fp from chat_seq where chat_key = ?').all(chatKey).map(r => [r.pos, r.fp]));
+    } catch { return (r, audience = r.audience) => audience; }
+    const messages = q(`select s.pos, m.fp, m.name, m.is_user, m.speaker, nullif(coalesce(s.vis, m.vis), 'null') as vis
+        from chat_seq s join messages m on m.story_id = ? and m.fp = s.fp where s.chat_key = ?`).all(chat.story_id, chatKey);
+    const fps = new Map(messages.map(r => [r.pos, r.fp]));
     const firstIn = new Map();
     for (const m of members) {
         if (!m?.name) continue;
@@ -145,7 +155,35 @@ export function absentRecordMembers(db, chatKey) {
         const first = cutoff === Infinity && !m.disabled ? -Infinity : cutoff;
         firstIn.set(m.name, Math.min(firstIn.get(m.name) ?? Infinity, first));
     }
-    return firstIn.size ? (name, pos) => firstIn.has(name) && pos < firstIn.get(name) : null;
+    const privateAt = new Map(messages.filter(row => row.vis)
+        .map(row => [row.pos, { ...row, extra: { rp_vis: row.vis } }])
+        .filter(([, message]) => isPrivate(message)));
+    const cast = privateAt.size ? q('select avatar, name from cast where story_id = ?').all(chat.story_id) : [];
+    const roster = [...new Map([...cast, ...members].map(member => [member.avatar, member])).values()];
+    const userName = messages.findLast(m => m.is_user)?.name;
+    const legacyListeners = record => {
+        const job = q("select raw from extract_jobs where id = ? and story_id = ? and status = 'done'").get(record.job_id, record.story_id);
+        let items;
+        try { items = parseOutput(job?.raw); } catch { return []; }
+        const pos = JSON.parse(record.source_instance ?? 'null')?.pos ?? record.pos;
+        const matches = items.filter(item => Number(item?.消息号) === pos && item?.型 === record.type
+            && typeof item.内容 === 'string' && item.内容.trim() === record.text);
+        const listeners = matches.length === 1 ? matches[0].旁听 : null;
+        const source = q('select text from messages where story_id = ? and fp = ?').get(chat.story_id, record.fp)?.text;
+        return Array.isArray(listeners) ? listeners.map(n => typeof n === 'string' && n.trim()).filter(n => n && source?.includes(n)) : [];
+    };
+    return (r, audience = r.audience) => {
+        if (r.job_id == null || r.source_basis) return audience;
+        if (r.source_unknown) return [r.holder_name].filter(Boolean);
+        const message = privateAt.get(r.pos);
+        if (message?.fp !== r.fp) return audience.filter(n => n === r.holder_name || r.pos >= (firstIn.get(n) ?? -Infinity));
+        const known = typeof r.known === 'string' ? JSON.parse(r.known) : r.known;
+        const proof = known?.find(entry => Array.isArray(entry?.bystanders));
+        const channel = visOf(message);
+        const readers = !proof && channel?.way === '电话' && (!r.source_instance || JSON.parse(r.source_instance)?.legacy) ? legacyListeners(r) : [];
+        return audience.filter(name => name === r.holder_name || visibleTo({ message, viewer: name, userName, roster })
+            || canAuthorizeListener(channel, proof, name, readers));
+    };
 }
 
 export function openRecords(db) {
@@ -154,10 +192,10 @@ export function openRecords(db) {
     const setSourceLive = (fn, reader = null) => { sourceLive = fn; sourceReader = reader; };
     const liveSource = (known, chatKey, check) => !sourceLive || !known?.some(k => k?.basis && !(check ? check(k.basis) : sourceLive(chatKey, k.basis)));
     // 读缓存（10/16 提速，和 store.memo 一个道理）：同一连接上写过就清；visible 一轮里被叫几十次
-    const changesQ = db.prepare('select total_changes() n');
+    const changesQ = db.prepare('select total_changes() n'), externalQ = db.prepare('pragma data_version');
     const memoStore = new Map();
     const memo = (name, key, fn, copy = v => v) => {
-        const ver = changesQ.get().n;
+        const ver = `${changesQ.get().n}:${externalQ.get().data_version}`;
         let slot = memoStore.get(name);
         if (!slot || slot.ver !== ver) { slot = { ver, map: new Map() }; memoStore.set(name, slot); }
         if (slot.map.has(key)) return copy(slot.map.get(key));
@@ -168,6 +206,20 @@ export function openRecords(db) {
     try { db.exec('alter table chats add column extract integer not null default 0'); } catch {}
     try { db.exec('alter table records add column keys text'); } catch {}
     try { db.exec('alter table records add column source_basis text'); } catch {}
+    try { db.exec('alter table records add column source_instance text'); } catch {}
+    db.exec(`update records as r set source_instance = coalesce((
+        select json_object('fp', r.fp, 'pos', s.pos, 'sentAt', s.sent_at, 'sw', s.sw, 'legacy', 1)
+        from extract_jobs j join chat_seq s on s.chat_key = j.chat_key and s.fp = r.fp
+        join json_each(case when json_valid(j.positions) then j.positions end) p on p.type = 'integer' and p.value = s.pos where j.id = r.job_id
+        group by j.id having count(*) = 1 and s.sent_at <> '' and (select count(*) from chat_seq other
+            where other.chat_key = s.chat_key and other.fp = s.fp and other.sent_at = s.sent_at) = 1
+    ), '{}') where r.job_id is not null and r.source_instance is null and r.source_basis is null`);
+    for (const [event, row] of [['update of fp, status, source_basis, known, audience, holder, holder_name, text', 'new'], ['delete', 'old']]) {
+        db.exec(`create trigger if not exists authorization_records_${row} after ${event} on records begin
+            insert into meta(key, value) values ('authorization_rev:story:' || ${row}.story_id, '1')
+            on conflict(key) do update set value = value + 1;
+        end`);
+    }
     try { db.exec('alter table extract_jobs add column served_model text'); } catch {}
     try { db.exec('alter table extract_jobs add column provider text'); } catch {}
     try { db.exec('alter table records add column money text'); } catch {}   // 钱型记录：{from, to, amount, raw, stage, every, monthly}
@@ -190,9 +242,10 @@ export function openRecords(db) {
     const q = sql => db.prepare(sql);
     const now = () => new Date().toISOString();
     // 记录的写入统一走这里（新写入与重核共用）。
-    const COLUMNS = 'story_id, fp, job_id, type, text, about, tense, quotes, todo, todo_kind, fabricated, duration, elapsed, idea_ref, outcome, holder, holder_name, audience, keys, money, relation, wide, faction, standing, clock, unfinished, promise, lasting, known, lesson, life, rep, guess, matter, reach, source_basis, status, reason, created_at';
+    const COLUMNS = 'source_instance, story_id, fp, job_id, type, text, about, tense, quotes, todo, todo_kind, fabricated, duration, elapsed, idea_ref, outcome, holder, holder_name, audience, keys, money, relation, wide, faction, standing, clock, unfinished, promise, lasting, known, lesson, life, rep, guess, matter, reach, source_basis, status, reason, created_at';
     // 被拦下的记录可能对不上任何一条消息（模型报错了消息号），指纹记成 '-' 照样留痕。
-    const valuesOf = (storyId, jobId, r, status, reason) => [storyId, r.fp ?? '-', jobId, r.type ?? '?', r.text ?? '', r.about ?? null, r.tense ?? null,
+    const valuesOf = (storyId, jobId, r, status, reason) => [
+        r.sourceInstance ? JSON.stringify(r.sourceInstance) : null, storyId, r.fp ?? '-', jobId, r.type ?? '?', r.text ?? '', r.about ?? null, r.tense ?? null,
         JSON.stringify(r.quotes ?? []), r.todo ? 1 : 0, r.todoKind ?? null, r.fabricated ? 1 : 0, r.duration ?? null, r.elapsed ?? null,
         r.ideaRef ?? null, r.outcome ?? null, r.holder ?? '?', r.holderName ?? null, JSON.stringify(r.audience ?? []),
         r.keys?.length ? JSON.stringify(r.keys) : null, r.money ? JSON.stringify(r.money) : null, r.relation ? JSON.stringify(r.relation) : null, r.wide?.length ? JSON.stringify(r.wide) : null, r.faction ? JSON.stringify(r.faction) : null, r.standing ? 1 : 0, r.clock ? JSON.stringify(r.clock) : null, r.unfinished ? 1 : 0, r.promise ? JSON.stringify(r.promise) : null, r.lasting ? 1 : 0, r.known?.length ? JSON.stringify(r.known) : null, r.lesson ? JSON.stringify(r.lesson) : null, r.life ? JSON.stringify(r.life) : null, r.rep ? JSON.stringify(r.rep) : null, r.guess ? 1 : 0, r.matter ? JSON.stringify(r.matter) : null, r.reach ?? null, r.source_basis ? JSON.stringify(r.source_basis) : null, status, reason, now()];
@@ -230,7 +283,16 @@ export function openRecords(db) {
     // markDone=false：补记某一型时不改"这条消息由哪段记下"（重核按它找回原来那一段）。
     function finishJob({ jobId, storyId, fps, accepted, rejected, usage, costUsd, raw, markDone = true }) {
         const insert = insertRecord();
-        const put = (r, status, reason = null) => insert.run(...valuesOf(storyId, jobId, r, status, reason));
+        const candidates = q(`select s.pos from chat_seq s join extract_jobs j on j.chat_key = s.chat_key
+            where j.id = ? and s.fp = ? and s.sent_at is ?`);
+        const put = (r, status, reason = null) => {
+            const ref = r.sourceInstance;
+            if (ref) {
+                const matches = candidates.all(jobId, r.fp, ref.sentAt ?? null);
+                if (matches.length !== 1 || matches[0].pos !== ref.pos) r = { ...r, sourceInstance: { ...ref, ambiguous: true } };
+            }
+            return insert.run(...valuesOf(storyId, jobId, r, status, reason));
+        };
         db.exec('begin immediate');
         try {
             const ids = accepted.map(r => Number(put(r, 'ok').lastInsertRowid));
@@ -318,18 +380,18 @@ export function openRecords(db) {
 
     // 只纠正旧抽取账把“尚无任何区间的人”当成在场的错误，不重判离场后的空档。
     // 首次非空区间或首次联系之后不再纠正；派生账有自己的知情途径，不走这里。
-    const absentMembers = chatKey => absentRecordMembers(db, chatKey);
     // 窗口当前看得见的记录（消息还在序列里的）。带上出处位置。
     // 对账以后每条还带：closed_by（被看得见的"了结"或"回答"关上了：{id, pos}）、superseded_by（被看得见的"改掉"换掉了，以后不算数）。
     // 被改掉的默认不给（那一格、规划、账本都只拿活着的）；all=true 时连它们一起给（面板上划线显示）。
     function visible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false, through = null } = {}) { return memo('visible', `${chatKey}|${status}|${type ?? ''}|${all ? 1 : 0}|${rawBasis ? 1 : 0}|${through ?? ''}`, () => readVisible(chatKey, { status, type, all, rawBasis, through }), a => [...a]); }
     function readVisible(chatKey, { status = 'ok', type = null, all = false, rawBasis = false, through = null } = {}) {
+        const reader = sourceReader && memo('sourceReader', chatKey, () => sourceReader(chatKey));
+        const check = rawBasis ? null : reader;
         const rows = sourceRows(db, chatKey, { status, type, through: through ?? Infinity, rawBasis }).rows;
-        const check = !rawBasis && sourceReader ? memo('sourceReader', chatKey, () => sourceReader(chatKey)) : null;
         const copies = memo('legacyMenuCopies', chatKey, () => legacyMenuCopies(db, chatKey));
         const out = rows.filter(r => !copies.has(r.id)).map(r => ({ ...r, quotes: JSON.parse(r.quotes), audience: JSON.parse(r.audience), keys: r.keys ? JSON.parse(r.keys) : [], money: r.money ? JSON.parse(r.money) : null, relation: r.relation ? JSON.parse(r.relation) : null, clock: r.clock ? JSON.parse(r.clock) : null, wide: r.wide ? JSON.parse(r.wide) : [], faction: r.faction ? JSON.parse(r.faction) : null, promise: r.promise ? JSON.parse(r.promise) : null, known: r.known ? JSON.parse(r.known) : [], lesson: r.lesson ? JSON.parse(r.lesson) : null, life: r.life ? JSON.parse(r.life) : null, rep: r.rep ? JSON.parse(r.rep) : null, matter: r.matter ? JSON.parse(r.matter) : null })).filter(r => rawBasis || (liveSource(r.known, chatKey, check) && (!r.source_basis || !check || check(r.source_basis))));
-        const notThere = absentMembers(chatKey);
-        if (notThere) for (const r of out) if (r.job_id != null) r.audience = r.audience.filter(n => n === r.holder_name || !notThere(n, r.pos));
+        const audience = memo('recordAudience', chatKey, () => recordAudienceFor(db, chatKey));
+        for (const r of out) r.audience = audience(r);
         if (status !== 'ok') return out;
         const { closed, answered, superseded, outgoing } = linksOf(chatKey, rawBasis, through);
         const byId = new Map(out.map(r => [r.id, r]));
@@ -436,9 +498,14 @@ export function openRecords(db) {
     function replaceJobRecords({ jobId, storyId, accepted, rejected }) {
         db.exec('begin immediate');
         try {
-            const existing = q('select id, fp, type, text, keys, wide, promise, created_at, status, reason from records where job_id = ?').all(jobId);
+            const existing = q('select id, fp, type, text, keys, wide, promise, created_at, status, reason, source_instance from records where job_id = ?').all(jobId);
             const claim = r => {
-                const i = existing.findIndex(e => e.fp === r.fp && e.type === r.type && e.text === r.text);
+                const i = existing.findIndex(e => {
+                    if (e.fp !== r.fp || e.type !== r.type || e.text !== r.text) return false;
+                    if (!e.source_instance || !r.sourceInstance) return true;
+                    const old = JSON.parse(e.source_instance), next = r.sourceInstance;
+                    return old.sentAt === next.sentAt && old.sw === next.sw && old.revision === next.revision;
+                });
                 return i < 0 ? null : existing.splice(i, 1)[0];
             };
             const values = (r, status, reason) => valuesOf(storyId, jobId, r, status, reason);
@@ -449,7 +516,8 @@ export function openRecords(db) {
                 if (!old) return Number(insert.run(...values(r, status, reason)).lastInsertRowid);
                 // 检索词可能是事后补的（tools/tag-records.mjs），原始输出里没有：重核时留着，别冲掉；记下的时间也不改。
                 // 约定那一格也可能是事后补认的（tools/promises-recheck.mjs）：原始输出里没有就留着
-                const kept = { ...r, ...(r.keys?.length || !old.keys ? {} : { keys: JSON.parse(old.keys) }), ...(r.wide?.length || !old.wide ? {} : { wide: JSON.parse(old.wide) }), ...(r.promise || !old.promise ? {} : { promise: JSON.parse(old.promise) }) };
+                const kept = { ...r, sourceInstance: old.source_instance ? JSON.parse(old.source_instance) : null,
+                    ...(r.keys?.length || !old.keys ? {} : { keys: JSON.parse(old.keys) }), ...(r.wide?.length || !old.wide ? {} : { wide: JSON.parse(old.wide) }), ...(r.promise || !old.promise ? {} : { promise: JSON.parse(old.promise) }) };
                 // 玩家作废、改过的（void_user）重核也不复活
                 const row = old.status === 'void_user' ? values(kept, 'void_user', old.reason) : values(kept, status, reason);
                 row[row.length - 1] = old.created_at;

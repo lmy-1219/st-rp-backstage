@@ -7,7 +7,9 @@ import { liveEpisodes } from './episodes.mjs';
 import { arrivalBasis, sourceProjection, sourceRows, liveAnchors, setSourceContext } from './landing.mjs';
 import { identifyNode, createMenuVerifier } from './held.mjs';
 import { currentMenuRecords, menuRecordVersion, shownMenuProofLive } from './menu-evidence.mjs';
-import { absentRecordMembers, legacyMenuCopies } from './records.mjs';
+import { recordAudienceFor, legacyMenuCopies } from './records.mjs';
+import { visibilityTag, visOf, visibleTo, wayOf } from './visibility.mjs';
+import { measure } from './request-timing.mjs';
 
 // 按函数对象登记，不导出；只有正式绑定和统一派生 API 能创建合法的来源读口。
 const KNOCK_READERS = new WeakSet();
@@ -73,6 +75,21 @@ const CELL_COLS = 'purpose, trig, ttl, premise, if_taken, if_sunk, category, clo
 const cellValues = m => [m.purpose || null, m.trigger ? JSON.stringify(m.trigger) : null, m.ttl ? JSON.stringify(m.ttl) : null, m.premise || null, m.ifTaken || null, m.ifSunk || null, m.category || null, m.closeText || null, m.twist || null, m.lead || null, m.intimate ? JSON.stringify(m.intimate) : null];
 const CELL_MARKS = CELL_COLS.split(',').map(() => '?').join(', ');
 const fromJson = v => { if (v == null || v === '') return null; try { return JSON.parse(v); } catch { return null; } };
+const storedVisibilityTag = value => value === 'null' ? null : visibilityTag(value);
+// 坏标暂停授权，包住上个私标以保留原凭据；只有有效标签或明确清标能解除。
+function invalidVisibility(prior) {
+    const tag = storedVisibilityTag(prior);
+    if (tag === false) return prior;
+    return tag && tag.way !== '上门' ? JSON.stringify([tag]) : 'false';
+}
+function uniqueVisibilityRow(prior, incoming, x, pos) {
+    if (!prior) return null;
+    const date = x.d ?? null;
+    const old = prior.filter(row => row.sent_at === date);
+    const next = incoming.filter(row => (row.d ?? null) === date);
+    if (old.length !== 1 || next.length !== 1 || (x.w != null && old[0].sw != null && x.w !== old[0].sw)) return null;
+    return date !== null || old[0].pos === pos ? old[0] : null;
+}
 function readCells(m) {
     m.trigger = fromJson(m.trig);
     m.ttl = fromJson(m.ttl);
@@ -327,6 +344,7 @@ export function openStore(file) {
     try { db.exec('alter table menu add column entry_basis text'); } catch {}   // 到场前投影只保存来源引用
     for (const col of ['entry', 'place', 'goer', 'errand', 'signpost']) { try { db.exec(`alter table menu add column ${col} text`); } catch {} }   // 镜头外：玩家不在时发生在牵头的人身上（规划者写的）
     try { db.exec('alter table slots add column ver text'); } catch {}
+    for (const table of ['slots', 'carries']) try { db.exec(`alter table ${table} add column authorization text`); } catch {}
     try { db.exec('alter table menu_log add column by_name text'); } catch {}
     try { db.exec('alter table menu_log add column pending integer not null default 0'); } catch {}
     // 六格（章程 F1）：用意、触发（JSON）、时效（JSON）、前提、接了会怎样、没接会怎样；菜单项上读作 purpose、trigger、ttl、premise、ifTaken、ifSunk
@@ -341,6 +359,7 @@ export function openStore(file) {
     try { db.exec('alter table chat_seq add column sw integer'); } catch {}   // 正在用的是第几版左滑（分清改稿和左滑，N-271）   // 钉住那一格时的代码指纹（slot.SLOT_CODE）   // 跟着哪件约定（N-268：规划者写的；到了那天和它一起给，不让路）   // 节点规划：局面、目标、算成、落空、跨度、各条线、往后（JSON）
     try { db.exec('alter table chat_seq add column swipes text'); } catch {}
     try { db.exec('alter table chat_seq add column board_mark text'); } catch {}
+    try { db.exec('alter table chat_seq add column vis text'); } catch {} // SQL NULL 继承旧正文标签，JSON null 明确公开。
     // 清掉挂在空消息上的改稿链（试玩 10/7）：生成时的空占位被当成改稿，空消息的指纹人人一样，把不相干的几条串到了一起——
     // 昨天的"此刻的样子"、旧账的接续跟着链跑到了今天的消息上。以后同步不再挂（sync 里滤掉），这里把已经挂上的拆掉；没有就不动
     try {
@@ -354,7 +373,7 @@ export function openStore(file) {
     const tx = fn => {
         db.exec('begin immediate');
         try { const result = fn(); db.exec('commit'); return result; }
-        catch (error) { db.exec('rollback'); throw error; }
+        catch (error) { db.exec('rollback'); memoStore.clear(); setSourceContext(db, sourceContext); throw error; }
     };
     // 预备句柄复用（10/16 提速：以前每次 q() 都重新 prepare，一轮几千次）；.all()/.get() 都是一次取完，复用没有重入问题
     const stmts = new Map();
@@ -362,7 +381,15 @@ export function openStore(file) {
     // 读缓存（10/16 提速）：同一连接上任何一次写都让 total_changes 变，变了就全清；一轮里几十次重读消息、状态、meta 只算一次。
     // 返回的是数组的浅拷贝（谁 sort 都不影响别人），行对象共用——别就地改行
     const changesQ = q('select total_changes() n');
-    const memoStore = new Map();
+    const memoStore = new Map(), externalQ = q('pragma data_version');
+    let dataVersion = externalQ.get().data_version;
+    const externalVersion = () => {
+        const version = externalQ.get().data_version;
+        if (version !== dataVersion) {
+            dataVersion = version; memoStore.clear(); declarationCache.clear(); setSourceContext(db, sourceContext);
+        }
+        return version;
+    };
     const memo = (name, key, fn, copy = v => v) => {
         const ver = changesQ.get().n;
         let slot = memoStore.get(name);
@@ -507,12 +534,17 @@ export function openStore(file) {
                           values (?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict(story_id, fp) do update set lore = coalesce(messages.lore, excluded.lore), vis = coalesce(excluded.vis, messages.vis)
                           where excluded.lore is not null or excluded.vis is not null`);
         const rejected = [];
-        let stored = 0;
+        let stored = 0, changedVis = false;
         tx(() => {
             for (const m of messages) {
                 if (fingerprint(!!m.u, m.s, m.t) !== m.f) { rejected.push(m.f); continue; }
-                stored += Number(insert.run(chat.story_id, m.f, m.u ? 1 : 0, m.s, m.n ?? null, m.t, now(), m.l?.length ? JSON.stringify(m.l) : null, m.v && typeof m.v === 'object' ? JSON.stringify(m.v) : null).changes);
+                const tag = visibilityTag(m.v);
+                const prior = tag !== null && q('select vis from messages where story_id = ? and fp = ?').get(chat.story_id, m.f);
+                const vis = tag === false ? invalidVisibility(prior?.vis) : tag && JSON.stringify(tag);
+                if (prior && vis !== prior.vis) changedVis ||= JSON.stringify(tag) !== JSON.stringify(storedVisibilityTag(prior.vis));
+                stored += Number(insert.run(chat.story_id, m.f, m.u ? 1 : 0, m.s, m.n ?? null, m.t, now(), m.l?.length ? JSON.stringify(m.l) : null, vis).changes);
             }
+            if (changedVis) bumpAuthorization(`story:${chat.story_id}`);
         });
         return { stored, rejected };
     }
@@ -567,7 +599,14 @@ export function openStore(file) {
         const known = q('select 1 from messages where story_id = ? and fp = ?');
         const need = [...new Set(seq.map(x => x.f))].filter(fp => !known.get(chat.story_id, fp));
         if (need.length) return { committed: false, need };
-        const oldRows = q('select fp, sw, swipes, sent_at from chat_seq where chat_key = ? order by pos').all(chatKey).map(r => ({ ...r, swipes: r.swipes ? JSON.parse(r.swipes) : null }));
+        return measure('sync.tx', () => tx(() => syncKnown(chatKey, chat, seq, members, anchors, force)));
+    }
+
+    function syncKnown(chatKey, chat, seq, members, anchors, force) {
+        const oldRows = q(`select pos, fp, hidden, sent_at, mark, sw, swipes, board_mark, vis
+            from chat_seq where chat_key = ? order by pos`).all(chatKey)
+            .map(r => ({ ...r, swipes: r.swipes ? JSON.parse(r.swipes) : null }));
+        const legacyVis = prior => prior.vis ?? q('select vis from messages where story_id = ? and fp = ?').get(chat.story_id, prior.fp)?.vis;
         const oldFps = oldRows.map(r => r.fp);
         const newFps = seq.map(x => x.f);
         if (!force && looksCollapsed(oldFps.length, newFps.length)) {
@@ -585,15 +624,36 @@ export function openStore(file) {
                 || (o.sw != null && Number.isInteger(x.w) && o.sw !== x.w));
         };
         const edits = inPlaceEdits(oldRows, seq, swipeAt).filter(e => !blank(e.fp) && !blank(e.old));
-        return tx(() => {
+        return writeSequence();
+        function writeSequence() {
+            let authorizationWrite = seq.length < oldRows.length || !!(members && JSON.stringify(members) !== chat.members);
             const repaired = repairSwipes(chatKey, chat, oldRows, seq);
             q('delete from chat_seq where chat_key = ?').run(chatKey);
-            const insert = q('insert into chat_seq(chat_key, pos, fp, hidden, sent_at, mark, sw, swipes, board_mark) values (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+            const insert = q(`insert into chat_seq(chat_key, pos, fp, hidden, sent_at, mark, sw, swipes, board_mark, vis)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+            const legacyRows = seq.some(x => x.v === undefined || x.v === false) ? Map.groupBy(oldRows, r => r.fp) : null;
+            const incoming = (legacyRows || new Set(newFps).size !== newFps.length) ? Map.groupBy(seq, x => x.f) : null;
+            // 同局启用逐楼协议后，旧包中无法定位的实例按未知处理。
+            const visibilityKey = `vis_protocol:${chat.story_id}`;
+            const recordedProtocol = getMeta(visibilityKey);
+            const upgraded = recordedProtocol || oldRows.some(r => r.vis != null) || (legacyRows && q(`select 1 from chats c join chat_seq s on s.chat_key = c.key
+                where c.story_id = ? and s.vis is not null limit 1`).get(chat.story_id));
+            if (!recordedProtocol && (upgraded || seq.some(x => x.v !== undefined))) setMeta(visibilityKey, '1');
             seq.forEach((x, pos) => {
                 const old = oldRows[pos], unchanged = old?.fp === x.f;
                 const sw = Number.isInteger(x.w) && (x.swipes || !old?.swipes || x.w < old.swipes.length) ? x.w : unchanged && old?.sw != null ? old.sw : null;
                 const swipes = x.swipes ?? (unchanged ? old?.swipes : null);
-                insert.run(chatKey, pos, x.f, x.h ? 1 : 0, x.d ?? null, validMark(x.k) ? x.k : null, sw, swipes ? JSON.stringify(swipes) : null, typeof x.b === 'string' ? x.b : null);
+                const hidden = x.h ? 1 : 0, sent = x.d ?? null, mark = validMark(x.k) ? x.k : null, board = typeof x.b === 'string' ? x.b : null;
+                if (sent && incoming?.get(x.f).filter(m => m.d === sent).length > 1) setMeta(`ordinary_collision:${chatKey}:${x.f}:${sent}`, '1');
+                authorizationWrite ||= !!old && (!unchanged || old.hidden !== hidden || old.sent_at !== sent || old.mark !== mark || old.sw !== sw || old.board_mark !== board);
+                const prior = uniqueVisibilityRow(legacyRows?.get(x.f), incoming?.get(x.f), x, pos);
+                let vis = x.v === undefined ? prior?.vis ?? null : JSON.stringify(x.v);
+                if (x.v === false) vis = invalidVisibility(prior && legacyVis(prior));
+                if (x.v === undefined && !prior && upgraded) vis = 'false';
+                if (!authorizationWrite && unchanged && vis !== old.vis) {
+                    authorizationWrite = JSON.stringify(storedVisibilityTag(legacyVis(old))) !== JSON.stringify(storedVisibilityTag(vis));
+                }
+                insert.run(chatKey, pos, x.f, hidden, sent, mark, sw, swipes ? JSON.stringify(swipes) : null, board, vis);
             });
             // 这个窗口有了动静（新消息、删了、改了、左滑换了）：记下来；上一次动静隔得久，记一段"没动静"（离开从这里算，10/3 用户）
             if (change.added || change.removed || edits.length) {
@@ -650,9 +710,11 @@ export function openStore(file) {
             if (chat.parent_key && chat.branch_len == null && newFps.length) branchLen(chat, newFps);
             // 接入时自动开了记账的（extract_from＝-1）：第一次同步时，带着一大段旧聊天的只从接入以后记（旧的要不要补记，面板上给估价由用户点，D-100）。
             if (chat.extract_from === -1) q('update chats set extract_from = ? where key = ?').run(newFps.length > 3 ? newFps.length : 0, chatKey);
+            if (authorizationWrite) bumpAuthorization(chatKey);
             setMeta(`sync_rev:${chatKey}`, String(Number(syncRevision(chatKey)) + 1));
-            return { committed: true, need: [], total: newFps.length, ...change, ...(edits.length ? { edited: edits.map(e => e.pos) } : {}), ...(repaired ? { repaired } : {}) };
-        });
+            return { committed: true, need: [], total: newFps.length, ...change, hasAnchorProjection: raw != null || chat.anchors != null,
+                ...(edits.length ? { edited: edits.map(e => e.pos) } : {}), ...(repaired ? { repaired } : {}) };
+        }
     }
 
     // 哪几条是就地改的（N-271）：同一个位置、前后挨着的都没变、只有这一条的字变了，而且正在用的还是同一版左滑。
@@ -787,6 +849,7 @@ export function openStore(file) {
 
     // 窗口当前可见的消息（按位置）。后续的抽取、选料都从这里取。
     function currentMessages(chatKey, { revision, refresh } = {}) {
+        externalVersion();
         const cache = memoStore.get('messages')?.map;
         if (refresh || (revision !== undefined && cache?.get(chatKey)?.revision !== revision)) cache?.delete(chatKey);
         return copyArr(memo('messages', chatKey, () => readMessages(chatKey)).rows);
@@ -794,43 +857,126 @@ export function openStore(file) {
     function readMessages(chatKey) {
         const meta = q('select (select value from meta where key = ?) drafts, (select value from meta where key = ?) revision').get(`door_handoffs:${chatKey}`, `sync_rev:${chatKey}`);
         const drafts = fromJson(meta.drafts) ?? [];
-        const rows = q(`select s.pos, s.fp, s.hidden, s.sent_at, s.mark, s.sw, s.swipes, s.board_mark as boardMark, m.is_user, m.speaker, m.name, m.text, m.lore, m.vis
+        const rows = q(`select s.pos, s.fp, s.hidden, s.sent_at, s.mark, s.sw, s.swipes, s.board_mark as boardMark,
+                  m.is_user, m.speaker, m.name, m.text, m.lore, nullif(coalesce(s.vis, m.vis), 'null') as vis
                   from chat_seq s join chats c on c.key = s.chat_key
                   join messages m on m.story_id = c.story_id and m.fp = s.fp
                   where s.chat_key = ? order by s.pos`).all(chatKey).map(r => {
             // 谁看得见的记号照 ST 消息的样子放回 extra.rp_vis（visibility.visOf 读这儿）
             r.doorRevision = drafts.find(d => d.pos === r.pos && d.fp === r.fp)?.revision ?? null;
             if (!r.vis) return r;
-            try { return { ...r, extra: { rp_vis: JSON.parse(r.vis) } }; } catch { return r; }
+            return { ...r, extra: { rp_vis: visibilityTag(r.vis) } };
         });
         return { rows, revision: meta.revision ?? 0 };
     }
 
+    // 在途任务只认单调序号；钉格另按当前读者的有效权限判断。
+    const bumpAuthorization = key => q(`insert into meta(key, value) values (?, '1')
+        on conflict(key) do update set value = value + 1`).run(`authorization_rev:${key}`);
+    const authorizationEpoch = (chatKey, external = externalVersion()) => memo('authorization_epoch', chatKey, () => q(`select coalesce(g.version, 0) + coalesce((select sum(value) from meta where key in
+            ('authorization_rev:' || c.key, 'authorization_rev:story:' || c.story_id)), 0) n
+            from chats c left join card_groups g on g.story_id = c.story_id where c.key = ?`).get(chatKey)?.n ?? 0);
+    function authorizationVersion(chatKey, { reader = null, anchor = null, through = null, mode = 'current' } = {}, external = externalVersion()) {
+        const messages = memo('messages', chatKey, () => readMessages(chatKey)).rows;
+        const match = /^(\d+):(.+)$/.exec(anchor ?? '');
+        const pos = match ? Number(match[1]) - 1 : null, last = messages.length - 1;
+        through ??= match && isFp(match[2]) ? (messages[pos]?.fp === match[2] ? pos : last) : match && requireChat(chatKey).test_slot ? -1 : pos == null ? last : Math.min(last, pos);
+        const digest = memo('authorization', JSON.stringify([chatKey, reader, through, mode, !!anchor && !match]), () => {
+            try {
+                const chat = requireChat(chatKey), read = key => JSON.parse(getRawMeta(`${key}:${chatKey}`) ?? 'null');
+                const members = JSON.parse(chat.members ?? '[]') ?? [], anchors = JSON.parse(chat.anchors ?? 'null');
+                const cast = getCast(chat.story_id).map(p => [p.avatar, p.name, p.role]).sort();
+                const name = members.find(m => m.avatar === reader)?.name ?? cast.find(([avatar]) => avatar === reader)?.[1];
+                const roster = [...new Map([...cast.map(([avatar, name]) => ({ avatar, name })), ...members].map(m => [m.avatar, m])).values()];
+                const relevant = avatar => !name || avatar === reader || roster.some(m => m.avatar === avatar && m.name === name);
+                const segments = Object.keys(anchors ?? {}).filter(relevant).sort().map(avatar => [avatar, anchors[avatar]?.segments?.filter(s => s.from <= through + 1)
+                    .map(s => [s.from, s.to <= through + 1 ? s.to : null, wayOf(s.way), s.fromDate, s.to != null && s.to <= through + 1 ? s.toDate : null]) ?? null]);
+                const groups = cachedDeclarations(chat.story_id).groups;
+                const ownAftermath = groups.some(g => g.卡.includes(reader));
+                const prefix = JSON.stringify([chatKey, through]);
+                const arrivals = memo('authorization_arrivals', prefix, () => (read('arrivals') ?? []).filter(e => e.at <= through + 1).map(e => [e.avatar, e.who, e.at, e.fp, e.how, wayOf(e.way), e.source_basis?.id, knockLive(chatKey, e, { phase: 'fact' })]));
+                const candidates = memo('authorization_sources', prefix, () => {
+                    if (!q("select 1 from sqlite_master where type = 'table' and name = 'records'").get()) return [];
+                    const check = memo('source_reader', chatKey, () => sourceReader(chatKey));
+                    const audienceFor = memo('record_audience', chatKey, () => recordAudienceFor(db, chatKey));
+                    return sourceRows(db, chatKey, { through }).rows.flatMap(row => {
+                        const bases = [row.source_basis, ...(JSON.parse(row.known ?? '[]') ?? []).map(k => k?.basis)].filter(Boolean);
+                        if (!bases.every(check)) return [];
+                        return [{ row, audience: audienceFor(row, JSON.parse(row.audience)) }];
+                    });
+                });
+                const sources = candidates.filter(({ row }) => !ownAftermath || row.type !== '余波' || row.holder === reader)
+                    .map(({ row, audience }) => [row.id, row.pos, row.holder, name ? name === row.holder_name || audience.includes(name) : [...new Set(audience)].sort()]);
+                const instances = memo('authorization_messages', prefix, () => {
+                    const fresh = memo('fresh_links', '', () => new Map(q("select key, value from meta where key glob 'fresh_from:*'").all().map(r => [r.key, r.value])));
+                    return messages.slice(0, through + 1).map(m => ({ m, tag: visOf(m), instance: [m.pos, m.fp, m.sent_at, m.hidden, m.mark, null, m.sw, m.boardMark, m.doorRevision, fresh.get(`fresh_from:${m.fp}`)] }));
+                });
+                const viewer = { avatar: reader, name };
+                const rows = instances.filter(({ m }) => !anchor || match || anchors || m.vis || m.hidden || m.boardMark || m.doorRevision).map(({ m, tag, instance }) => {
+                    const tuple = instance.slice();
+                    const privateWay = tag?.way === '电话' || tag?.way === '消息';
+                    if (privateWay) tuple[5] = !name ? tag : visibleTo({ message: m, viewer, roster }) && tag.way;
+                    else tuple[5] = tag === false ? false : tag?.way ?? null;
+                    return tuple;
+                });
+                if (externalVersion() !== external) return null;
+                return createHash('sha256').update(JSON.stringify([3, mode, !!chat.group_id, groups,
+                    members.map(m => [m.avatar, m.name, !!m.disabled]), cast, read('card_choices'), segments, rows, arrivals, sources,
+                    ['auto_came', 'auto_leave_events'].map(key => (read(key) ?? []).filter(e => (e.pos ?? e.at) <= through + 1))])).digest('hex');
+            } catch { return null; }
+        });
+        return digest && `${digest}:${reader ?? ''}`;
+    }
+    const authorized = (row, chatKey, speaker, anchor) => !!row?.authorization && row.authorization === authorizationVersion(chatKey, { reader: speaker, anchor });
+
     // ver：钉住时那一版代码的指纹（slot.SLOT_CODE）；给了 ver 就只认同一版钉的（旧版本钉的、没记版本的都当没钉过）
     function getSlot({ chatKey, speaker, anchor, ver = undefined }) {
-        const r = q('select text, ver from slots where chat_key = ? and speaker = ? and anchor = ?').get(chatKey, speaker, anchor);
-        if (!r || r.ver === 'given' || (ver !== undefined && r.ver !== ver)) return null;   // given＝只记下给了什么，从不当钉住的用
+        const r = q('select text, ver, authorization from slots where chat_key = ? and speaker = ? and anchor = ?').get(chatKey, speaker, anchor);
+        if (!authorized(r, chatKey, speaker, anchor) || r.ver === 'given' || (ver !== undefined && r.ver !== ver)) return null;   // given＝只记下给了什么，从不当钉住的用
         return r.text;
     }
 
     // parts＝这一格分块放时各块的文字（slot.mjs PLACES）；没有就是整格放最后
-    function putSlot({ chatKey, speaker, anchor, text, ids = null, parts = null, ver = null }) {
-        q('insert or replace into slots(chat_key, speaker, anchor, text, ids, parts, ver, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)')
-            .run(chatKey, speaker, anchor, text, ids?.length ? JSON.stringify(ids) : null, parts ? JSON.stringify(parts) : null, ver, now());
+    function putSlot({ chatKey, speaker, anchor, text, ids = null, parts = null, ver = null, authorization = authorizationVersion(chatKey, { reader: speaker, anchor }) }) {
+        q('insert or replace into slots(chat_key, speaker, anchor, text, ids, parts, ver, created_at, authorization) values (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(chatKey, speaker, anchor, text, ids?.length ? JSON.stringify(ids) : null, parts ? JSON.stringify(parts) : null, ver, now(), authorization);
     }
     // 没钉住的那一格给了什么（ver＝given：getSlot 不当钉住的用；getSlotParts、recentSlotIds 照样读得到）
-    function putGiven({ chatKey, speaker, anchor, text, ids = null, parts = null }) { putSlot({ chatKey, speaker, anchor, text, ids, parts, ver: 'given' }); }
+    function putGiven(slot) { putSlot({ ...slot, ver: 'given' }); }
     function getSlotParts({ chatKey, speaker, anchor, withReplay = false }) {
-        const r = q('select parts from slots where chat_key = ? and speaker = ? and anchor = ?').get(chatKey, speaker, anchor);
-        const saved = fromJson(r?.parts);
+        const r = q('select parts, authorization from slots where chat_key = ? and speaker = ? and anchor = ?').get(chatKey, speaker, anchor);
+        const saved = authorized(r, chatKey, speaker, anchor) ? fromJson(r.parts) : null;
         const slot = saved?.replay ? saved : { parts: saved };
         return withReplay ? slot : slot.parts;
     }
 
     // 这一格留下的余波（钉没钉住都记；同一格重组一次就换成新的，没有就删掉）。
-    function putCarry({ chatKey, speaker, anchor, carry = [] }) {
-        if (carry?.length) q('insert or replace into carries(chat_key, speaker, anchor, carry, created_at) values (?, ?, ?, ?, ?)').run(chatKey, speaker, anchor, JSON.stringify(carry), now());
+    function putCarry({ chatKey, speaker, anchor, carry = [], authorization = authorizationVersion(chatKey, { reader: speaker, anchor }) }) {
+        if (carry?.length) q('insert or replace into carries(chat_key, speaker, anchor, carry, created_at, authorization) values (?, ?, ?, ?, ?, ?)').run(chatKey, speaker, anchor, JSON.stringify(carry), now(), authorization);
         else q('delete from carries where chat_key = ? and speaker = ? and anchor = ?').run(chatKey, speaker, anchor);
+    }
+
+    // 降级前停接请求并排空在途组装，避免旧版重新读出未获授权的派生内容。
+    function prepareSlotRollback() {
+        return tx(() => {
+            const scans = ['slots', 'carries'].map(table => q(`select s.chat_key, s.speaker, s.anchor, s.authorization, c.story_id from ${table} s join chats c on c.key = s.chat_key`).all());
+            const prefix = (key, n) => q('select fp from chat_seq where chat_key = ? order by pos limit ?').all(key, n + 1);
+            const unsafeCarry = row => {
+                const n = parseInt(row.anchor, 10);
+                if (!Number.isSafeInteger(n) || n < 1) return false;
+                const source = prefix(row.chat_key, n);
+                if (source.length < n || row.anchor !== `${n}:${source[n - 1].fp}`) return false;
+                // 目的窗还没续到这条回复时，已有前缀也可能在降级后接上源窗的余波。
+                return q('select key from chats where story_id = ? and key <> ?').all(row.story_id, row.chat_key).some(({ key }) =>
+                    prefix(key, n).slice(0, source.length).every(({ fp }, i) => fp === source[i].fp) && !authorized(row, key, row.speaker, row.anchor));
+            };
+            const [slots, carries] = scans.map((rows, i) => rows.filter(row =>
+                !authorized(row, row.chat_key, row.speaker, row.anchor) || (i === 1 && unsafeCarry(row))));
+            for (const [table, rows] of [['slots', slots], ['carries', carries]]) for (const row of rows)
+                q(`delete from ${table} where chat_key = ? and speaker = ? and anchor = ?`).run(row.chat_key, row.speaker, row.anchor);
+            const legacy = q('update slots set carry = null where carry is not null').run().changes;
+            return { slots: slots.length, carries: carries.length, legacy };
+        });
     }
 
     // 这个角色在这段上文之前的格子里留下的余波。同一局的别的窗口（分支）也算，但得是一样的上文，连那一格写出来的回复都一样：
@@ -854,12 +1000,13 @@ export function openStore(file) {
             return shared.get(key);
         };
         const byAnchor = new Map();
-        for (const r of q('select s.chat_key, s.anchor, s.carry from carries s join chats c on c.key = s.chat_key where c.story_id = ? and s.speaker = ?').all(chat.story_id, speaker)) {
+        for (const r of q('select s.chat_key, s.anchor, s.carry, s.authorization from carries s join chats c on c.key = s.chat_key where c.story_id = ? and s.speaker = ?').all(chat.story_id, speaker)) {
             const n = at(r.anchor);
             if (n < 1 || n >= now || byAnchor.has(n) || r.anchor !== `${n}:${mine[n - 1]}`) continue;
             // 余波跟着那一格写出来的那条回复走：这个窗口里第 n 条得是他开的口；别的窗口的，连那条回复都得一样
             // （只比上文会认错：从回来那一刻之前分出去的分支没有那次离开，却把回来后那一格的余波带了过去——Q 副本实测）。
             if (seq[n]?.speaker !== speaker || (r.chat_key !== chatKey && sharedWith(r.chat_key) < n + 1)) continue;
+            if (!authorized(r, r.chat_key, speaker, r.anchor) || (r.chat_key !== chatKey && !authorized(r, chatKey, speaker, r.anchor))) continue;
             byAnchor.set(n, JSON.parse(r.carry));
         }
         const spoke = seq.filter(r => r.speaker === speaker).map(r => r.pos);
@@ -871,10 +1018,15 @@ export function openStore(file) {
     function recentSlotIds({ chatKey, speaker, anchor = null, limit = 3 }) {
         const at = n => { const v = parseInt(String(n), 10); return Number.isFinite(v) ? v : -1; };
         const before = anchor == null ? Infinity : at(anchor);
-        const rows = q('select anchor, ids from slots where chat_key = ? and speaker = ? and ids is not null').all(chatKey, speaker)
-            .filter(r => at(r.anchor) < before).sort((a, b) => at(b.anchor) - at(a.anchor)).slice(0, limit);
+        const rows = q('select anchor, ids, authorization from slots where chat_key = ? and speaker = ? and ids is not null').all(chatKey, speaker)
+            .filter(r => at(r.anchor) < before).sort((a, b) => at(b.anchor) - at(a.anchor));
         const counts = new Map();
-        for (const r of rows) for (const id of JSON.parse(r.ids)) counts.set(id, (counts.get(id) ?? 0) + 1);
+        for (const r of rows) {
+            if (limit <= 0) break;
+            if (!authorized(r, chatKey, speaker, r.anchor)) continue;
+            limit--;
+            for (const id of JSON.parse(r.ids)) counts.set(id, (counts.get(id) ?? 0) + 1);
+        }
         return counts;
     }
 
@@ -1094,9 +1246,25 @@ export function openStore(file) {
         try { const v = JSON.parse(value); return v && ((!basisLive(match[2], v.pos ?? v.at, v.basisDay)) || (v.timeBasis && !timeProofLive(match[2], v.timeBasis))) ? null : value; } catch { return value; }
     }
     function setMeta(key, value) {
-        // 比较原始落库值（含 null），不能用会过滤失效来源的 getMeta 判断是否相同。
-        q('insert into meta(key, value) values (?, ?) on conflict(key) do update set value = excluded.value where meta.value is not excluded.value')
-            .run(key, value == null ? null : String(value));
+        const access = /^(?:anchors_raw|arrived|arrivals|door_handoffs|auto_execution|auto_came|auto_leave_events|card_choices):([^:]+)$/.exec(key)
+            ?? /^(?:settled_contact|ordinary_collision):([^:]+):.+$/.exec(key);
+        const dependency = /^(event_source|menu_condition|menu_proof|plan_basis|replan_of):(\d+)$/.exec(key);
+        const fresh = key.startsWith('fresh_from:');
+        const write = () => {
+            // 原始值相同的同步无需递增序号。
+            const changed = q('insert into meta(key, value) values (?, ?) on conflict(key) do update set value = excluded.value where meta.value is not excluded.value')
+                .run(key, value == null ? null : String(value)).changes;
+            if (!changed) return;
+            if (access) {
+                const chat = /^(arrivals|auto_execution):/.test(key) ? getChat.get(access[1]) : null;
+                bumpAuthorization(chat ? `story:${chat.story_id}` : access[1]);
+            } else if (dependency) {
+                const table = { event_source: 'menu', menu_condition: 'menu', menu_proof: 'menu_log', plan_basis: 'plans', replan_of: 'plans' }[dependency[1]];
+                const row = q(`select c.story_id from ${table} t join chats c on c.key = t.chat_key where t.id = ?`).get(Number(dependency[2]));
+                if (row) bumpAuthorization(`story:${row.story_id}`);
+            } else if (fresh) for (const row of q('select story_id from messages where fp = ?').all(key.slice(11))) bumpAuthorization(`story:${row.story_id}`);
+        };
+        if ((access || dependency || fresh) && !db.isTransaction) tx(write); else write();
     }
 
     // ---------- 规划与菜单（M6）：跟着消息走 ----------
@@ -1385,6 +1553,7 @@ export function openStore(file) {
     // 只认当前窗口仍看得见、没有被改掉的事实。菜单结果另查真正落下的「碰上的事」，
     // 单靠 shown/used 的菜单步骤不能证明那件事已有结果。
     function menuEvidenceRecords(chatKey, { through = Infinity } = {}) {
+        externalVersion();
         // store 也供不启用记账的宿主使用；不在读口建表。
         if (!q("select 1 from sqlite_master where type = 'table' and name = 'records'").get()) return [];
         return memo('menu_evidence', `${chatKey}|${through}`, () => {
@@ -1394,8 +1563,8 @@ export function openStore(file) {
                     known: fromJson(r.known) ?? [], matter: fromJson(r.matter), life: fromJson(r.life), promise: fromJson(r.promise) }));
             const copies = legacyMenuCopies(db, chatKey);
             const visible = rows.filter(r => !copies.has(r.id) && (!r.source_basis || check(r.source_basis)) && !r.known.some(k => k?.basis && !check(k.basis)));
-            const notThere = absentRecordMembers(db, chatKey);
-            if (notThere) for (const r of visible) if (r.job_id != null) r.audience = r.audience.filter(n => n === r.holder_name || !notThere(n, r.pos));
+            const audienceFor = memo('record_audience', chatKey, () => recordAudienceFor(db, chatKey));
+            for (const r of visible) r.audience = audienceFor(r);
             const links = q(`select l.* from record_links l join chats c on c.story_id = l.story_id where c.key = ?`).all(chatKey);
             return currentMenuRecords({ visible, messages, links, through });
         });
@@ -1813,7 +1982,8 @@ export function openStore(file) {
         };
     }
 
-    setSourceContext(db, chatKey => ({ limits: historyOf(chatKey).limits, dependencies: (basis, options) => memo('arrival_dependencies', JSON.stringify([chatKey, basis, options.rawBasis ?? false, options.through ?? null]), () => arrivalDependencies(chatKey, basis, options)) }));
-    return { declarationsOf: readDeclarations, cachedDeclarations, putDeclarations,
+    const sourceContext = chatKey => ({ limits: historyOf(chatKey).limits, dependencies: (basis, options) => memo('arrival_dependencies', JSON.stringify([chatKey, basis, options.rawBasis ?? false, options.through ?? null]), () => arrivalDependencies(chatKey, basis, options)) });
+    setSourceContext(db, sourceContext);
+    return { authorizationVersion, authorizationEpoch, externalVersion, changeVersion: () => changesQ.get().n, commitSlot: tx, prepareSlotRollback, declarationsOf: readDeclarations, cachedDeclarations, putDeclarations,
         deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, syncRevision, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

@@ -213,12 +213,13 @@ export function createWorker({ store, records, getConfig, clientFactory = create
                 if (byWindow) { results.push({ handoff: handOff({ chat, messages, window, context, names, why: '设成了把记账交给窗口做（不走 API）' }) }); break; }
                 if (over) { results.push({ handoff: handOff({ chat, messages, window, context, names, budget: true, why: `今天的花费到了上限（约 ${records.spentToday().toFixed(2)} / ${config.extractor.dailyBudgetUsd}），这一段交给窗口记` }) }); break; }
                 try {
-                    const fps = new Set(window.map(m => m.fp));
-                    const originalWindow = messages.filter(m => fps.has(m.fp)).length === fps.size ? window : null;
+                    const occurrences = Map.groupBy(messages.filter(m => window.some(source => source.fp === m.fp)), m => m.fp);
+                    const originalWindow = window.every(m => occurrences.get(m.fp).filter(o => !m.sent_at || o.sent_at === m.sent_at).length === 1) ? window : null;
                     const currentView = () => {
-                        if (revision === store.syncRevision(chatKey)) return { window: originalWindow };
+                        if (!originalWindow || revision === store.syncRevision(chatKey)) return { window: originalWindow };
                         const current = messagesFor(chatKey, { refresh: true });
-                        return { window: replyWindow(window.map(m => m.pos), window.map(m => m.fp), current), positionContext: () => {
+                        if (window.some(m => store.getRawMeta(`ordinary_collision:${chatKey}:${m.fp}:${m.sent_at}`))) return { window: null };
+                        return { window: replyWindow(window.map(m => m.pos), window.map(m => m.fp), current, window), positionContext: () => {
                             const liveChat = store.requireChat(chatKey);
                             return { chat: liveChat, remoteOf: remoteOf(liveChat, current), facePresentOf: facePresentOf(liveChat) };
                         } };

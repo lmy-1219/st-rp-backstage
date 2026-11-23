@@ -9,7 +9,8 @@ import { KINDS as PROMISE_KINDS, OUTCOMES } from './promises.mjs';
 import { LINK_KINDS, similar } from './records.mjs';
 import { rankByOverlap } from './recall.mjs';
 import { LIFE_KINDS } from './life.mjs';
-import { isPrivate } from './visibility.mjs';
+import { isPrivate, visOf } from './visibility.mjs';
+import { sourceMessage } from './source-basis.mjs';
 import { MENU_EVIDENCE_PROTOCOL, menuEvidenceVersion, menuSource, actualMenuRecord, quotedMenuRecord } from './menu-evidence.mjs';
 
 import { registerPromptDefaults, promptText } from './prompt-slots.mjs';
@@ -287,14 +288,15 @@ export function closestSentence(body, text) {
 const GUESS_WORD = /猜|以为|估计|怀疑|认为|觉得|看样子|料定|想必|推测|判断|八成|多半|恐怕|怕是|准是|看来|兴许|没准/;
 const GUESS_CUE = /听这动静|听这声|听动静|听着像|看样子|看这样子|八成|多半|估计|恐怕|想必|怕是|准是|看来|兴许|没准|我猜|猜你|以为你/;
 // 回包的楼号只认出包时的窗；身份和相对次序都对上才整窗交给核对。
-export function replyWindow(positions, fps, messages) {
-    if (!Array.isArray(positions) || !fps.length || positions.length !== fps.length || new Set(fps).size !== fps.length) return null;
-    const byFp = new Map();
-    for (const m of messages) byFp.set(m.fp, byFp.has(m.fp) ? null : m);
+export function replyWindow(positions, fps, messages, originals = null) {
+    if (!Array.isArray(positions) || !fps.length || positions.length !== fps.length) return null;
+    const byFp = Map.groupBy(messages, m => m.fp);
     const window = [];
     for (const [i, fp] of fps.entries()) {
-        const pos = positions[i], m = byFp.get(fp);
-        if (!m || !Number.isSafeInteger(pos) || pos < 0 || (i && (pos <= positions[i - 1] || m.pos <= window[i - 1].pos))) return null;
+        const pos = positions[i], original = originals?.[i];
+        const [m, duplicate] = (byFp.get(fp) ?? []).filter(m => !original || (original.sent_at || original.doorRevision)
+            && m.sent_at === original.sent_at && m.sw === original.sw && m.doorRevision === original.doorRevision);
+        if (!m || duplicate || !Number.isSafeInteger(pos) || pos < 0 || (i && (pos <= positions[i - 1] || m.pos <= window[i - 1].pos))) return null;
         window.push(m.pos === pos ? m : { ...m, replyPos: pos });
     }
     return window;
@@ -372,6 +374,7 @@ export function verify(items, { window, clean, presenceOf, remoteOf = () => [], 
             const home = window.filter(x => x !== m && holds(x));
             if (home.length === 1) { m = home[0]; Object.assign(record, { fp: m.fp, holder: m.speaker, holderName: m.displayName }); record.audience = presenceOf(m, record); }
         }
+        record.sourceInstance = { ...sourceMessage(m), sw: m.sw, sentAt: m.sent_at };
         if (record.type === '时间' && item?.['时间证据'] != null && !Array.isArray(item['时间证据'])) record.clock = { ...record.clock, unsure: true };
         if (record.type === '时间' && Array.isArray(item?.['时间证据'])) {
             const ref = item['时间点'] == null ? m : window.find(x => replyPosOf(x) === item['时间点'] && x.pos <= m.pos);
@@ -384,8 +387,11 @@ export function verify(items, { window, clean, presenceOf, remoteOf = () => [], 
         // 旁白不是人，不算知道的人；旁白那条里做事、说话的那个人算（D-170，试玩 10/6：V 当面跟修门的人报了名号，"知道的人"只记了她自己，
         // 局势就不知道消息能从修门的人那儿传出去）。当时在场的没卡的人（"旁听"）也算听见了。
         if (m.speaker === 'narrator') record.audience = record.audience.filter(n => n !== m.displayName);
-        const bystanders = (Array.isArray(item?.['旁听']) ? item['旁听'] : []).filter(x => typeof x === 'string' && x.trim()).map(x => x.trim().slice(0, 20)).slice(0, 8);
+        const channel = visOf(m);
+        const bystanders = (Array.isArray(item?.旁听) && (channel?.way === '电话' || !isPrivate(m)) ? item.旁听 : [])
+            .filter(x => typeof x === 'string' && x.trim()).map(x => x.trim().slice(0, 20)).slice(0, 8);
         record.audience = [...new Set([...record.audience, ...(m.speaker === 'narrator' && record.holderName && record.holderName !== m.displayName ? [record.holderName] : []), ...bystanders])];
+        if (bystanders.length && channel?.way === '电话') record.known.push({ channel, bystanders });
         if (['说', '做'].includes(record.type) && !isPrivate(m)) {
             let faces = []; try { faces = facePresentOf(m.pos); } catch {}
             if (Array.isArray(faces)) record.audience = [...new Set([...record.audience, ...faces.filter(n => typeof n === 'string' && n.trim())])];
@@ -693,7 +699,7 @@ function bindMenuClaim(r, window, prepared) {
     const claim = r.menuClaim;
     delete r.menuClaim;
     if (!claim) return null;
-    const ref = prepared.menuRefs?.get(claim.id), m = window.find(w => w.fp === r.fp);
+    const ref = prepared.menuRefs?.get(claim.id), m = window.find(w => w.pos === r.sourceInstance?.pos && w.fp === r.fp);
     const target = claim.boundary === '收尾' ? ref?.close : claim.boundary === '露面' ? ref?.show : '';
     if (!ref || !m || !target) return '对不上这次给的件或边界';
     if (!actualMenuRecord(r)) return '不是已经发生的实际记录';
@@ -722,7 +728,7 @@ export function applyReply({ records, config, chat, window, prepared, jobId, raw
     items.forEach((x, i) => { if (x && typeof x === 'object') x.__n = i + 1; });
     const { accepted, rejected } = verify(items.filter(i => i?.['型'] !== '露面' && i?.['型'] !== '作废'), { window, clean: prepared.clean, presenceOf: prepared.presenceOf, remoteOf: prepared.remoteOf, facePresentOf: prepared.facePresentOf, openIdeaIds: new Set(prepared.openIdeas.map(r => r.id)), onlyTypes, linkIds: prepared.linkIds, linkRows: prepared.linkRows, recent: prepared.recent, known: prepared.known ?? [] });
     const unbound = [];
-    for (const r of accepted) { const claim = r.menuClaim, why = bindMenuClaim(r, window, prepared); if (why) unbound.push({ id: claim.id, pos: window.find(w => w.fp === r.fp)?.pos ?? null, why: `${claim.boundary ?? '?'}绑定未认：${why}` }); }
+    for (const r of accepted) { const claim = r.menuClaim, why = bindMenuClaim(r, window, prepared); if (why) unbound.push({ id: claim.id, pos: r.sourceInstance?.pos ?? null, why: `${claim.boundary ?? '?'}绑定未认：${why}` }); }
     for (const x of rejected) delete x.record.menuClaim;
     const used = usage ?? { input: 0, output: 0 };
     const e = config.extractor;

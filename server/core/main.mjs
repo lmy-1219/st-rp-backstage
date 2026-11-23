@@ -104,12 +104,13 @@ if (freshHome) log('new data folder: wrote the recommended config');
 const store = openStore(path.join(home, 'rp.sqlite'));
 const records = openRecords(store.db);
 const dayVersion = store.db.prepare('select total_changes() n');
-let dayCacheVersion = -1, dayCache = new Map(), pointCache = new Map();
+let dayCacheVersion = '', dayCache = new Map(), pointCache = new Map();
 const confirmedDays = chatKey => {
-    const ver = dayVersion.get().n;
+    const ver = `${dayVersion.get().n}:${store.externalVersion()}`;
     if (ver !== dayCacheVersion) { dayCacheVersion = ver; dayCache = new Map(); pointCache = new Map(); }
     if (!dayCache.has(chatKey)) dayCache.set(chatKey, confirmedDayFor(store, { ...records, visible: key => records.visible(key, { rawBasis: true, type: '时间' }) }, chatKey));
-    return pos => dayCache.get(chatKey)(pos + 0.5);
+    const dayOf = dayCache.get(chatKey);
+    return pos => dayOf(pos + 0.5);
 };
 const confirmedPoint = (chatKey, pos) => {
     confirmedDays(chatKey);

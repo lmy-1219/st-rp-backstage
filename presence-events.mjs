@@ -135,8 +135,9 @@ function actionAtLatestVersion(events) {
     return { action: latest.action === 'undo' ? null : latest };
 }
 
-function verifiedActions(prefix, chat, cards, rosterAvatars, rejectEvent) {
+function verifiedActions(prefix, chat, cards, rosterAvatars, rejectEvent, evidence) {
     const index = indexRows(prefix, chat), floors = prefix.map(() => []), verified = [], rejected = [], bound = new Set();
+    if (evidence) Object.assign(evidence, { prefix, locate: index.locate });
     for (const [at, row] of prefix.entries()) for (const field of ['rpePresence', 'rpePresenceOpen']) {
         if (!row.extra || !Object.hasOwn(row.extra, field)) continue;
         const records = row.extra[field], open = field === 'rpePresenceOpen';
@@ -189,6 +190,7 @@ function verifiedActions(prefix, chat, cards, rosterAvatars, rejectEvent) {
             const { action, broken } = actionAtLatestVersion(entries.map(entry => entry.event));
             if (broken) rejectEvent(at, broken, 'version-chain');
             else if (action) floors[at].push(action);
+            else evidence?.withdrawn.push({ at, event, versions: entries.map(entry => entry.event) });
         }
     }
     return floors;
@@ -277,8 +279,12 @@ export function inspect(input, at, event, { includeProjection = false, prepared 
 }
 
 export function derivePresence(input) { return projectPresence(input); }
+export function presenceEvidence(input) {
+    const evidence = { changes: [], rejected: [], withdrawn: [] };
+    return Object.assign(evidence, { unresolved: projectPresence(input, null, evidence).unresolved });
+}
 function projectPresence({ chat, roster, openingSnapshot = null, fallbackAvatar = null, generating = null,
-    through = (chat?.length ?? 0) - 1 }, inspection) {
+    through = (chat?.length ?? 0) - 1 }, inspection, evidence) {
     if (!Array.isArray(chat) || chat.some(row => row && Object.hasOwn(row, 'revisionPending'))) throw new TypeError('需要原始 chat 数组');
     if (!integer(through, -1)) throw new RangeError('through 必须是大于等于 -1 的整数');
     const prefix = rowsFromChat(chat.slice(0, through + 1), fallbackAvatar, generating);
@@ -292,6 +298,7 @@ function projectPresence({ chat, roster, openingSnapshot = null, fallbackAvatar 
         ...details,
     });
     const rejectEvent = (at, event, reason, targets = [event.avatar], cutoff = at, matches) => {
+        evidence?.rejected.push({ at, event, reason, targets, cutoff });
         inspection?.reject(event, reason, targets, matches);
         for (const avatar of targets.length ? targets : [null]) {
             if (cutoff !== null && avatars.has(avatar)) failedAt.set(avatar, Math.min(cutoff, failedAt.get(avatar) ?? cutoff));
@@ -302,7 +309,7 @@ function projectPresence({ chat, roster, openingSnapshot = null, fallbackAvatar 
         const { person, candidates } = resolveIdentity(cards, ref);
         issue(at, source, 'legacy-only', typeof ref === 'string' ? { name: ref } : ref, person?.avatar, candidates);
     };
-    const actions = verifiedActions(prefix, chat, avatars, new Set(roster.map(card => card?.avatar)), rejectEvent);
+    const actions = verifiedActions(prefix, chat, avatars, new Set(roster.map(card => card?.avatar)), rejectEvent, evidence);
     if (openingSnapshot != null) {
         const { at, members, disabled } = openingSnapshot;
         const floor = integer(at) && at < prefix.length ? at : null;
@@ -311,9 +318,10 @@ function projectPresence({ chat, roster, openingSnapshot = null, fallbackAvatar 
         for (const avatar of files) if (nonempty(avatar)) legacy(floor, 'opening-snapshot', { avatar });
     }
     for (const [at, row] of prefix.entries()) {
-        for (const [avatar, change, evidence] of floorChanges(actions[at], at, rejectEvent, actions[at + 1])) {
+        for (const [avatar, change, sources] of floorChanges(actions[at], at, rejectEvent, actions[at + 1])) {
+            evidence?.changes.push({ avatar, change, sources });
             applyChange(byAvatar[avatar], change);
-            if (at === inspection?.at && evidence.some(event => event.id === inspection.event.id && event.version === inspection.event.version))
+            if (at === inspection?.at && sources.some(event => event.id === inspection.event.id && event.version === inspection.event.version))
                 inspection.effectiveAt = at + Number(change.boundary === 'after');
         }
         if (row.fp === null) issue(at, 'message', 'field-invalid');

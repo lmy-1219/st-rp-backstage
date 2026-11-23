@@ -23,7 +23,41 @@ export function storyTimeAt(chat, index, back = false) {
 }
 
 /** 原地裁剪生成用聊天。没有记录或已能看到全部时返回 null。 */
-export function cutByPresence(chat, rec, { full = [], dateOf = m => String(m?.send_date ?? ''), storyTimeAt: timeAt = () => null } = {}) {
+export function cutByPresence(chat, rec, { full = [], dateOf = m => String(m?.send_date ?? ''), storyTimeAt: timeAt = () => null,
+    protectedView = null } = {}) {
+    if (protectedView) {
+        const { visible, privateTo, through, ceiling, thirdParty, origins } = protectedView;
+        const byRow = new Map(full.flatMap((row, pos) => row.is_system ? [] : [[row, pos]]));
+        const original = [...byRow.keys()];
+        const byExtra = Map.groupBy(original.filter(row => row.extra), row => row.extra);
+        const locate = row => byRow.has(row) ? row : byExtra.get(row.extra)?.length === 1 ? byExtra.get(row.extra)[0]
+            : Number.isInteger(row.index) && original[row.index]?.mes === row.mes ? original[row.index] : null;
+        const allowed = Map.groupBy(ceiling, locate);
+        const pieces = Map.groupBy(rec.ownFragments, piece => piece.at);
+        const pending = new Set(rec.fragmentDeductions.map(r => r.at));
+        const rows = [], sent = full.map(() => []);
+        for (const row of chat) {
+            const source = locate(row), at = byRow.get(source);
+            if (at == null || at > through || source.hidden || rec.closed || !row.mes || !visible(source)) continue;
+            const offset = source.mes.indexOf(row.mes);
+            if (offset < 0 || source.mes.lastIndexOf(row.mes) !== offset) continue;
+            const grant = !thirdParty && rec.ranges.some(r => r.grant && r.from <= at && at < r.to);
+            if (!grant && !allowed.get(source)?.some(old => old.mes.includes(row.mes))) continue;
+            const keep = (piece, start) => {
+                const end = start + piece.mes.length;
+                if (sent[at].some(([lo, hi]) => lo < end && start < hi)) return;
+                sent[at].push([start, end]);
+                rows.push(piece); origins.set(piece, at);
+            };
+            if (!pending.has(at) && (!rec.blocks(at) || privateTo(source))) keep(row, offset);
+            else for (const { range: [from, to] } of pieces.get(at) ?? []) {
+                const start = Math.max(from, offset), end = Math.min(to, offset + row.mes.length);
+                if (start < end) keep({ ...row, mes: source.mes.slice(start, end) }, start);
+            }
+        }
+        chat.splice(0, chat.length, ...(!thirdParty && rows.length < original.length ? [note(DEFAULT_BRIEF)] : []), ...rows);
+        return;
+    }
     if (!rec?.segments?.length) return null;
     const before = chat.length;
     const brief = () => String(rec.brief || '').trim() || DEFAULT_BRIEF;

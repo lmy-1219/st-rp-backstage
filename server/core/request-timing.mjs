@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 const context = new AsyncLocalStorage();
-const names = ['snapshot', 'store.sync', 'advance', 'compose', 'modelWait'];
+const names = ['sync.decode', 'sync.tx', 'snapshot', 'store.sync', 'advance', 'compose', 'modelWait', 'compose.modelWait'];
 export function requestTrace() {
     return { started: performance.now(), ended: null, stage: 'body', failedStage: null, spans: [] };
 }
@@ -10,8 +10,11 @@ export const withTrace = (trace, run) => context.run(trace, run);
 // 区间取并集：并发模型不重复累计，后台未等待的工作只算返回前的部分。
 export function traceView(trace) {
     const end = trace.ended ?? performance.now();
+    const modelInCompose = trace.spans.filter(s => s.name === 'compose').flatMap(compose => trace.spans
+        .filter(s => s.name === 'modelWait').map(s => ({ start: Math.max(s.start, compose.start), end: Math.min(s.end ?? end, compose.end ?? end) })));
     const phases = Object.fromEntries(names.map(name => {
-        const spans = trace.spans.filter(s => s.name === name).map(s => [s.start, Math.min(s.end ?? end, end)]).sort((a,b) => a[0]-b[0]);
+        const selected = name === 'compose.modelWait' ? modelInCompose : trace.spans.filter(s => s.name === name);
+        const spans = selected.map(s => [s.start, Math.min(s.end ?? end, end)]).sort((a,b) => a[0]-b[0]);
         let ms=0,last=-Infinity;
         for(const [start,stop] of spans){if(stop>Math.max(start,last))ms+=stop-Math.max(start,last);last=Math.max(last,stop);}
         return [name, Math.round(ms * 100) / 100];

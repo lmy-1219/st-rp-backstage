@@ -139,12 +139,12 @@ export function sequenceRevision(message, speaker, f, generating, tail) {
             else pending = true;
         }
     }
-    if (generating?.message === message || (generating?.active && message === tail && !message.is_user)) pending = true;
+    if (!generating?.preparing && (generating?.message === message || (generating?.active && message === tail && !message.is_user))) pending = true;
     return { w, swipes, pending };
 }
 
 // 当前聊天 → 序列（每条的指纹）＋ 按指纹找正文的表。
-export function buildSequence(chat, fallbackAvatar = null, generating = null, roster = []) {
+export function buildSequence(chat, fallbackAvatar = null, generating = null, roster = [], ignoredMarks) {
     const seq = [];
     const bodies = new Map();
     const window = sequenceWindow(chat);
@@ -156,15 +156,29 @@ export function buildSequence(chat, fallbackAvatar = null, generating = null, ro
         const { w, swipes, pending: revisionPending } = sequenceRevision(message, speaker, f, generating, chat[end - 1]);
         if (revisionPending) pending = true;
         const k = message.extra?.rp_day;   // 用户点的剧情日期：day＝从这条起算新的一天｜same＝这里没有跨天｜d:N＝这条是第 N 天
-        const b = message.extra?.rp_board;
+        let b = message.extra?.rp_board;
+        const ignored = ignoredMarks?.get(seq.length);
+        if (b?.people && (ignored || Object.values(b.people).some(value => value?.rpeDecision))) {
+            const people = Object.fromEntries(Object.entries(b.people).flatMap(([key, value]) => {
+                if (ignored?.has(key) || message.hidden || message.is_system) return [];
+                if (!liveBoardDecision(value, message, f) || !uniqueBoardDecision(value, message, chat)) return [];
+                return [[key, value?.rpeDecision ? value.status : value]];
+            }));
+            b = { ...b, people };
+        }
         // w：正在用的是第几版左滑（后台据此分清"改了这一条"和"左滑换了一版"，N-271）
-        seq.push({ f, h: !!message.is_system, d: message.send_date == null ? null : String(message.send_date), w, ...(swipes ? { swipes } : {}), ...(validDayMark(k) ? { k } : {}), ...(b && typeof b === 'object' ? { b: JSON.stringify(b).slice(0, 4000) } : {}) });
+        const v = visibilityTag(message.extra?.rp_vis);
+        seq.push({
+            f, h: !!message.is_system, d: message.send_date == null ? null : String(message.send_date), w,
+            ...(swipes ? { swipes } : {}), ...(validDayMark(k) ? { k } : {}),
+            ...(b && typeof b === 'object' ? { b: JSON.stringify(b).slice(0, 4000) } : {}), v,
+        });
         // l：生成这条时酒馆真触发的世界书（扩展记在 extra.rp_lore 上）
         const l = Array.isArray(message.extra?.rp_lore) ? message.extra.rp_lore.filter(k => typeof k === 'string') : [];
-        // v：谁看得见（extra.rp_vis，发消息、打电话来的那条；visibility.mjs）
-        const v = message.extra?.rp_vis && typeof message.extra.rp_vis === 'object' ? message.extra.rp_vis : null;
-        if (!bodies.has(f)) bodies.set(f, { f, u: !!message.is_user, s: speaker, n: message.name ?? null, t: String(message.mes ?? ''), ...(l.length ? { l } : {}), ...(v ? { v } : {}) });
+        if (!bodies.has(f)) bodies.set(f, { f, u: !!message.is_user, s: speaker, n: message.name ?? null,
+            t: String(message.mes ?? ''), ...(l.length ? { l } : {}), ...(v ? { v } : {}) });
     }
+    if (seq.length) seq[0].visVersion = 1; // 序列首楼标协议版本，同一包重送时沿用。
     return { seq, bodies, pending, doorHandoffs: doorHandoffs(chat.slice(0, end), fallbackAvatar, roster) };
 }
 
@@ -328,24 +342,48 @@ export function doorHandoffs(chat, fallbackAvatar = null, roster = []) {
     });
 }
 
+export function visibilityWay(way) {
+    if (/电话|来电|通话|语音/.test(way ?? '')) return '电话';
+    if (/消息|短讯|短信|信息/.test(way ?? '')) return '消息';
+    if (/门|来找|找上/.test(way ?? '')) return '上门';
+    return String(way ?? '').trim() || null;
+}
+
+export function visibilityTag(value) {
+    if (value == null || value === '') return null;
+    if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return false; } }
+    if (!value || typeof value.way !== 'string') return false;
+    const name = ref => typeof ref === 'string' ? ref.trim() || null : null;
+    const { from, to } = value, way = visibilityWay(value.way);
+    const validEndpoint = ref => ref == null || typeof ref === 'string' || (typeof ref === 'object' && !Array.isArray(ref)
+        && [ref.name, ref.avatar].every(v => v == null || typeof v === 'string'));
+    if (![from, to].every(validEndpoint) || [value.fromAvatar, value.toAvatar].some(v => v != null && typeof v !== 'string')) return false;
+    const sender = name(from?.name ?? from), recipient = name(to?.name ?? to);
+    const fromAvatar = name(value.fromAvatar ?? from?.avatar), toAvatar = name(value.toAvatar ?? to?.avatar);
+    if (way !== '上门' && way !== '消息' && way !== '电话') return false;
+    return { from: sender, way, ...(recipient ? { to: recipient } : {}),
+        ...(fromAvatar ? { fromAvatar } : {}), ...(toAvatar ? { toAvatar } : {}) };
+}
+
 // 谁看得见（和后台 core/visibility.mjs 一个判法）：发消息、打电话来的那条（extra.rp_vis.way 消息／电话）只有本人、玩家、旁白、发给的那人看得见；
 // 上门的、没带记号的谁都看得见。viewer：要看的人的名字（旁白传 '旁白'）；userName：玩家的名字
 export function visibleTo(message, viewer, userName = null, roster = []) {
-    const tag = message?.extra?.rp_vis;
-    let v = tag;
-    if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return true; } }
-    if (!v || !/消息|电话|短讯|短信|信息|来电|通话|语音/.test(String(v.way ?? ''))) return true;
+    const v = visibilityTag(message?.extra?.rp_vis);
+    if (v === null || v.way === '上门') return true;
     if (!viewer) return true;
     const name = typeof viewer === 'object' ? viewer.name : viewer;
     const explicit = typeof viewer === 'object' ? viewer.avatar : null;
     if (!explicit && (['user','玩家','旁白','narrator'].includes(name) || name === userName)) return true;
-    const unique = n => { const found = roster.filter(p => p.name === n); return found.length === 1 ? found[0].avatar : null; };
+    if (v === false) return false;
+    const unique = n => {
+        const found = n ? roster.filter(p => p.name === n) : [];
+        return found.length === 1 ? found[0].avatar : null;
+    };
     const viewerAvatar = explicit ?? (roster.some(p => p.avatar === viewer) ? viewer : unique(name));
     if (!viewerAvatar) return false;
     const sender = !message.is_user ? (message.original_avatar ?? message.speaker) : null;
-    const from = (sender && !sender.startsWith('name:') ? sender : null) ?? v.fromAvatar ?? (typeof v.from === 'object' ? v.from.avatar : unique(v.from));
-    const to = v.toAvatar ?? (typeof v.to === 'object' ? v.to.avatar : unique(v.to));
-    return viewerAvatar === from || viewerAvatar === to || (!!sender && !sender.startsWith('name:') && viewerAvatar === sender);
+    const from = (sender && !sender.startsWith('name:') ? sender : null) ?? v.fromAvatar ?? unique(v.from);
+    return viewerAvatar === from || viewerAvatar === (v.toAvatar ?? unique(v.to));
 }
 // 发出去的那份聊天按开口的人筛（就地改数组：ST 拿的就是这个数组）；返回拿掉了几条
 export function filterVisible(chat, viewer, userName = null, roster = [], onUnmatched = null) {
@@ -770,12 +808,18 @@ export function boardSegmentEdit(segments, { at, until = null, present, dates = 
 export function frozenBoardAvatars(metadata) {
     return new Set(Object.values(metadata?.rpeBoardApplied ?? {}).filter(r => r.review).map(r => r.avatar));
 }
+const uniqueBoardDecision = (value, message, chat) => !value?.rpeDecision || !!value.rpeDecision.id
+    && !chat.some(row => row !== message && Object.values(row.extra?.rp_board?.people ?? {}).some(v => v?.rpeDecision?.id === value.rpeDecision.id));
+
+const liveBoardDecision = (value, message, fp) => !value?.rpeDecision
+    || value.rpeDecision.fp === fp && value.rpeDecision.sw === (message.swipe_id ?? 0);
+
 export function readBoardMarks(c, { boardCast, chatKey }, group, fallback, positions = c.chat.keys()) {
     const wanted = new Map();
     const scope = (boardCast?.length ? boardCast : c.characters ?? []).filter(p => p.role !== '不用' && !isCamera(p));
     for (const pos of positions) {
         const m = c.chat[pos];
-        if (!m || m.is_system) continue;
+        if (!m || m.is_system || m.hidden) continue;
         for (const [key, value] of Object.entries(m.extra?.rp_board?.people ?? {})) {
             const choices = scope.filter(p => p.avatar === key || p.name === key);
             const inGroup = choices.filter(p => group.members.includes(p.avatar));
@@ -784,11 +828,63 @@ export function readBoardMarks(c, { boardCast, chatKey }, group, fallback, posit
             const status = typeof value === 'object' ? value?.status : value;
             if (!ch || !['在场','远程','不在','外头'].includes(status)) continue;
             const fp = fingerprintMessage(m, speakerOf(m, fallback));
-            wanted.set(ch.avatar + ':' + pos + ':' + fp, { avatar: ch.avatar, name: ch.name, pos, fp, status, markKey: key });
+            if (!liveBoardDecision(value, m, fp) || !uniqueBoardDecision(value, m, c.chat)) continue;
+            wanted.set(ch.avatar + ':' + pos + ':' + fp, { avatar: ch.avatar, name: ch.name, pos, fp, status, markKey: key,
+                ...(value?.rpeDecision ? { decision: value.rpeDecision.id, window: value.rpeDecision.window } : {}) });
         }
     }
     return wanted;
 }
+export const boardRecordMatches = (mark, record) => !!mark && mark.status === record.status && mark.decision === record.decision;
+
+export function boardEditFor(segments, mark, marks, dates, evidence) {
+    const next = marks.find(m => m.avatar === mark.avatar && m.pos > mark.pos)?.pos ?? null;
+    const present = ['在场', '远程'].includes(mark.status);
+    const edit = boardSegmentEdit(segments, { at: mark.pos, until: next, present, dates });
+    const end = present ? boardEvidenceEnd(evidence, mark.pos, edit.end ?? Infinity, 'absent') : null;
+    if (end != null) edit.after.find(s => s.from === mark.pos).to = edit.end = end;
+    return edit;
+}
+
+function boardEvidenceEnd(evidence, from, to, state) {
+    return (evidence?.endpoints ?? []).reduce((end, e) => e.verdict === 'proven' && (!state || e.state === state)
+        && from < e.effectiveAt && e.effectiveAt < (end ?? to) ? e.effectiveAt : end, null);
+}
+
+export function boardDecision(c, state, group, avatar, fallback, { through = c.chat.length - 1, imported } = {}) {
+    const rec = c.chatMetadata.contextIsolation?.anchors?.[avatar], journal = c.chatMetadata.rpeBoardApplied ?? {};
+    const marks = [...readBoardMarks(c, state, group, fallback).values()].filter(m => m.avatar === avatar && m.pos <= through);
+    const evidence = imported?.byAvatar?.[avatar];
+    const inherited = c.chatMetadata.main_chat && Object.values(journal).some(r => r.avatar === avatar && r.edit && !r.undone
+        && !marks.some(m => m.pos === r.pos && m.fp === r.fp && boardRecordMatches(m, r)));
+    const segments = rec?.segments ?? [], closed = !!rec?.rpeBoardClosed && !segments.length;
+    if (!marks.length && !inherited && !rec?.rpeBoardClosed) return null;
+    const ranges = marks.flatMap((mark, i) => {
+        const record = journal[[avatar, mark.pos, mark.fp].join(':')];
+        if (record?.review && boardRecordMatches(mark, record)) return [];
+        const limit = Math.min(marks[i + 1]?.pos ?? Infinity, record?.edit?.end ?? Infinity);
+        const to = ['不在', '外头'].includes(mark.status) ? limit : boardEvidenceEnd(evidence, mark.pos, limit) ?? limit;
+        const remote = evidence?.endpoints.find(e => e.verdict === 'proven' && e.effectiveAt === mark.pos && e.state === 'remote');
+        const channel = mark.status === '远程' ? remote?.channel ?? 'message' : null;
+        const local = mark.window != null && mark.markKey === avatar && mark.window === JSON.stringify(state.loadedWindow?.ids);
+        return [{ from: mark.pos, to, status: mark.status, channel, grant: local && mark.status === '在场' }];
+    });
+    const contains = (span, at) => span.from <= at && at < (span.to ?? Infinity);
+    const blocks = at => {
+        const range = ranges.find(r => contains(r, at));
+        if (range?.grant) return false;
+        if (closed || inherited && !evidence?.ranges.some(s => s.state === 'present' && contains(s, at))) return true;
+        if (range) return range.status !== '在场' && range.channel !== 'phone';
+        if (segments.some((s, i) => (segments[i - 1]?.to ?? 0) <= at && at < s.from && ranges.some(r => r.from === s.from))) return true;
+        const end = at > through && evidence?.endpoints.find(e => e.verdict === 'proven' && e.effectiveAt === at);
+        const span = end || evidence?.ranges.find(r => contains(r, Math.min(at, through)));
+        return (span?.state === 'absent' || span?.channel === 'message') && ranges.some(r => r.to <= at);
+    };
+    const fragmentDeductions = imported?.unresolved.filter(r => r.reason === 'fragment-unverified' && (r.avatar === avatar || r.avatar == null)
+        && (blocks(r.at) || ranges.some(span => contains(span, r.at)) || c.chat[r.at]?.extra?.rp_vis)) ?? [];
+    return { ranges, closed, blocks, fragmentDeductions, ownFragments: evidence?.ownFragments ?? [], version: imported?.window.version };
+}
+
 export function undoBoardSegmentEdit(segments, edit) {
     const same=({fromDate='',toDate='',...a},{fromDate:from='',toDate:to='',...b})=>
         fromDate===from&&toDate===to&&Object.keys(a).length===Object.keys(b).length&&Object.keys(a).every(k=>Object.hasOwn(b,k)&&JSON.stringify(a[k])===JSON.stringify(b[k]));

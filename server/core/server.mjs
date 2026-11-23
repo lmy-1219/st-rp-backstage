@@ -9,6 +9,7 @@ import path from 'node:path';
 import { playModeOf, playStop, planPersonaOf, awaitingPlanPersona, confirmPlanPersona, buildSlot, prefetchDraft, composeSlot, closenessTable, storyContext, requestPlanNow, relationsNow, noteAbsence, firstToSpeak, absenceModeOf, timelineFor, timeStateFor, menuDays, scaleFor, renderEntry, clockFor, cameraCardPrompt, uptoAnchor, advance, intimatePlanOptions, stopIntimate, intimateStopped } from './slot.mjs';
 import { labelsOf, sinceWord, dateIn, dayNumber, timelineLabel } from './timeline.mjs';
 import { validMark, validSwipeEvidence, planFailure } from './store.mjs';
+import { visibilityTag } from '../extension/sync.mjs';
 import { contactTroubleOf } from './contact-verdict.mjs';
 import { digests } from './digest.mjs';
 import { parsePlan, nearPlace, verifiedPlanSourceIds } from './planner.mjs';
@@ -62,10 +63,17 @@ const roomOf = v => { if (!v || typeof v !== 'object') return null; const n = x 
 
 function readSeq(seq) {
     if (!Array.isArray(seq)) bad('seq invalid');
+    const v1 = seq[0]?.visVersion === 1;
     return seq.map(x => {
         if (!x || !isFp(x.f) || !validSwipeEvidence(x)) bad('seq entry invalid');
         // k：用户在这条上点的剧情日期（day｜same｜d:N，N-265）
-        return { f: x.f, h: !!x.h, d: typeof x.d === 'string' ? x.d.slice(0, 64) : null, ...(Number.isInteger(x.w) && x.w >= 0 && x.w < 10000 ? { w: x.w } : {}), ...(Object.hasOwn(x, 'swipes') ? { swipes: x.swipes } : {}), ...(validMark(x.k) ? { k: x.k } : {}), ...(typeof x.b === 'string' && x.b.length <= 4000 ? { b: x.b } : {}) };
+        return {
+            f: x.f, h: !!x.h, d: typeof x.d === 'string' ? x.d.slice(0, 64) : null,
+            ...(Number.isInteger(x.w) && x.w >= 0 && x.w < 10000 ? { w: x.w } : {}),
+            ...(Object.hasOwn(x, 'swipes') ? { swipes: x.swipes } : {}), ...(validMark(x.k) ? { k: x.k } : {}),
+            ...(typeof x.b === 'string' && x.b.length <= 4000 ? { b: x.b } : {}),
+            ...(v1 ? { v: Object.hasOwn(x, 'v') ? visibilityTag(x.v) : false } : {}),
+        };
     });
 }
 
@@ -76,9 +84,8 @@ function readMessages(messages) {
         // l：生成这条时酒馆真触发的世界书条目（"书|uid"），记账时这几条给全文
         const l = Array.isArray(m.l) ? m.l.filter(k => typeof k === 'string' && k.length <= 300).slice(0, 60) : null;
         // v：谁看得见（extra.rp_vis，{ from, way, to? }；visibility.mjs）
-        const v = m.v && typeof m.v === 'object' && (typeof m.v.from === 'string' || typeof m.v.way === 'string')
-            ? { from: typeof m.v.from === 'string' ? m.v.from.slice(0, 80) : null, way: typeof m.v.way === 'string' ? m.v.way.slice(0, 20) : null, ...(typeof m.v.to === 'string' ? { to: m.v.to.slice(0, 80) } : {}) } : null;
-        return { f: m.f, u: !!m.u, s: m.s, n: typeof m.n === 'string' ? m.n : null, t: m.t, ...(l?.length ? { l } : {}), ...(v ? { v } : {}) };
+        const v = visibilityTag(m.v);
+        return { f: m.f, u: !!m.u, s: m.s, n: typeof m.n === 'string' ? m.n : null, t: m.t, ...(l?.length ? { l } : {}), ...(v !== null ? { v } : {}) };
     });
 }
 
@@ -241,7 +248,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
         'POST /v1/options': b => store.setOptions({ chatKey: str(b.chatKey, 'chatKey'), testSlot: b.testSlot }),
         'POST /v1/messages': b => store.putMessages({ chatKey: str(b.chatKey, 'chatKey'), messages: readMessages(b.messages) }),
         'POST /v1/sync': b => {
-            const chatKey = str(b.chatKey, 'chatKey'), seq = readSeq(b.seq);
+            const chatKey = str(b.chatKey, 'chatKey'), seq = measure('sync.decode', () => readSeq(b.seq));
             // 同步前：给眼下的最后一条记一份快照（它当最后一条时最后的样子）；删回到它时拿来对账（rewind.mjs）
             if (records) try { measure('snapshot', () => { if (store.currentMessages(chatKey).length) snapshotRewind(store, records, chatKey); }); } catch {}
             const result = measure('store.sync', () => store.sync({

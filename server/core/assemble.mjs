@@ -147,37 +147,53 @@ export async function assembleNarrative({ client, name, present, recent, recentU
 
 // 后台用的组装器：读配置、查预算、调模型、记账。没开或没配好返回 null（调用方用纯程序那一格）。
 // 连接层面的失败（中转掐断连接、握手失败）很快就回来，再试一次；模型回了错误码、超时不重试。
-export function retryOnce(client) {
+export function retryOnce(client, valid = () => true) {
+    const send = args => {
+        if (!valid()) throw Error('slot authorization changed');
+        return client.complete(args);
+    };
     return {
         ...client,
         async complete(args) {
-            try { return await client.complete(args); }
+            try { return await send(args); }
             catch (error) {
                 if (!/fetch failed|ECONNRESET|socket hang up|other side closed/i.test(String(error?.message))) throw error;
-                return client.complete(args);
+                return send(args);
             }
         },
     };
 }
 
+function logAuthorized(records, valid, entry) {
+    const write = () => {
+        if (valid()) { records.logAssemble(entry); return true; }
+        if (entry.status === 'done') {
+            const { raw, lines, dropped, servedModel, ...usage } = entry;
+            records.logAssemble({ ...usage, status: 'stale' });
+        }
+        return false;
+    };
+    return valid.commit ? valid.commit(write) : write();
+}
+
 export function createAssembler({ getConfig, records, log = () => {}, makeClient = createModelClient }) {
-    const assemble = async ({ chatKey, speaker, anchor, name, present, recent, recentUser, material, messageText }) => {
+    const assemble = async ({ chatKey, speaker, anchor, name, present, recent, recentUser, material, messageText }, valid = () => true) => {
         const config = getConfig();
         const a = config.assembler;
         const baseUrl = a?.modelBaseUrl ?? a?.baseUrl, apiKey = a?.modelApiKey ?? a?.apiKey;   // 组装模型可以借别的格的钥匙（config: via）
         if (!a?.enabled || !baseUrl || !apiKey || !a.model) return null;
         if (records.spentToday() >= config.extractor.dailyBudgetUsd) { log(`assemble skipped: daily budget reached (${chatKey} ${speaker})`); return null; }
-        const client = retryOnce(makeClient({ baseUrl, apiKey, model: a.model, maxOutputTokens: a.maxOutputTokens, timeoutMs: a.timeoutMs, temperature: a.temperature, extraBody: a.extraBody }));
+        const client = retryOnce(makeClient({ baseUrl, apiKey, model: a.model, maxOutputTokens: a.maxOutputTokens, timeoutMs: a.timeoutMs, temperature: a.temperature, extraBody: a.extraBody }), valid);
         const started = Date.now();
         try {
             const r = await assembleNarrative({ client, name, present, recent, recentUser, material, messageText });
             const costUsd = ((r.usage?.input ?? 0) * a.priceInPerM + (r.usage?.output ?? 0) * a.priceOutPerM) / 1e6;
-            records.logAssemble({ chatKey, speaker, anchor, model: a.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: r.ms,
-                lines: r.lines.length, dropped: r.dropped.length, raw: r.raw });
+            if (!logAuthorized(records, valid, { chatKey, speaker, anchor, model: a.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: r.ms,
+                lines: r.lines.length, dropped: r.dropped.length, raw: r.raw })) return null;
             if (r.dropped.length) log(`assemble dropped ${r.dropped.length} line(s): ${r.dropped.map(d => d.reason).join(', ')}`);
             return r;
         } catch (error) {
-            records.logAssemble({ chatKey, speaker, anchor, model: a.model, status: 'failed', ms: Date.now() - started, error: error.message });
+            if (!logAuthorized(records, valid, { chatKey, speaker, anchor, model: a.model, status: 'failed', ms: Date.now() - started, error: error.message })) return null;
             log(`assemble failed (${chatKey} ${speaker}): ${error.message}`);
             throw error;
         }
@@ -241,23 +257,23 @@ export function parseKeys(text, names = []) {
 
 // 后台用：读配置、调模型、记账。没开或没配好返回 null。
 export function createKeyMaker({ getConfig, records, log = () => {}, makeClient = createModelClient, vocab = false }) {
-    return async ({ chatKey, recent, recentUser, names = [] }) => {
+    return async ({ chatKey, recent, recentUser, names = [] }, valid = () => true) => {
         const config = getConfig();
         const a = config.assembler;
         const k = config.stages?.keys ?? { baseUrl: a?.baseUrl, apiKey: a?.apiKey, model: a?.keysModel || a?.model, priceInPerM: a?.keysPriceInPerM, priceOutPerM: a?.keysPriceOutPerM, extraBody: a?.extraBody };
         if (!a?.enabled || !k.baseUrl || !k.apiKey || !k.model || !recentUser?.trim()) return null;
         if (records.spentToday() >= config.extractor.dailyBudgetUsd) return null;
         const model = k.model;
-        const client = retryOnce(makeClient({ baseUrl: k.baseUrl, apiKey: k.apiKey, model, maxOutputTokens: 300, extraBody: k.extraBody }));
+        const client = retryOnce(makeClient({ baseUrl: k.baseUrl, apiKey: k.apiKey, model, maxOutputTokens: 300, extraBody: k.extraBody }), valid);
         const started = Date.now();
         try {
             const r = await client.complete({ system: KEYS_SYSTEM, user: buildKeysPrompt({ recent, recentUser, vocab: vocab ? keyVocab(records.visible(chatKey)) : [] }) });
             const keys = parseKeyLines(r.text, names);
             const costUsd = ((r.usage?.input ?? 0) * k.priceInPerM + (r.usage?.output ?? 0) * k.priceOutPerM) / 1e6;
-            records.logAssemble({ chatKey, speaker: '(检索词)', model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, lines: keys.length, raw: r.text });
-            return keys;
+            return logAuthorized(records, valid, { chatKey, speaker: '(检索词)', model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started,
+                lines: keys.length, raw: r.text }) ? keys : null;
         } catch (error) {
-            records.logAssemble({ chatKey, speaker: '(检索词)', model, status: 'failed', ms: Date.now() - started, error: error.message });
+            if (!logAuthorized(records, valid, { chatKey, speaker: '(检索词)', model, status: 'failed', ms: Date.now() - started, error: error.message })) return null;
             log(`query keys failed (${chatKey}): ${error.message}`);
             return null;
         }
