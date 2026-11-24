@@ -7,7 +7,7 @@ import { liveEpisodes } from './episodes.mjs';
 import { arrivalBasis, sourceProjection, sourceRows, liveAnchors, setSourceContext } from './landing.mjs';
 import { identifyNode, createMenuVerifier } from './held.mjs';
 import { currentMenuRecords, menuRecordVersion, shownMenuProofLive } from './menu-evidence.mjs';
-import { recordAudienceFor, legacyMenuCopies } from './records.mjs';
+import { decideRecordKnowledge, recordAudienceFor, legacyMenuCopies } from './records.mjs';
 import { visibilityTag, visOf, visibleTo, wayOf } from './visibility.mjs';
 import { measure } from './request-timing.mjs';
 
@@ -481,6 +481,26 @@ export function openStore(file) {
         }
         memberNameIndexes.set(chatKey, { raw, state, pairs, lookup });
         return lookup;
+    }
+
+    // 每次读取重新取快照。stableNameAt 由调用方按笔确认历史标签，当前名册唯一不能代替这一证据。
+    function recordKnowledgeFor(reader, { speakerName, through = Infinity, stableNameAt, same = (a, b) => a === b } = {}) {
+        const { chatKey, avatar, kind } = reader;
+        if (!chatKey || kind !== memberReaderKind(avatar)) return () => ({ allow: false, reason: 'identity-pending' });
+        const names = memberNameIndex(chatKey);
+        const window = currentMessages(chatKey).filter(m => m.pos <= through);
+        const messages = new Map(window.map(m => [m.pos, m])), userName = window.findLast(m => m.is_user)?.name;
+        const jobs = new Set(q('select id from extract_jobs where chat_key = ?').all(chatKey).map(row => row.id));
+        const sourceOf = record => {
+            if (record.status !== 'ok' || record.source_unknown !== false || record.source_basis || !jobs.has(record.job_id)) return null;
+            const message = messages.get(record.pos);
+            if (!message || message.fp !== record.fp || !message.sent_at) return null;
+            const raw = record.source_instance, ref = typeof raw === 'string' ? fromJson(raw) : raw;
+            if (raw != null && (ref?.ambiguous || ref?.pos !== message.pos || ref.fp !== message.fp || ref.sentAt !== message.sent_at
+                || (ref.sw !== message.sw && !(ref.legacy && ref.sw == null)) || (ref.revision != null && ref.revision !== message.doorRevision))) return null;
+            return message;
+        };
+        return record => decideRecordKnowledge(record, { chatKey, avatar, kind }, { speakerName, names, sourceOf, stableNameAt, same, userName });
     }
 
     function newChat({ storyId, parentKey = null, stChatId, groupId, label }) {
@@ -2019,6 +2039,6 @@ export function openStore(file) {
     const sourceContext = chatKey => ({ limits: historyOf(chatKey).limits, dependencies: (basis, options) => memo('arrival_dependencies', JSON.stringify([chatKey, basis, options.rawBasis ?? false, options.through ?? null]), () => arrivalDependencies(chatKey, basis, options)) });
     setSourceContext(db, sourceContext);
     return { authorizationVersion, authorizationEpoch, externalVersion, changeVersion: () => changesQ.get().n, commitSlot: tx, prepareSlotRollback, declarationsOf: readDeclarations, cachedDeclarations, putDeclarations,
-        memberNameIndex,
+        memberNameIndex, recordKnowledgeFor,
         deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, syncRevision, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

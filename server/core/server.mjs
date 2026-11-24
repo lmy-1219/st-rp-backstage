@@ -502,7 +502,8 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 sequence: Array.isArray(b.sequence) ? b.sequence.map(m=>({pos:m.pos,fp:m.fp,hidden:!!m.hidden,boardMark:m.boardMark??null})) : null }, {records,config:settings()});
             if (value.ok === false) {
                 const shortId = createHash('sha256').update(id).digest('hex').slice(0,8);
-                const action = ['check','start','retry','reconcile','delivered','muted','cancelled','error','unconfirmed','waiting'].includes(result) ? result : 'unknown';
+                const action = ['check','start','retry','reconcile','delivered','muted','cancelled','error','unconfirmed','waiting','new_attempt']
+                    .includes(result) ? result : 'unknown';
                 log(`turn-result rejected chat=${chatKey.slice(0,8)} id=${shortId} result=${action} kind=${value.kind??'-'} state=${value.state??'-'} code=${value.reasonCode} why=${value.why}`);
             }
             return value;

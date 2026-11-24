@@ -4,6 +4,7 @@ import { parseOutput } from './extract.mjs';
 import { sameIdentity } from './cast.mjs';
 import { sourceRows, emptySegment } from './landing.mjs';
 import { menuMatterNeedsResult } from './menu-evidence.mjs';
+import { recordKnownTo } from './recall.mjs';
 
 // 记录（证据账）：每条都挂在一条消息（局＋指纹）上，带原文片段、谁的说法、当时谁在场。
 // 一个窗口能看到哪些记录，只看它当前序列里还有没有那条消息——改稿删稿后旧记录自动不可见。
@@ -184,6 +185,34 @@ export function recordAudienceFor(db, chatKey) {
         return audience.filter(name => name === r.holder_name || visibleTo({ message, viewer: name, userName, roster })
             || canAuthorizeListener(channel, proof, name, readers));
     };
+}
+
+// record 须是已过现有来源检查的普通账，audience 须是当前投影后的数组。
+export function decideRecordKnowledge(record, reader, { speakerName, names, sourceOf, stableNameAt, same, userName }) {
+    const source = sourceOf(record), { avatar, kind } = reader;
+    if (!source || !Array.isArray(record.audience)) return { allow: false, reason: 'source-pending' };
+    const known = recordKnownTo(record, speakerName, same);
+    if (kind !== 'card') return { allow: known, reason: known ? 'legacy-name' : 'denied' };
+    const member = names(speakerName);
+    if (![...(member.avatars ?? [])].includes(avatar)) return { allow: false, reason: 'identity-pending' };
+    const channel = visOf(source);
+    if (channel === false) return { allow: false, reason: 'source-pending' };
+    if (record.holder === avatar) return source.speaker === avatar
+        ? { allow: true, reason: 'exact-holder' } : { allow: false, reason: 'source-pending' };
+    if (!known || ['心里', '余波'].includes(record.type)) return { allow: false, reason: 'denied' };
+    const labels = record.audience.filter(label => label && same(label, speakerName)).map(label => ({ label, ...names(label) }));
+    const unique = labels.filter(({ status, avatars }) => status === 'unique' && avatars.next().value === avatar);
+    if (!unique.length) {
+        const ambiguous = labels.some(({ status, avatars }) => status === 'multiple' && [...avatars].includes(avatar));
+        return { allow: false, reason: ambiguous ? 'ambiguous-name' : 'identity-pending' };
+    }
+    const stable = unique.filter(({ label }) => stableNameAt?.(record, label));
+    if (!stable.length) return { allow: false, reason: 'identity-pending' };
+    const viewer = { avatar, name: speakerName };
+    if (isPrivate(source) && !visibleTo({ message: source, viewer, roster: [viewer] })
+        && (channel.way !== '电话' || stable.every(({ label }) => ['user', '玩家', 'narrator', '旁白', userName].includes(label))))
+        return { allow: false, reason: 'denied' };
+    return { allow: true, reason: 'legacy-name' };
 }
 
 export function openRecords(db) {
