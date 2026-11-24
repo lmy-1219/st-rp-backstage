@@ -1951,7 +1951,7 @@ function trackIsolateLeave() {
         },
     });
 }
-function syncNow(force = false, light = false, preparing = null) {
+function syncNow(force = false, light = false, preparing = null, confirmation = null) {
     if (!state.chatKey || !settings().enabled) return Promise.resolve(false);
     if (state.openEpoch === state.epoch && state.opened === false) return Promise.resolve(false);
     // 调度必须等正在同步的那次连同撤销一起做完，不能只记 dirty 就拿旧场面排人。
@@ -1963,7 +1963,7 @@ function syncNow(force = false, light = false, preparing = null) {
         return running.promise;
     }
     state.confirmed = null;
-    const flight = state.syncOwner = { epoch: state.epoch, promise: null, full: !light, preparing };
+    const flight = state.syncOwner = { epoch: state.epoch, promise: null, full: !light, preparing, confirmation };
     state.syncFlight = flight;
     flight.promise = syncOnce(force, light);
     void flight.promise.finally(() => { if (state.syncFlight === flight) state.syncFlight = null; }).catch(() => {});
@@ -1973,8 +1973,8 @@ function syncNow(force = false, light = false, preparing = null) {
 async function syncOnce(force = false, light = false) {
     state.syncing = true;
     clearTimeout(state.timer);   // 这就同步了：排着的那一次不用再来（一轮里同步四次，一半是重复的）
-    const { epoch, chatKey, loadedWindow: window, syncFlight: flight } = state;
-    const here = () => epoch === state.epoch && chatKey === state.chatKey && window === state.loadedWindow && flight === state.syncFlight;
+    const { epoch, chatKey, loadedWindow: window, syncFlight: flight } = state, active = () => epoch === state.epoch && settings().enabled;
+    const here = () => active() && chatKey === state.chatKey && window === state.loadedWindow && flight === state.syncFlight;
     let candidate;
     const tStart = performance.now();
     let changed = force;
@@ -1985,17 +1985,21 @@ async function syncOnce(force = false, light = false) {
             flight.packetReady = false;
             const c = ctx();
             if (c.SlashCommandParser?.commands?.['isolate-leave']) trackIsolateLeave();
+            if (flight.confirmation) personaWatch.check();
+            while (flight.confirmation && state.personaFlight && active()) await state.personaFlight;
+            if (flight.confirmation && !active()) return false;
             await sendPersona();
-            if (epoch !== state.epoch) return false;
+            if (!active()) return false;
             const owned = !force && Object.values(c.chatMetadata?.rpeBoardApplied ?? {}).some(r => r.decision || r.takesOver);
             const before = owned && (state.synced?.epoch === epoch ? state.synced.seq.length : (await api('status', { chatKey: state.chatKey })).total);
-            if (epoch !== state.epoch) return false;
+            if (!active()) return false;
             const after = c.chat.length;
             if (before >= 20 && after < before * 0.5 && before - after >= 10) {
                 state.collapsed = { before, after }; setStage(state, 'sync', '等待', '聊天缩短，等待确认'); return false;
             }
             if (typeof reconcileBoardState === 'function') await reconcileBoardState();
-            if (epoch !== state.epoch) return false;
+            if (!active()) return false;
+            if (force && flight.confirmation?.current() === false) { changed = force = false; flight.confirmation = null; state.dirty = true; continue; }
             cameraOf(c);   // 旁白卡写的记 narrator：先认出它再算指纹
             const tb = performance.now();
             flight.packetReady = true;
@@ -2045,6 +2049,7 @@ async function syncOnce(force = false, light = false) {
             if (light && !(result.removed || result.edited || result.repaired)) {
                 void autoPeek({ onlyUndo: true, round }).then(done => { if (done && window === state.loadedWindow) return syncNow(); }).catch(() => {});
             } else if (await autoPeek({ onlyUndo: true, round })) state.dirty = true;
+            if (!active()) return false;
             force = false;
             state.note = '';
         } while (state.dirty && epoch === state.epoch);
@@ -2053,7 +2058,7 @@ async function syncOnce(force = false, light = false) {
         const tail = async () => {
             if (epoch !== state.epoch) return;
             const status = await api('status', { chatKey: state.chatKey });
-            if (epoch !== state.epoch) return;
+            if (!active()) return;
             state.status = status;
             noticeHandoffs(state.status.handoffs);
             noticeStory(state.chatKey, state.status.notice);
@@ -2063,6 +2068,7 @@ async function syncOnce(force = false, light = false) {
             if (changed || stale) {
                 state.fanAt = Date.now();
                 await refreshDoor();
+                if (!active()) return;
                 void refreshDays();
                 refreshLore();
                 refreshPlan();
@@ -2078,7 +2084,7 @@ async function syncOnce(force = false, light = false) {
                         // 这一局用得上、后台还没读过（或卡改过）的卡：把正文交过去，后台写"兴趣和习惯"
                         const texts = (r.need ?? []).map(a => chars.find(ch => ch.avatar === a)).filter(Boolean)
                             .map(ch => ({ avatar: ch.avatar, name: ch.name, gender: ch.gender ?? ch.data?.gender, hash: cardHash(cardText(ch)), text: cardText(ch) })).filter(t => t.text.trim());
-                        if (texts.length) return api('cast', { chatKey: chatKeyNow, texts });
+                        if (texts.length && active()) return api('cast', { chatKey: chatKeyNow, texts });
                     }).catch(() => {});
                 api('absence', { chatKey: state.chatKey }).then(a => { state.absence = a; render(); }).catch(() => {});
                 checkReturn(state.chatKey, epoch);
@@ -2093,15 +2099,19 @@ async function syncOnce(force = false, light = false) {
             && !state.dirty && !projectionGap(ctx()) && samePermission(ctx(), candidate)) {
             state.confirmed = candidate;
             const resume = state.resumeAuto;
-            if (resume) void flight.promise.then(() => {
-                if (state.resumeAuto !== resume) return;
+            const confirmation = flight.confirmation;
+            if (resume || confirmation) void flight.promise.then(ok => {
+                if (ok === true && !state.syncFlight && state.confirmed === candidate && confirmation?.current()
+                    && active() && !state.dirty && samePermission(ctx(), candidate)) confirmation.candidate = candidate;
+                if (!resume || state.resumeAuto !== resume) return;
                 state.resumeAuto = null;
+                if (confirmation?.handoff && confirmation.candidate === candidate) return resume(candidate, confirmation.handoff);
                 return resume(candidate);
             }).catch(() => {});
         }
         return epoch === state.epoch;
     } catch (error) {
-        if (epoch === state.epoch) {
+        if (active()) {
             if (typeof refreshContent === 'function') void refreshContent().catch(() => {});
             const failure = failureView(error, '消息同步 / 对账');
             state.note = error.code === 'LEAVE_APPLY_FAILED' ? `离场撤销尚未落实：${String(error.message).slice(0, 100)}` : failure.text;
@@ -2119,8 +2129,10 @@ async function syncOnce(force = false, light = false) {
 
 // 玩家的人设交给后台（N-368）：接入、切窗口、每次同步完都看一眼，名字和描述跟上次发的一样就不发；拿不到就不发，发不出去下次再试，不报错
 async function sendPersona(chatKey = state.chatKey) {
+    const epoch = state.epoch;
     personaWatch.check();
     if (state.personaFlight) await state.personaFlight;
+    if (epoch !== state.epoch) return;
     let p = null;
     try { if (chatKey === ctx().chatMetadata?.rp_emergence?.chatKey) p = personaPayload(ctx(), chatKey); } catch {}
     if (!p || state.personaSent === p.key) return;
@@ -3182,7 +3194,19 @@ function mountPanel() {
             if (action === 'sync') await syncNow();
             if (action === 'reconnect') await reconnect(true);
             if (action === 'card-retry') await resolveCastChoices([event.target.closest('[data-name]').dataset.name]);
-            if (action === 'confirm') await syncNow(true);
+            if (action === 'confirm') {
+                const { collapsed, epoch, loadedWindow: window, synced } = state, c = ctx();
+                if (!collapsed || state.panelConfirmation?.epoch === epoch) return;
+                const rows = c.chat.slice(), view = chat => JSON.stringify(chat.map(m => [m.mes, m.swipe_id, m.swipes, m.name, m.original_avatar,
+                    m.send_date, m.is_user, m.is_system, m.hidden]));
+                const history = view(rows), current = () => localTarget(c, window) && c.chat.every((m, i) => m === rows[i]) && view(c.chat) === history;
+                const confirmation = state.panelConfirmation = { epoch, current };
+                try {
+                    while (settings().enabled && state.syncFlight?.epoch === epoch && current()) await state.syncFlight.promise.catch(() => false);
+                    if (epoch === state.epoch && current() && JSON.stringify([collapsed, synced]) === JSON.stringify([state.collapsed, state.synced]))
+                        await syncNow(true, false, null, confirmation);
+                } finally { if (state.panelConfirmation === confirmation) state.panelConfirmation = null; }
+            }
             if (action === 'drift-clear') {
                 try { await api('drift-clear', { chatKey: state.chatKey }); state.status = { ...(state.status ?? {}), drift: null }; render(); } catch {}
                 return;
