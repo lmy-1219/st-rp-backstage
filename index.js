@@ -4593,32 +4593,87 @@ on('CHAT_COMPLETION_PROMPT_READY', (e = {}) => {
 // 一个人的时候（N-276）：群里的人都静音了、玩家这句没人接——旁白卡在这个群里就让它写周围的动静
 // 有卡的人在场时（场记章程 #7、B4）：他们答完以后问后台一次，玩家这句是冲着没卡的人的，旁白接一手（cameraJoin）
 on('GROUP_WRAPPER_FINISHED', (e = {}) => {
-    const origin = editOrigin(), epoch = state.epoch, last = ctx().chat?.at(-1);
-    const here = () => state.epoch === epoch && localEdit(origin) && ctx().chat?.at(-1) === last;
-    const handoff = result => here() && result?.off?.() && cameraTurn(e.type);
-    setTimeout(() => here() && autoDrive(e.type, handoff).then(handoff).catch(() => {}), 50);
+    const origin = editOrigin(), epoch = state.epoch, chat = ctx().chat, last = chat?.at(-1), type = e.type;
+    const here = () => settings().enabled && state.opened !== false && state.status?.enabled !== false
+        && state.epoch === epoch && localEdit(origin) && ctx().chat === chat && chat?.at(-1) === last;
+    let awaitingConfirmation = false;
+    const cameraAvailable = () => {
+        if (settings().camera === false) return false;
+        const c = ctx(), group = currentGroup(c), cam = group && cameraOf(c);
+        return cam && group.members.includes(cam.avatar);
+    };
+    const handoff = async result => {
+        // 普通调度可以在确认后继续，镜头等下一次群收尾。
+        if (result === 'pending-confirmation' && state.collapsed) awaitingConfirmation = true;
+        const off = result?.off;
+        if (awaitingConfirmation || !here() || typeof off !== 'function') return;
+        let p = confirmedPermission(ctx());
+        if (!off()) return;
+        const prior = state.cameraAttempt;
+        if (prior?.window === origin.window && prior.epoch === epoch && prior.last === last && prior.active()) return;
+        let currentOff = off;
+        const active = () => here() && currentOff() && (!p || canAdopt(p));
+        const attempt = state.cameraAttempt = { window: origin.window, epoch, last, active };
+        const owned = () => state.cameraAttempt === attempt && here();
+        // 冷确认可换票；进入镜头后，问答只认进入时的票和凭据。
+        const consume = (off, confirmed) => owned() && canAdopt(p = confirmed) && typeof off === 'function' && (currentOff = off)()
+            && cameraTurn(type, { here: owned, off, p });
+        return confirm(off, p, consume).finally(() => {
+            if (state.cameraAttempt === attempt) state.cameraAttempt = null;
+        });
+    };
+    const confirm = async (off, p, consume) => {
+        if (p) return consume(off, p);
+        if (!cameraAvailable()) return;
+        const clock = permissionClock(), flight = state.syncFlight;
+        if (flight?.epoch === epoch) await flight.promise;
+        if (!here() || permissionClock() !== clock || (flight?.epoch === epoch && !cameraAvailable())) return;
+        p = confirmedPermission(ctx());
+        if (!p && !flight?.full) {
+            if (await syncNow() === false) return;
+            p = confirmedPermission(ctx());
+        }
+        if (!here() || permissionClock() !== clock || !p) return;
+        if (off()) return consume(off, p);
+        // 本轮同步已正式确认，按新凭据重查开关；不给后续确认登记镜头交接。
+        return autoDrive(type, undefined, p).then(result => consume(result?.off, p));
+    };
+    setTimeout(() => {
+        if ((type && type !== 'normal') || !here() || !last) return;
+        if (state.confirmed) confirmedPermission(ctx());
+        return autoDrive(type, handoff).then(handoff).catch(() => {});
+    }, 50);
 });
-async function cameraTurn(type, { force = false } = {}) {
+async function cameraTurn(type, { force = false, here, off, p } = {}) {
     if (!settings().enabled || !state.chatKey || settings().camera === false) return false;
     if (type && type !== 'normal') return false;
     const c = ctx(), group = currentGroup(c), cam = cameraOf(c);
     if (!group || !cam || !group.members.includes(cam.avatar)) return false;
-    // 手动叫过（/旁白、/进场）：这一句记成接过了，有卡的人答完不再自动接
-    if (force) state.cameraJoinFor = cameraJoinPoint(c.chat, { speaker: m => speakerOf(m, fallbackAvatar(c)) })?.key ?? state.cameraJoinFor;
+    const avatar = cam.avatar, originalAt = group.members.indexOf(avatar);
+    const valid = () => here?.() && canAdopt(p) && off() && settings().camera !== false
+        && !activeGeneration({ readOnly: true }) && (ctx().chat.at(-1)?.is_user || !typingNow())
+        && currentGroup(ctx()) === group && group.members[originalAt] === avatar && group.members.lastIndexOf(avatar) === originalAt
+        && cameraOf(ctx())?.avatar === avatar;
+    const playerAt = c.chat.findLastIndex(m => m?.is_user), player = c.chat[playerAt];
+    const key = player && `${playerAt}:${fingerprintMessage(player, 'user')}`;
+    if (state.cameraDone?.window !== state.loadedWindow || state.cameraDone?.epoch !== state.epoch)
+        state.cameraDone = { window: state.loadedWindow, epoch: state.epoch, rows: new WeakMap(), asked: new WeakMap() };
+    const { rows, asked } = state.cameraDone, done = () => rows.get(player) === key;
+    const mark = () => { if (player) rows.set(player, key); };
+    const trigger = (allowed = valid) => cameraTrigger(c, group, avatar, mark, () => force || (allowed() && !done()));
     if (!force) {
-        const chatKey = state.chatKey, epoch = state.epoch, chat = c.chat;
-        const stamp = () => JSON.stringify(chat.map(m => [fingerprintMessage(m, speakerOf(m, fallbackAvatar(c))), !!m.is_system, m.extra?.rp_board ?? null]));
-        const before = stamp();
+        if (!valid()) return false;
         let board;
         try {
-            if (await syncNow(true) === false) throw Error('场面尚未同步，请核对后重试');
-            board = await api('board', { chatKey });
-            if (!Array.isArray(board?.people)) throw Error('在场状态尚未确认，请核对后重试');
+            board = await api('board', { chatKey: state.chatKey });
+            if (!valid()) return false;
+            if (!Array.isArray(board?.people) || board.people.some(p => typeof p?.card !== 'boolean' || !p.name || typeof p.name !== 'string'
+                || !['present', 'remote', 'unknown', 'absent', 'away', 'never'].includes(p.status))) throw Error('在场状态尚未确认，请核对后重试');
         } catch (error) {
+            if (!valid()) return false;
             auto.executionStatus = { source: 'camera', result: 'error', reason: error.message };
             globalThis.toastr?.warning(error.message, 'RP：幕后'); render(); return false;
         }
-        if (state.chatKey !== chatKey || state.epoch !== epoch || ctx().chat !== chat || stamp() !== before) return false;
         const cards = board.people.filter(p => p.card && p.name !== '旁白');
         const active = cards.filter(p => ['present', 'remote'].includes(p.status));
         const open = members(c).filter(m => !m.disabled);
@@ -4627,36 +4682,33 @@ async function cameraTurn(type, { force = false } = {}) {
             auto.executionStatus = { source: 'camera', result: 'muted', reason };
             globalThis.toastr?.warning(reason, 'RP：幕后'); render(); return false;
         }
-        if (active.length) return cameraJoin(c, cam);
+        if (active.length) return cameraJoin(c, { valid, done, asked, trigger, playerAt, player, key });
     }
     if (!force && !c.chat?.at(-1)?.is_user) return false;
-    // 同一句只叫一次：旁白没生成成（断网、被拒）时群聊收尾又会走到这里，别一直重叫
-    const last = c.chat.at(-1), key = `${c.chat.length}:${fingerprintMessage(last, speakerOf(last, fallbackAvatar(c)))}`;
-    if (!force && state.cameraFor === key) return false;
-    state.cameraFor = key;
-    await c.executeSlashCommandsWithOptions(`/trigger await=true ${group.members.indexOf(cam.avatar)}`);
+    return trigger();
+}
+async function cameraTrigger(c, group, avatar, mark, allowed) {
+    if (!allowed()) return false;
+    const at = group.members.indexOf(avatar);
+    if (at < 0) return false;
+    mark();
+    await c.executeSlashCommandsWithOptions(`/trigger await=true ${at}`);
     return true;
 }
 // 有卡的人在场、他们这一轮答完了：问后台这一句旁白要不要接（玩家点名了在场的没卡的人、或者接着跟上一条旁白里开口的人说话）。
-// 同一句玩家的话只问一次；问的这会儿玩家又发了话、又在生成，就作罢。旁白卡在群里照旧静音（静音只是 ST 不自动轮它，/trigger 照样能说）。
-async function cameraJoin(c, cam) {
-    if (settings().cameraJoin === false) return false;
+async function cameraJoin(c, { valid, done, asked, trigger, playerAt, player, key }) {
     const speaker = m => speakerOf(m, fallbackAvatar(c));
-    const point = cameraJoinPoint(c.chat, { speaker, done: state.cameraJoinFor });
-    if (!point) return false;
-    state.cameraJoinFor = point.key;
-    const chatKey = state.chatKey, length = c.chat.length;
-    await syncNow(true).catch(() => {});
+    const allowed = () => valid() && settings().cameraJoin !== false && !done()
+        && c.chat[playerAt] === player && cameraJoinPoint(c.chat, { speaker })?.key === key;
+    if (asked.get(player) === key || !allowed()) return false;
     const present = [c.name1, ...members(c).filter(m => !m.disabled).map(m => m.name)].filter(Boolean);
-    let r = null;
-    try { r = await api('camera-turn', { chatKey, recentUser: String(c.chat[point.at]?.mes ?? ''), present }); } catch { return false; }
-    if (!r?.speak) return false;
-    const now = ctx(), g = currentGroup(now);
-    if (chatKey !== state.chatKey || now.is_group_generating || now.chat.length !== length || cameraJoinPoint(now.chat, { speaker })?.key !== point.key) return false;
-    const at = g?.members.indexOf(cam.avatar) ?? -1;
-    if (at < 0) return false;
-    await now.executeSlashCommandsWithOptions(`/trigger await=true ${at}`);
-    return true;
+    const r = await api('camera-turn', { chatKey: state.chatKey, recentUser: String(player.mes ?? ''), present }).catch(() => null);
+    if (asked.get(player) === key || !allowed()) return false;
+    // 合法结算覆盖上一稿的问答记录，空场仍按实际发令记录裁定。
+    asked.set(player, key);
+    if (r?.speak === true) return trigger(allowed);
+    if (r?.speak !== false) globalThis.toastr?.warning('旁白接话未确认。', 'RP：幕后');
+    return false;
 }
 // 有卡的人进场、离场（N-292，用户 10/6）：静音只表示"这会儿不说话"；在不在场由进场、离场记（用你的上下文隔离扩展记在场区间，
 // 后台跟着它算谁听见了什么）。进场：拉进群（在群里静音着就取消静音）→ 记从这一条起在场 → 后台替他理一次怎么来的、为什么来、
