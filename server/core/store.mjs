@@ -281,6 +281,13 @@ export function declarationGroupsOf(store, story) {
     return store.cachedDeclarations(story).groups;
 }
 
+export function memberReaderKind(avatar) {
+    if (avatar === 'user' || avatar === 'narrator') return avatar;
+    if (typeof avatar !== 'string' || !avatar) return 'no-avatar';
+    if (avatar.startsWith('face:')) return 'face';
+    return avatar.startsWith('name:') ? 'name' : 'card';
+}
+
 export function openStore(file) {
     const db = new DatabaseSync(file);
     let confirmedDayOf = null, confirmedDaysOf = null, confirmedPointOf = null;
@@ -447,6 +454,33 @@ export function openStore(file) {
         const chat = getChat.get(chatKey);
         if (!chat) throw Object.assign(new Error('unknown_chat'), { status: 404 });
         return chat;
+    }
+
+    const memberNameIndexes = new Map();
+    function memberNameIndex(chatKey) {
+        const raw = q('select members from chats where key = ?').get(chatKey)?.members ?? null;
+        const cached = memberNameIndexes.get(chatKey);
+        if (cached?.raw === raw) return cached.lookup;
+        let members;
+        try { members = JSON.parse(raw); } catch {}
+        const valid = Array.isArray(members) && members.every(m => m && typeof m === 'object' && !Array.isArray(m)
+            && (m.avatar == null || typeof m.avatar === 'string') && (memberReaderKind(m.avatar) !== 'card' || typeof m.name === 'string'));
+        const cards = valid ? members.filter(m => memberReaderKind(m.avatar) === 'card') : [];
+        const pairs = new Set(cards.map(m => JSON.stringify([m.name, m.avatar])));
+        const state = raw === null ? 'missing' : valid ? 'ready' : 'damaged';
+        let lookup = cached?.lookup;
+        if (cached?.state !== state || cached.pairs.size !== pairs.size || [...pairs].some(pair => !cached.pairs.has(pair))) {
+            const byName = Map.groupBy(cards, m => m.name);
+            for (const [name, group] of byName) byName.set(name, new Set(group.map(m => m.avatar)));
+            lookup = name => {
+                if (state !== 'ready') return { status: state };
+                const avatars = byName.get(name);
+                if (!avatars) return { status: 'not-found' };
+                return { status: avatars.size === 1 ? 'unique' : 'multiple', count: avatars.size, avatars: avatars.values() };
+            };
+        }
+        memberNameIndexes.set(chatKey, { raw, state, pairs, lookup });
+        return lookup;
     }
 
     function newChat({ storyId, parentKey = null, stChatId, groupId, label }) {
@@ -1985,5 +2019,6 @@ export function openStore(file) {
     const sourceContext = chatKey => ({ limits: historyOf(chatKey).limits, dependencies: (basis, options) => memo('arrival_dependencies', JSON.stringify([chatKey, basis, options.rawBasis ?? false, options.through ?? null]), () => arrivalDependencies(chatKey, basis, options)) });
     setSourceContext(db, sourceContext);
     return { authorizationVersion, authorizationEpoch, externalVersion, changeVersion: () => changesQ.get().n, commitSlot: tx, prepareSlotRollback, declarationsOf: readDeclarations, cachedDeclarations, putDeclarations,
+        memberNameIndex,
         deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, syncRevision, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

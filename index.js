@@ -523,23 +523,87 @@ function noticeStory(chatKey, notice, scope = '') {
 
 // 离开很久回来：后台记下这次离开、推各人这些天做了什么（一两分钟），好了由在场最亲近的角色先开口。
 // 每次离开只做一次（开口之后后台就不再当它是"刚回来"）；这期间窗口换了、或者用户自己先发了话，就不抢。
-async function checkReturn(chatKey, epoch) {
+function returnOrigin(c, candidate) {
+    const gate = state.leaveWindow, group = currentGroup(c);
+    const roster = group ? [[...group.members], [...(group.disabled_members ?? [])]] : fallbackAvatar(c);
+    return { candidate, metadata: c.chatMetadata, roster, gate, change: gate?.change };
+}
+function sameReturnRoster(c, roster) {
+    const group = currentGroup(c);
+    if (!group) return fallbackAvatar(c) === roster;
+    const same = (saved, now) => saved.length === now.length && saved.every((avatar, i) => avatar === now[i]);
+    return Array.isArray(roster) && same(roster[0], group.members) && same(roster[1], group.disabled_members ?? []);
+}
+function returnWindow(c, { candidate: { chatKey, epoch, window }, gate, change }, checkTarget = true) {
+    return settings().enabled && state.opened && state.openedWindow === window && state.status?.enabled !== false
+        && gate && state.leaveWindow === gate && !gate.changes && gate.change === change
+        && chatKey === state.chatKey && epoch === state.epoch && (!checkTarget || localTarget(c, window));
+}
+function currentReturn(c, origin) {
+    const { candidate, metadata, roster } = origin;
+    // 聊天载入实例由同次完整核对里的 samePermission 检查。
+    return returnWindow(c, origin, false) && !state.collapsed && state.pendingSyncEpoch !== candidate.epoch
+        && c.chatMetadata === metadata && candidate.clock === permissionClock() && sameReturnRoster(c, roster)
+        && samePermission(c, candidate);
+}
+function consumeReturn(origin, ticket = state.confirmed) {
+    if (state.returnIntent !== origin || !origin.answer) return;
+    const c = ctx();
+    if (!currentReturn(c, origin)) return settleReturn(origin);
+    if (ticket !== state.confirmed || !canAdopt(ticket)) return;
+    settleReturn(origin);
+    const { id, avatar } = origin.answer, { chatKey, window } = origin.candidate;
+    if (!settings().speakFirst || state.returnIssued?.get(chatKey) === id) return;
+    if (c.characters?.filter(card => card?.avatar === avatar).length !== 1) return;
+    const group = currentGroup(c), at = group?.members.indexOf(avatar);
+    if (c.groupId != null
+        ? !group || at < 0 || at !== group.members.lastIndexOf(avatar) || group.disabled_members?.includes(avatar)
+        : fallbackAvatar(c) !== avatar || window.avatar !== avatar) return;
+    (state.returnIssued ??= new Map()).set(chatKey, id);
+    return c.executeSlashCommandsWithOptions(group ? `/trigger await=true ${at}` : '/trigger await=true');
+}
+function settleReturn(origin) {
+    if (origin && state.returnIntent === origin) state.returnIntent = null;
+}
+function sameReturnSource(a, b) {
+    if (!a || !b) return false;
+    const x = a.candidate, y = b.candidate;
+    return x.epoch === y.epoch && x.chatKey === y.chatKey && x.window === y.window && x.clock === y.clock && x.view === y.view
+        && a.metadata === b.metadata && a.gate === b.gate && a.change === b.change && JSON.stringify(a.roster) === JSON.stringify(b.roster)
+        && x.rows.length === y.rows.length && x.rows.every((row, i) => row === y.rows[i]);
+}
+async function checkReturn(origin, eligible) {
+    if (!origin) return;
+    if (eligible && origin.late && state.syncOwner === origin.late) state.returnIntent ??= origin;
+    if (eligible && sameReturnSource(state.returnIntent, origin)) origin = state.returnIntent;
+    if (state.returnIntent !== origin || origin.started) return queryReturn(origin, false);
+    origin.started = true;
+    return queryReturn(origin, eligible).finally(() => {
+        if (!origin.answer) settleReturn(origin);
+    });
+}
+async function queryReturn(origin, eligible) {
+    const { candidate } = origin, { chatKey } = candidate;
+    const current = () => state.returnIntent === origin && currentReturn(ctx(), origin);
+    const adopt = eligible && current();
+    if (!adopt && !returnWindow(ctx(), origin)) return;
     let r;
     try { r = await api('return', { chatKey }); } catch { return; }
-    if (!r?.away || epoch !== state.epoch) return;
+    if (!r?.away || !adopt || !current() || !r.id) return;
+    const { id } = r, avatar = r.first?.avatar;
     const who = r.first?.name ?? '角色';
-    const lengthAtStart = ctx().chat.length;
     const told = `离开了 ${r.days} 天。后台在推这些天身边的人做了什么`;
     globalThis.toastr?.info(settings().speakFirst ? `${told}，好了由${who}先开口。` : `${told}。`, '', { timeOut: 10000 });
+    if (r.status === 'working' && !current()) return;
     for (let i = 0; i < 80 && r.status === 'working'; i++) {   // 至多等五分多钟（中转慢的时候推演要两三分钟）
         await new Promise(resolve => setTimeout(resolve, 4000));
-        if (epoch !== state.epoch) return;
+        if (!current()) return;
         try { r = await api('return', { chatKey }); } catch { return; }
-        if (!r.away) return;
+        if (!r?.away || !current() || r.id !== id || (avatar && r.first?.avatar !== avatar)) return;
     }
-    if (!settings().speakFirst || !r.first || epoch !== state.epoch || ctx().chat.length !== lengthAtStart) return;
-    const c = ctx();
-    await c.executeSlashCommandsWithOptions(c.groupId ? `/trigger await=true ${r.first.name}` : '/trigger await=true');
+    if (!settings().speakFirst || !avatar) return;
+    origin.answer = { id, avatar };
+    await consumeReturn(origin);
 }
 
 // 删回去以后后台自己对账（方案 删消息等于没发生过）：重算的和那条当时的样子对不上，亮出来（后台日志里也有）
@@ -1876,17 +1940,19 @@ function clearPrompts() {
 // ---------- 同步 ----------
 
 const permissionClock = () => (state.panelMessageChange ?? 0) + (state.permissionChanges ?? 0);
-function invalidatePermission() {
+const sameCollapse = (collapsed, synced) => JSON.stringify([collapsed, synced]) === JSON.stringify([state.collapsed, state.synced]);
+function invalidatePermission(revoked = true) {
     state.confirmed = null;
     state.permissionChanges = (state.permissionChanges ?? 0) + 1;
+    if (revoked) state.cameraPermission = Symbol();
 }
-function permissionView(c) {
+function permissionView(c, select = value => value) {
     const fallback = fallbackAvatar(c), meta = c.chatMetadata;
     const rows = c.chat.map(m => [speakerOf(m, fallback), !!m.is_user, m.name, String(m.mes ?? ''), m.send_date?.toString(),
         !!m.is_system, !!m.hidden, m.swipe_id ?? 0, m.swipes, visibilityTag(m.extra?.rp_vis), m.extra?.rp_board,
         m.extra?.rp_day, m.extra?.rp_door, m.extra?.rpeArrival]);
     const cast = c.chat.some(m => m.extra?.rp_door) ? (state.boardCast ?? []).map(({ avatar, name, role }) => [avatar, name, role]) : null;
-    return JSON.stringify([rows, members(c), cast, anchorMap(c), meta?.rpeBoardApplied], (_, v) =>
+    return JSON.stringify(select([rows, members(c), cast, anchorMap(c), meta?.rpeBoardApplied]), (_, v) =>
         v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v);
 }
 function samePermission(c, p) {
@@ -1896,7 +1962,7 @@ function samePermission(c, p) {
 }
 function confirmedPermission(c = ctx(), p = state.confirmed) {
     const ready = settings().enabled && state.opened !== false && state.status?.enabled !== false && !state.leaveWindow?.changes;
-    if (p && p === state.confirmed && (!ready || !samePermission(c, p))) invalidatePermission();
+    if (p && p === state.confirmed && (!ready || !samePermission(c, p))) invalidatePermission(!ready);
     const pending = state.collapsed || state.pendingSyncEpoch === state.epoch;
     const reason = state.syncFlight || state.dirty ? '同步中' : pending ? '待确认' : projectionGap(c) ? '权限投影不全' : '未确认';
     if (reason === '未确认' && ready && p && p === state.confirmed) return p;
@@ -2021,7 +2087,10 @@ async function syncOnce(force = false, light = false) {
                 doorHandoffs: c.chat.flatMap((m, pos) => (buildSequence([m], fallbackAvatar(c), null, state.boardCast ?? []).doorHandoffs ?? []).map(d => ({ ...d, pos }))),
                 arrivalReceipts: c.chat.flatMap((m, pos) => m.extra?.rpeArrival ? [{ ...m.extra.rpeArrival, pos }] : []),
             };
+            const intent = state.cameraIntent;
             candidate = { epoch, chatKey, window, clock: permissionClock(), rows: c.chat.slice(), view: permissionView(c), packet: JSON.stringify(payload) };
+            if (state.returnIntent && here() && !currentReturn(c, state.returnIntent)) settleReturn(state.returnIntent);
+            if (window && state.openedWindow === window) candidate.returning = returnOrigin(c, candidate);
             setStage(state, 'sync', '进行中', '提交消息');
             let result = await api('sync', JSON.parse(candidate.packet));
             if (result.need?.length) {
@@ -2036,6 +2105,7 @@ async function syncOnce(force = false, light = false) {
             if (!here()) return false;
             state.collapsed = result.collapsed ?? null;
             if (result.committed !== true || result.need?.length || state.collapsed) { setStage(state, 'sync', '等待', '后台提交待确认'); return false; }
+            if (intent && state.cameraIntent === intent && flight.confirmation?.handoff !== intent) state.cameraIntent = null;
             if (state.pendingSyncEpoch === epoch) state.pendingSyncEpoch = null;
             // 记下后台这次认得的序列：生成前用它判断锚点那条是不是已经同步过（anchorCovered）
             state.synced = { chatKey, epoch, seq: seq.map(s => ({ f: s.f, w: s.w })), hasAnchorProjection: result.hasAnchorProjection };
@@ -2044,7 +2114,9 @@ async function syncOnce(force = false, light = false) {
             // 撤销开回的区间和取消静音后的名单也同步回后台，之后的场面才是新状态。
             // light 且没有删改换稿时，undo 这趟只是顺手补做（上次没落实的重试），放到后面跑，不挡生成。
             const synced = state.synced;
-            const round = () => state.syncOwner === flight && state.synced === synced && samePermission(c, candidate);
+            const source = candidate.returning;
+            const round = () => state.syncOwner === flight && state.synced === synced && (samePermission(c, candidate)
+                || !!(light && source?.candidate === candidate && sameReturnSource(state.returnIntent, source) && settleReturn(state.returnIntent)));
             light &&= !flight.full;
             if (light && !(result.removed || result.edited || result.repaired)) {
                 void autoPeek({ onlyUndo: true, round }).then(done => { if (done && window === state.loadedWindow) return syncNow(); }).catch(() => {});
@@ -2055,8 +2127,15 @@ async function syncOnce(force = false, light = false) {
         } while (state.dirty && epoch === state.epoch);
         if (epoch !== state.epoch) return false;
         setStage(state, 'sync', '成功');
+        const waiting = state.returnIntent;
+        const returning = waiting && !currentReturn(ctx(), waiting) ? settleReturn(waiting) : candidate?.returning;
+        if (candidate?.returning) delete candidate.returning;
+        flight.returnReady = true;
+        if (returning && !state.returnIntent && here() && state.castSent === chatKey) returning.late = flight;
+        if (returning && !state.returnIntent && here() && !returning.late) state.returnIntent = returning;
         const tail = async () => {
             if (epoch !== state.epoch) return;
+            const returnEligible = returning && currentReturn(ctx(), returning);
             const status = await api('status', { chatKey: state.chatKey });
             if (!active()) return;
             state.status = status;
@@ -2087,7 +2166,7 @@ async function syncOnce(force = false, light = false) {
                         if (texts.length && active()) return api('cast', { chatKey: chatKeyNow, texts });
                     }).catch(() => {});
                 api('absence', { chatKey: state.chatKey }).then(a => { state.absence = a; render(); }).catch(() => {});
-                checkReturn(state.chatKey, epoch);
+                checkReturn(returning, returnEligible);
                 refreshPlanStatus();
                 api('pack', { chatKey: state.chatKey }).then(p => { state.pack = p; render(); }).catch(() => {});
                 void refreshRelationsDraft();
@@ -2103,10 +2182,18 @@ async function syncOnce(force = false, light = false) {
             if (resume || confirmation) void flight.promise.then(ok => {
                 if (ok === true && !state.syncFlight && state.confirmed === candidate && confirmation?.current()
                     && active() && !state.dirty && samePermission(ctx(), candidate)) confirmation.candidate = candidate;
-                if (!resume || state.resumeAuto !== resume) return;
+                if ((state.resumeAuto ?? null) !== (resume ?? null)) return;
+                const intent = confirmation?.candidate === candidate ? confirmation.handoff : null;
+                const handoff = intent && state.cameraIntent === intent && intent.valid() ? intent : null;
+                if (handoff) state.cameraIntent = null;
+                if (!resume) return handoff?.resume(candidate);
                 state.resumeAuto = null;
-                if (confirmation?.handoff && confirmation.candidate === candidate) return resume(candidate, confirmation.handoff);
+                if (handoff) return resume(candidate, handoff);
                 return resume(candidate);
+            }).catch(() => {});
+            const returnIntent = state.returnIntent;
+            if (returnIntent) void flight.promise.then(ok => {
+                if (ok === true) return consumeReturn(returnIntent, candidate);
             }).catch(() => {});
         }
         return epoch === state.epoch;
@@ -2121,6 +2208,10 @@ async function syncOnce(force = false, light = false) {
         }
         return false;
     } finally {
+        const returnIntent = state.syncOwner === flight && state.confirmed !== candidate && state.returnIntent;
+        if (returnIntent && (!flight.returnReady || (flight.full && !state.dirty) || !here()
+            || projectionGap(ctx()) || !currentReturn(ctx(), returnIntent))) settleReturn(returnIntent);
+        else if (returnIntent && flight.full) void flight.promise.then(ok => { if (!ok) settleReturn(returnIntent); }, () => settleReturn(returnIntent));
         if (epoch === state.epoch) state.syncing = false;
         tick('同步:整个', performance.now() - tStart);
         render();
@@ -3200,11 +3291,14 @@ function mountPanel() {
                 const rows = c.chat.slice(), view = chat => JSON.stringify(chat.map(m => [m.mes, m.swipe_id, m.swipes, m.name, m.original_avatar,
                     m.send_date, m.is_user, m.is_system, m.hidden]));
                 const history = view(rows), current = () => localTarget(c, window) && c.chat.every((m, i) => m === rows[i]) && view(c.chat) === history;
-                const confirmation = state.panelConfirmation = { epoch, current };
+                const intent = state.cameraIntent;
+                const confirmation = state.panelConfirmation = { epoch, current, handoff: intent?.pending() ? intent : undefined };
                 try {
                     while (settings().enabled && state.syncFlight?.epoch === epoch && current()) await state.syncFlight.promise.catch(() => false);
-                    if (epoch === state.epoch && current() && JSON.stringify([collapsed, synced]) === JSON.stringify([state.collapsed, state.synced]))
+                    if (epoch === state.epoch && current() && sameCollapse(collapsed, synced)) {
+                        if (!confirmation.handoff?.pending()) confirmation.handoff = undefined;
                         await syncNow(true, false, null, confirmation);
+                    }
                 } finally { if (state.panelConfirmation === confirmation) state.panelConfirmation = null; }
             }
             if (action === 'drift-clear') {
@@ -3949,8 +4043,14 @@ async function autoDrive(type, handoff, ready) {
         return state.epoch === epoch && state.chatKey === chatKey && loadedWindow === state.loadedWindow && now.chat === c.chat
             && now.chat.length === length && !now.is_group_generating && tip === last && sourceKey() === key;
     };
+    handoff?.captureSource?.(current);
     state.resumeAuto = null;
-    const resume = permission => current() && autoDrive(type, handoff, permission).then(handoff);
+    const resume = (permission, intent) => {
+        const previous = handoff?.valid ? undefined : handoff;
+        if (!intent) return current() && autoDrive(type, previous, permission).then(previous);
+        if (!current()) return intent.resume(permission);
+        return autoDrive(type, intent, permission).then(intent);
+    };
     const pending = prior => {
         const next = prior && current() && confirmedPermission(ctx());
         if (next && next !== prior && next.clock <= prior.clock + 1 && next.view === prior.view) void Promise.resolve(next).then(resume).catch(() => {});
@@ -3958,7 +4058,7 @@ async function autoDrive(type, handoff, ready) {
         return 'pending-confirmation';
     };
     const off = valid => ({ off: () => current() && valid() && !state.leaveWindow?.changes
-        && !state.collapsed && state.pendingSyncEpoch !== epoch });
+        && !state.collapsed && state.pendingSyncEpoch !== epoch, source: valid });
     try {
         // ST 分支会复制元数据。跨窗或无法确认归属的记录只在本窗核对消息。
         const journal=c.chatMetadata?.rpeExecution??{};
@@ -4084,6 +4184,35 @@ async function runScheduled(q, prepare) {
         render();
     };
     let prepared,issued=false,previousAttempt=['running','unconfirmed','cancelled','error','waiting','delivered'].includes(owned()?.result);
+    let checkPreparation, preparationInvalid;
+    const gate=state.leaveWindow, change=gate?.change, window=state.loadedWindow;
+    const preparationStopped=()=>!settings().enabled||state.opened===false||state.status?.enabled===false||state.leaveWindow!==gate
+        ||gate?.changes||gate?.change!==change||state.epoch!==epoch||state.chatKey!==chatKey||!localTarget(c,window);
+    const preparation=(avatar=q.who==='旁白'||q.role==='旁白'?cameraOf(c)?.avatar:q.avatar??cardNamed(c,q.who)?.avatar)=>{
+        const group=currentGroup(c), meta=c.chatMetadata, rows=chat.slice();
+        const read=()=>permissionView(c,([messages,roster,,anchors,decisions])=>({
+            messages,decisions,roles:roleSnapshot(),members:group?.members??[],
+                camera:cameraOf(c)?.avatar, present:[c.name1,...roster.filter(m=>m.avatar!==avatar&&!m.disabled&&m.name).map(m=>m.name)],
+                card:c.characters?.filter(ch=>ch.avatar===avatar).map(ch=>[ch.name,isCamera(ch)]),
+                disabled:!!group?.disabled_members?.includes(avatar), opening:!!meta.rp_emergence?.openingMuted?.includes(avatar),
+            anchors:anchors?anchors[avatar]??{}:anchorsUnknown(c)?false:null, manual:!!meta.rpeManualMuted?.[avatar],
+        }));
+        const expected=JSON.parse(read());
+        const opened=(name,segment,anchor=expected.anchors?.segments?expected.anchors:{brief:'',keepBefore:1,segments:[]})=>
+            Object.fromEntries(Object.entries({...anchor,name,segments:[...anchor.segments,structuredClone(segment)]})
+                .sort(([a],[b])=>a<b?-1:a>b?1:0));
+        const check=checkPreparation=(key,resolved=avatar)=>{
+            if(key)expected[key]=key==='members'?[...expected.members,avatar]:false;
+            const actual=!preparationInvalid&&!preparationStopped()&&resolved===avatar&&ctx().chatMetadata===meta&&currentGroup(ctx())===group
+                &&chat.length===rows.length&&rows.every((m,i)=>chat[i]===m)&&expected.anchors!==false&&read();
+            if(actual===JSON.stringify(expected))return;
+            if(actual&&key==='disabled'&&q.execution?.kind==='knock'&&expected.anchors?.segments?.every(s=>s.to!=null)!==false)
+                expected.anchors=opened(expected.card?.[0]?.[0],{from:length,fromDate:String(rows.at(-1)?.send_date??''),to:null,toDate:''});
+            if(actual!==JSON.stringify(expected))throw preparationInvalid??=Error('准备期间在场权限或聊天已改变，请重新核对');
+        };
+        const opening=({name})=>({capture:(_anchor,segment)=>{expected.anchors=opened(name,segment);},opened(){}});
+        return {check,opening,stopped:()=>preparationInvalid&&preparationStopped()};
+    };
     try{
         guard();
         if(!prior&&!owned()&&Number.isInteger(q.execution?.through)&&chat.slice(q.execution.through+1).some(m=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()
@@ -4124,7 +4253,8 @@ async function runScheduled(q, prepare) {
                 earlier:chat.slice(0,Math.min(start+1,chat.length)).map(m=>m.extra.rpeSourceId)};
             await c.saveChat?.();guard();
         }
-        try{prepared=await prepare();guard();}
+        if(auto.executionStatus?.result==='replan')auto.executionStatus=null;
+        try{if(preparationStopped())return false;prepared=await prepare(preparation);guard();checkPreparation?.();checkPreparation=null;}
         finally{
             if(ownsPreparation&&state.chatKey===chatKey&&state.epoch===epoch&&localTarget(c,undefined,{requireHead:true})){
                 const added=(c.chatMetadata.contextIsolation?.anchors?.[avatar]?.segments??[]).map(segmentKey).filter(key=>!existing.has(key));
@@ -4173,13 +4303,15 @@ async function runScheduled(q, prepare) {
         if(landed()){await report('delivered',`${q.who}的消息已落下`);return true;}
         await report('unconfirmed',`${q.who}的生成已返回，但没找到本人新消息，请核对后重试`);return false;
     }catch(error){
+        if(checkPreparation&&preparationStopped())return false;
         if(state.chatKey!==chatKey||state.epoch!==epoch||!localTarget(c))return false;
         if(error.result==='replan'&&!issued&&!previousAttempt){
             // 本地明确尚未发令才可自动重排；已发出、取消或未确认的生成仍走原有人工核实。
             await report('muted',error.message);auto.executionStatus.result='replan';render();return false;
         }
         const delivered=!!landed(),result=delivered?'delivered':error.result??(/abort|cancel|取消/i.test(error.message)?'cancelled':issued?'error':'muted');
-        if(!delivered&&result!=='unconfirmed')try{await prepared?.rollback?.();}catch(rollback){error.message+=`；恢复待处理：${rollback.message}`;}
+        if(!delivered&&result!=='unconfirmed')try{await prepared?.rollback?.(preparationInvalid);}catch(e){error.message+=`；恢复待处理：${e.message}`;}
+        if(preparationInvalid){state.note=error.message;return false;}
         const failureReason=(...messages)=>[...new Set([...(issued||previousAttempt?[]:['尚未发出生成命令']),...messages.flatMap(message=>message.split('；'))])].join('；');
         try{await report(result,failureReason(error.message));}catch(reportError){
             if (!localTarget(c, undefined, { requireHead: true })) return false;
@@ -4237,41 +4369,49 @@ async function retryScheduled() {
 }
 // 叫一个人说：旁白走旁白卡；静音着的（这会儿不在场）不叫
 async function autoSpeak(q) {
-    return runScheduled(q,async()=>{
+    return runScheduled(q,async preparation=>{
         const c=ctx(),group=currentGroup(c);
         if(!group)throw Error('当前群不存在');
         const camera=q.role==='旁白'||q.who==='旁白';
+        const {check,opening}=preparation();
         const ch=camera?cameraOf(c):await resolveCard(q.who,q.avatar,{interactive:false});
         if(!ch || q.avatar&&ch.avatar!==q.avatar)throw Error(`${q.who}的卡未能唯一匹配，请确认卡文件`);
-        if(q.enter&&!group.members.includes(ch.avatar))await changeMembers([ch.avatar],()=>run(`/member-add ${ch.avatar}`));
+        check(undefined,ch.avatar);
+        if(q.enter&&!group.members.includes(ch.avatar))await changeMembers([ch.avatar],()=>run(`/member-add ${ch.avatar}`))
+            .then(()=>check('members',ch.avatar));
         const at=group.members.indexOf(ch.avatar);
         if(at<0)throw Error(`${q.who}不在当前群里，请先核对成员`);
         if(!camera&&group.disabled_members?.includes(ch.avatar)){
             const manual=c.chatMetadata.rpeManualMuted?.[ch.avatar];
             const owned=!manual&&c.chatMetadata.rp_emergence?.openingMuted?.includes(ch.avatar);
             if(manual||!owned&&!q.back&&!q.enter)throw Error(`${q.who}现在手动静音中，要发言请解除静音后重试`);
-            await setMemberMuted(ch.avatar,false);
+            await setMemberMuted(ch.avatar,false).then(()=>check('disabled',ch.avatar));
             if(currentGroup(ctx()).disabled_members?.includes(ch.avatar))throw Error(`${q.who}解除静音后核实失败`);
-            if(owned){c.chatMetadata.rp_emergence.openingMuted=c.chatMetadata.rp_emergence.openingMuted.filter(a=>a!==ch.avatar);await c.saveMetadata();}
+            if(owned){c.chatMetadata.rp_emergence.openingMuted=c.chatMetadata.rp_emergence.openingMuted.filter(a=>a!==ch.avatar);
+                check('opening',ch.avatar);await c.saveMetadata();check();}
         }
-        if(q.back||q.enter)await openPresence(ch,q.enter?.at);
+        if(q.back||q.enter){await openPresence(ch,q.enter?.at,opening(ch));check();}
         auto.noRepeat=q.noRepeat?ch.avatar:null;
         return {at,avatar:ch.avatar};
     });
 }
 // 后台说该叩门了：拉进群、取消静音、从这条起在场（区间）、让他自己写那一条；他那条落下时 MESSAGE_RECEIVED 给它记号
 async function autoKnock(k) {
-    return runScheduled(k,async()=>{
+    return runScheduled(k,async preparation=>{
+        const {check,opening,stopped}=preparation();
         const c=ctx(),group=currentGroup(c),ch=await resolveCard(k.who,k.avatar,{interactive:false});
         if(!group||!ch||k.avatar&&ch.avatar!==k.avatar)throw Error(`${k.who}的卡身份未对上`);
+        check(undefined,ch.avatar);
         if(group.disabled_members?.includes(ch.avatar)&&c.chatMetadata.rpeManualMuted?.[ch.avatar])throw Error(`${k.who}现在手动静音中，要发言请解除静音后重试`);
         const existing=new Set(c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]?.segments??[]),wasDisabled=group.disabled_members?.includes(ch.avatar);
         let opened=null,openedKey=null;
-        const rollback=async()=>{
+        const rollback=async(persist=false)=>{
             const anchor=c.chatMetadata.contextIsolation?.anchors?.[ch.avatar];
-            if(opened&&anchor?.segments?.includes(opened)&&JSON.stringify(opened)===openedKey){anchor.segments=anchor.segments.filter(s=>s!==opened);if(localTarget(c,undefined,{requireHead:true}))await c.saveMetadata();}
+            const remove=opened&&anchor?.segments?.includes(opened)&&JSON.stringify(opened)===openedKey;
+            if(remove)anchor.segments=anchor.segments.filter(s=>s!==opened);
             const owned=c.chatMetadata.rpeExecution?.[k.execution?.id]?.preparation;
             if(owned){owned.segments=[];owned.segmentOwned=false;owned.muteOwned=false;}
+            if((remove||persist&&owned)&&localTarget(c,undefined,{requireHead:true}))await c.saveMetadata();
             const liveGroup=currentGroup(ctx()),restoreMute=wasDisabled&&liveGroup&&liveGroup.id==group.id&&!liveGroup.disabled_members?.includes(ch.avatar)&&localTarget(c);
             if(restoreMute&&!localTarget(c,undefined,{requireHead:true})){(liveGroup.disabled_members??=[]).push(ch.avatar);followBase();}
             else if(restoreMute){await setMemberMuted(ch.avatar,true);const restored=currentGroup(ctx());if(restored?.id!=group.id||!restored?.disabled_members?.includes(ch.avatar))throw Error('叩门静音恢复核实失败');}
@@ -4279,16 +4419,16 @@ async function autoKnock(k) {
         };
         const release=acquireMemberChange(ch.avatar);
         try{
-            if(!group.members.includes(ch.avatar))await run(`/member-add ${ch.avatar}`);
+            if(!group.members.includes(ch.avatar)){await run(`/member-add ${ch.avatar}`);check('members',ch.avatar);}
             const at=group.members.indexOf(ch.avatar);if(at<0)throw Error('叩门角色没有加入群');
-            if(wasDisabled)await setMemberMuted(ch.avatar,false);
+            if(wasDisabled){await setMemberMuted(ch.avatar,false);check('disabled',ch.avatar);}
             if(group.disabled_members?.includes(ch.avatar))throw Error('叩门解除静音未落实');
-            await openPresence(ch);
+            await openPresence(ch,null,opening(ch));
             opened=(c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]?.segments??[]).find(s=>!existing.has(s));
             openedKey=JSON.stringify(opened);
             auto.pending.set(ch.avatar,{who:ch.name,way:k.way});
             return {at,avatar:ch.avatar,rollback};
-        }catch(error){await rollback();throw error;}
+        }catch(error){if(!stopped())await rollback();throw error;}
         finally{release();followBase();}
     });
 }
@@ -4618,27 +4758,41 @@ on('CHAT_COMPLETION_PROMPT_READY', (e = {}) => {
 // 有卡的人在场时（场记章程 #7、B4）：他们答完以后问后台一次，玩家这句是冲着没卡的人的，旁白接一手（cameraJoin）
 on('GROUP_WRAPPER_FINISHED', (e = {}) => {
     const origin = editOrigin(), epoch = state.epoch, chat = ctx().chat, last = chat?.at(-1), type = e.type;
+    const order = state.cameraSourceOrder = (state.cameraSourceOrder ?? 0) + 1, draft = last?.mes, swipe = last?.swipe_id;
     const here = () => settings().enabled && state.opened !== false && state.status?.enabled !== false
         && state.epoch === epoch && localEdit(origin) && ctx().chat === chat && chat?.at(-1) === last;
     let awaitingConfirmation = false;
+    let current;
+    const permission = state.cameraPermission;
     const cameraAvailable = () => {
         if (settings().camera === false) return false;
         const c = ctx(), group = currentGroup(c), cam = group && cameraOf(c);
         return cam && group.members.includes(cam.avatar);
     };
-    const handoff = async result => {
-        // 普通调度可以在确认后继续，镜头等下一次群收尾。
-        if (result === 'pending-confirmation' && state.collapsed) awaitingConfirmation = true;
+    const valid = () => here() && permission === state.cameraPermission
+        && last?.mes === draft && last?.swipe_id === swipe && !state.leaveWindow?.changes && current?.() && cameraAvailable();
+    const register = () => {
+        const { collapsed, synced, cameraIntent: prior } = state;
+        if (!(collapsed?.before > chat.length) || !valid() || prior?.order >= order) return;
+        const intent = result => handoff(result, true);
+        intent.pending = () => valid() && sameCollapse(collapsed, synced);
+        intent.resume = candidate => valid() && autoDrive(type, intent, candidate).then(intent);
+        if (prior && prior === state.panelConfirmation?.handoff && prior.pending()) state.panelConfirmation.handoff = intent;
+        state.cameraIntent = Object.assign(intent, { order, valid });
+    };
+    const handoff = async (result, confirmed = false) => {
+        if (!confirmed && result === 'pending-confirmation' && state.collapsed) { awaitingConfirmation = true; register(); }
         const off = result?.off;
-        if (awaitingConfirmation || !here() || typeof off !== 'function') return;
+        const eligible = confirmed ? valid : here;
+        if ((!confirmed && awaitingConfirmation) || !eligible() || typeof off !== 'function') return;
         let p = confirmedPermission(ctx());
-        if (!off()) return;
+        if (!off()) { if (!confirmed && state.collapsed && result.source?.()) register(); return; }
         const prior = state.cameraAttempt;
         if (prior?.window === origin.window && prior.epoch === epoch && prior.last === last && prior.active()) return;
         let currentOff = off;
-        const active = () => here() && currentOff() && (!p || canAdopt(p));
+        const active = () => eligible() && currentOff() && (!p || canAdopt(p));
         const attempt = state.cameraAttempt = { window: origin.window, epoch, last, active };
-        const owned = () => state.cameraAttempt === attempt && here();
+        const owned = () => state.cameraAttempt === attempt && eligible();
         // 冷确认可换票；进入镜头后，问答只认进入时的票和凭据。
         const consume = (off, confirmed) => owned() && canAdopt(p = confirmed) && typeof off === 'function' && (currentOff = off)()
             && cameraTurn(type, { here: owned, off, p });
@@ -4646,15 +4800,16 @@ on('GROUP_WRAPPER_FINISHED', (e = {}) => {
             if (state.cameraAttempt === attempt) state.cameraAttempt = null;
         });
     };
+    handoff.captureSource = check => { current ??= check; };
     const confirm = async (off, p, consume) => {
         if (p) return consume(off, p);
         if (!cameraAvailable()) return;
-        const clock = permissionClock(), flight = state.syncFlight;
-        if (flight?.epoch === epoch) await flight.promise;
+        const clock = permissionClock(), flight = state.syncFlight, collapsed = state.collapsed;
+        if (flight?.epoch === epoch && await flight.promise === false && state.syncOwner === flight && state.collapsed !== collapsed) register();
         if (!here() || permissionClock() !== clock || (flight?.epoch === epoch && !cameraAvailable())) return;
         p = confirmedPermission(ctx());
         if (!p && !flight?.full) {
-            if (await syncNow() === false) return;
+            if (await syncNow() === false) { if (state.collapsed !== collapsed) register(); return; }
             p = confirmedPermission(ctx());
         }
         if (!here() || permissionClock() !== clock || !p) return;
