@@ -509,10 +509,21 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             return value;
         },
         'POST /v1/card-choice': b => {
-            const chatKey=str(b.chatKey,'chatKey'),chat=store.requireChat(chatKey),name=str(b.name,'name'),avatar=str(b.avatar,'avatar');
-            if(!store.getCast(chat.story_id).some(p=>p.avatar===avatar&&p.role!=='不用'))return {ok:false,why:'所选卡不在本局名册，请先核对名册'};
-            let choices={};try{choices=JSON.parse(store.getMeta(`card_choices:${chatKey}`)??'{}');}catch{}
-            choices[name]=avatar;store.setMeta(`card_choices:${chatKey}`,JSON.stringify(choices));return {ok:true};
+            const chatKey = str(b.chatKey, 'chatKey'), name = str(b.name, 'name'), avatar = str(b.avatar, 'avatar'), fill = b.mode === 'fill';
+            return store.commitSlot(() => {
+                const { story_id } = store.requireChat(chatKey), key = `card_choices:${chatKey}`;
+                let choices = {};
+                try { choices = JSON.parse(store.getMeta(key) ?? '{}'); }
+                catch { if (fill) return { ok: false, reason: 'choice-invalid' }; }
+                if (fill && (!choices || typeof choices !== 'object' || Array.isArray(choices))) return { ok: false, reason: 'choice-invalid' };
+                const current = fill && Object.hasOwn(choices, name) ? choices[name] : undefined;
+                if (current !== undefined && current !== '' && current !== avatar) return { ok: false, reason: 'choice-changed' };
+                if (!store.getCast(story_id).some(p => p.avatar === avatar && p.role !== '不用')) return { ok: false, why: '所选卡不在本局名册，请先核对名册' };
+                if (current === avatar) return { ok: true };
+                Object.defineProperty(choices, name, { value: avatar, enumerable: true, configurable: true, writable: true });
+                store.setMeta(key, JSON.stringify(choices));
+                return { ok: true };
+            });
         },
         // 快捷按钮：接／让他进来＝进场，不理＝作废
         'POST /v1/leave-ack': b => {

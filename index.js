@@ -3198,7 +3198,21 @@ function mountPanel() {
     });
     panel.addEventListener('click', async event => {
         const target = event.target.closest('button,a');
-        if(target?.dataset.action==='schedule-retry'){try{await retryScheduled();}catch(error){state.note=error.message;render();}return;}
+        if(target?.dataset.action==='schedule-retry'){
+            const click=auto.retryClick=Symbol(), origin=editOrigin(), {chatMetadata}=ctx(), {epoch}=state, previous=auto.executionStatus;
+            const source=()=>permissionView(ctx(),([rows])=>rows), before=source();
+            const current=()=>auto.retryClick===click&&epoch===state.epoch&&localEdit(origin)&&ctx().chatMetadata===chatMetadata&&source()===before;
+            try{
+                const r=await retryScheduled(()=>auto.retryClick===click&&localEdit(origin));
+                if(!(r?.pendingConfirmation||r?.started)||!current()||auto.on===false||auto.executionStatus||auto.driving?.size)return;
+                const {id,source}=r.execution??{}, e=chatMetadata.rpeExecution?.[id], owned=e?.chatKey===origin.chatKey;
+                if(id&&(!owned||e.q?.execution?.source!==source||!['queued','running'].includes(e.result)))return;
+                const who=e?.q?.who, step=r.started?'已到启动步骤，尚未发令':'本次未发令';
+                auto.executionStatus={id,who,result:e?'unconfirmed':'idle',reason:[who,step,e?'请重新核对':''].filter(Boolean).join('，')};
+                render();
+            }catch(error){if(current()&&auto.executionStatus===previous){state.note=error.message;render();}}
+            return;
+        }
         if (target?.dataset.tab) {
             showPage(target.dataset.tab, true);
             if (target.dataset.tab === 'settings') try { const t = await api('tuning', {}); state.dailyBudget = t.knobs.find(k => k.path === 'extractor.dailyBudgetUsd')?.value; state.globalPlay = t.knobs.find(k => k.path === 'play.mode')?.value ?? 'full'; render(); } catch {}
@@ -4089,11 +4103,17 @@ async function autoDrive(type, handoff, ready) {
             if (!permission || (!pass && ready && permission !== ready)) return pending();
             const ticket = state.autoTicket = (state.autoTicket ?? 0) + 1;
             const adopt = () => ticket >= (state.autoAdopted?.ticket ?? 0) && canAdopt(permission);
+            const { leaveWindow: gate, syncOwner, synced, panelMessageChange, permissionChanges: clock } = state, change = gate?.change, meta = c.chatMetadata;
+            const still = original => ticket === state.autoTicket && state.leaveWindow === gate && gate?.change === change && !gate?.changes
+                && settings().enabled && state.opened !== false && state.status?.enabled !== false && !state.syncFlight && !state.dirty && !state.collapsed
+                && state.pendingSyncEpoch !== epoch && state.syncOwner === syncOwner && state.synced === synced && currentGroup(ctx()) === group
+                && state.panelMessageChange === panelMessageChange && state.epoch === epoch && localTarget(c, loadedWindow) && ctx().chatMetadata === meta
+                && (!original || state.permissionChanges === clock && permission.rows.every((row, i) => c.chat[i] === row) && permissionView(c) === view);
             const enabled = state.autoAdopted?.synced === state.synced ? state.autoAdopted?.enabled : undefined;
             if (!pass && (ready || peek === 'expired') && enabled === false) return off(adopt);
             if (!pass && peek === 'expired' && enabled !== true) return pending();
             localVersion=version();
-            let r = null;
+            let r = null, view = typeof permissionView === 'function' && permissionView(c);
             try { r = await api('turn', { chatKey, present: presentNames(ctx()), recentUser: [...ctx().chat].reverse().find(m => m.is_user)?.mes ?? '' }, 240000); }
             catch { if (!adopt() || !current()) return false;
                 auto.unavailable = true;
@@ -4102,6 +4122,7 @@ async function autoDrive(type, handoff, ready) {
             const adopted = adopt(), sameInputs = current() && inputs() === sourceInputs;
             if (sameInputs && version() !== localVersion) continue;
             if (!adopted || !sameInputs) return pending(sameInputs && permission);
+            if ((r.knock?.execution || r.queue?.[0]?.execution) && !still(false)) return {started:false,pendingConfirmation:true};
             state.autoAdopted = { ticket, enabled: !!r?.enabled, synced: state.synced };
             console.log('[RP：幕后] 谁接', JSON.stringify({ queue: r.queue, knock: r.knock, waiting: r.waiting, left: r.left, lapsed: r.lapsed, why: r.why }));
             const applied = await autoApply(r, adopt);
@@ -4113,12 +4134,13 @@ async function autoDrive(type, handoff, ready) {
                 let ok = false;
                 try { ok = await work(); }
                 catch (error) { auto.executionStatus = { result:'error', reason:error.message }; }
+                if (ok?.pendingConfirmation || ok?.started) return ok;
                 if (ok) { auto.lastTurn = key; auto.blocked = null; }
                 else { auto.blocked = { key, version:version(), reason:auto.executionStatus?.reason??'未落消息，请核对后重试' }; }
                 render(); return ok;
             };
             if (r.knock) {
-                const ok=await complete(()=>autoKnock(r.knock));
+                const ok=await complete(()=>autoKnock(r.knock,still));
                 if(ok||auto.executionStatus?.result!=='replan')return ok;
                 auto.blocked=null;continue;
             }
@@ -4131,14 +4153,14 @@ async function autoDrive(type, handoff, ready) {
                 else auto.blocked={key,version:version(),reason:r.why||'在场或身份需要核对，请纠正后重试'};
                 auto.executionStatus={result:r.complete===true?'idle':'paused',reason:r.why||'等你下一句'};render();return false;
             }
-            const ok=await complete(()=>autoSpeak(next));
+            const ok=await complete(()=>autoSpeak(next,still));
             if(ok||auto.executionStatus?.result!=='replan')return ok;
             auto.blocked=null;
         }
         auto.executionStatus={result:'waiting',reason:'系统在重新核对在场，稍后接上'};render();return false;
     } finally { driving.delete(claim); }
 }
-async function runScheduled(q, prepare) {
+async function runScheduled(q, prepare, still) {
     const c=ctx(),chatKey=state.chatKey,epoch=state.epoch,chat=c.chat;
     if (!localTarget(c)) return false;
     const journal=c.chatMetadata.rpeExecution??={};
@@ -4161,11 +4183,14 @@ async function runScheduled(q, prepare) {
         Object.entries(c.chatMetadata.rpeCardChoices?.[chatKey]??{}).filter(([,choice])=>choice?.avatar).map(([name,choice])=>[name,choice.avatar]).sort(([a],[b])=>a.localeCompare(b))]);
     let roles;
     const guard=()=>{
+        if(!issued&&!reporting&&!fresh())throw Error('执行来源已失效，请重新确认');
         if(!settings().enabled||state.chatKey!==chatKey||state.epoch!==epoch||!localTarget(c)||snapshot()!==prefix)throw Error('来源或聊天已改变，请重新核对');
         if(roles!==undefined&&roleSnapshot()!==roles)throw Error('卡身份或档位已改变，请重新核对');
+        if(still&&prepared&&!issued&&!reporting)checkPreparation?.();
     };
     const landed=()=>{const m=chat[length];return m&&!m.is_user&&!m.is_system&&String(m.mes??'').trim()&&(q.avatar?speakerOf(m,fallbackAvatar(c))===q.avatar:m.name===q.who)?m:null;};
     const report=async(result,reason)=>{
+        reporting=true;
         guard();auto.executionStatus={who:q.who,result,reason,id};
         const saved = result === 'delivered' ? landed() : null;
         const reply = saved ? { pos: length, fp: fingerprintMessage(saved, speakerOf(saved, fallbackAvatar(c))), sw: saved.swipe_id ?? 0, sentAt: saved.send_date ?? null } : null;
@@ -4184,34 +4209,49 @@ async function runScheduled(q, prepare) {
         render();
     };
     let prepared,issued=false,previousAttempt=['running','unconfirmed','cancelled','error','waiting','delivered'].includes(owned()?.result);
-    let checkPreparation, preparationInvalid;
+    let checkPreparation, preparationInvalid, sourceChanged, recordPreparation, started=false, revoked=false, reporting=false;
+    const choiceReady=()=>{const choice=c.chatMetadata.rpeCardChoices?.[chatKey]?.[q.who];return !choice?.avatar||choice.synced;};
+    const fresh=(checkSource=false)=>!still||!revoked&&(roles===undefined||choiceReady())&&still(!checkPreparation)&&!(checkSource&&sourceChanged?.());
     const gate=state.leaveWindow, change=gate?.change, window=state.loadedWindow;
     const preparationStopped=()=>!settings().enabled||state.opened===false||state.status?.enabled===false||state.leaveWindow!==gate
         ||gate?.changes||gate?.change!==change||state.epoch!==epoch||state.chatKey!==chatKey||!localTarget(c,window);
     const preparation=(avatar=q.who==='旁白'||q.role==='旁白'?cameraOf(c)?.avatar:q.avatar??cardNamed(c,q.who)?.avatar)=>{
+        if(still)guard();
         const group=currentGroup(c), meta=c.chatMetadata, rows=chat.slice();
         const read=()=>permissionView(c,([messages,roster,,anchors,decisions])=>({
-            messages,decisions,roles:roleSnapshot(),members:group?.members??[],
+            messages,decisions:decisions??{},roles:roleSnapshot(),members:group?.members??[],
                 camera:cameraOf(c)?.avatar, present:[c.name1,...roster.filter(m=>m.avatar!==avatar&&!m.disabled&&m.name).map(m=>m.name)],
                 card:c.characters?.filter(ch=>ch.avatar===avatar).map(ch=>[ch.name,isCamera(ch)]),
                 disabled:!!group?.disabled_members?.includes(avatar), opening:!!meta.rp_emergence?.openingMuted?.includes(avatar),
             anchors:anchors?anchors[avatar]??{}:anchorsUnknown(c)?false:null, manual:!!meta.rpeManualMuted?.[avatar],
         }));
         const expected=JSON.parse(read());
+        sourceChanged=()=>chat.length===rows.length&&permissionView(c,([messages])=>messages)!==JSON.stringify(expected.messages);
         const opened=(name,segment,anchor=expected.anchors?.segments?expected.anchors:{brief:'',keepBefore:1,segments:[]})=>
             Object.fromEntries(Object.entries({...anchor,name,segments:[...anchor.segments,structuredClone(segment)]})
                 .sort(([a],[b])=>a<b?-1:a>b?1:0));
         const check=checkPreparation=(key,resolved=avatar)=>{
-            if(key)expected[key]=key==='members'?[...expected.members,avatar]:false;
+            if(!fresh())throw Error('执行来源已失效，请重新确认');
+            if(key&&!(still&&key==='members'&&expected.members.includes(avatar)))expected[key]=key==='members'?[...expected.members,avatar]:false;
             const actual=!preparationInvalid&&!preparationStopped()&&resolved===avatar&&ctx().chatMetadata===meta&&currentGroup(ctx())===group
                 &&chat.length===rows.length&&rows.every((m,i)=>chat[i]===m)&&expected.anchors!==false&&read();
             if(actual===JSON.stringify(expected))return;
             if(actual&&key==='disabled'&&q.execution?.kind==='knock'&&expected.anchors?.segments?.every(s=>s.to!=null)!==false)
                 expected.anchors=opened(expected.card?.[0]?.[0],{from:length,fromDate:String(rows.at(-1)?.send_date??''),to:null,toDate:''});
-            if(actual!==JSON.stringify(expected))throw preparationInvalid??=Error('准备期间在场权限或聊天已改变，请重新核对');
+            if(actual===JSON.stringify(expected))return;
+            // 只有目标区间重投影时，交给发令前的在场检查处理。
+            if(started&&!issued&&actual&&expected.anchors?.segments){
+                const projected=JSON.parse(actual),spans=projected.anchors?.segments;
+                if(spans&&JSON.stringify({...projected,anchors:{...projected.anchors,segments:expected.anchors.segments}})===JSON.stringify(expected)){
+                    if(spans.some(s=>s.from<=length&&(s.to==null||s.to>length)))return;
+                    if(owned()?.result==='running')(auto.unissuedProjection??=new WeakSet()).add(owned());
+                }
+            }
+            if(still&&(started||actual&&JSON.stringify(JSON.parse(actual).messages)!==JSON.stringify(expected.messages)))revoked=true;
+            throw preparationInvalid??=Error('准备期间在场权限或聊天已改变，请重新核对');
         };
-        const opening=({name})=>({capture:(_anchor,segment)=>{expected.anchors=opened(name,segment);},opened(){}});
-        return {check,opening,stopped:()=>preparationInvalid&&preparationStopped()};
+        const opening=({name})=>({capture:(_anchor,segment)=>{expected.anchors=opened(name,segment);if(still)recordPreparation();},opened(){}});
+        return {check,opening,stopped:()=>!fresh(true)||preparationInvalid&&preparationStopped()};
     };
     try{
         guard();
@@ -4219,10 +4259,13 @@ async function runScheduled(q, prepare) {
             &&speakerOf(m,fallbackAvatar(c))===(q.avatar??(q.who==='旁白'?'narrator':null))))return true;
         // 冷缓存先读名册并完成当前目标的认卡，再取执行基线；等待真实请求而非定时延迟。
         if(!state.boardCast?.length){const r=await api('cast',{chatKey});guard();state.boardCast=r.cast??[];}
-        if(q.role!=='旁白'&&q.who!=='旁白'){await resolveCard(q.who,q.avatar,{interactive:false});guard();}
-        roles=roleSnapshot();
+        if(q.role!=='旁白'&&q.who!=='旁白')await resolveCard(q.who,q.avatar,{interactive:false});
+        roles=roleSnapshot();guard();
         if(landed()){await report('delivered',`${q.who}的消息已落下`);return true;}
         const savedResult=owned()?.result;
+        if(still&&savedResult==='running'&&auto.unissuedProjection?.has(owned())){
+            await report('muted','系统在重新核对在场，稍后接上');auto.executionStatus.result='replan';return false;
+        }
         if(['running','unconfirmed','cancelled','error','waiting','delivered'].includes(savedResult)){
             previousAttempt=true;
             throw Object.assign(Error('这次生成已发出或已停止，请核对消息后点重试'),{result:savedResult==='cancelled'?'cancelled':'unconfirmed'});
@@ -4254,19 +4297,24 @@ async function runScheduled(q, prepare) {
             await c.saveChat?.();guard();
         }
         if(auto.executionStatus?.result==='replan')auto.executionStatus=null;
-        try{if(preparationStopped())return false;prepared=await prepare(preparation);guard();checkPreparation?.();checkPreparation=null;}
-        finally{
+        recordPreparation=()=>{
             if(ownsPreparation&&state.chatKey===chatKey&&state.epoch===epoch&&localTarget(c,undefined,{requireHead:true})){
-                const added=(c.chatMetadata.contextIsolation?.anchors?.[avatar]?.segments??[]).map(segmentKey).filter(key=>!existing.has(key));
+                const previous=owned()?.preparation;
+                const segments=(c.chatMetadata.contextIsolation?.anchors?.[avatar]?.segments??[]).map(segmentKey)
+                    .filter(key=>!existing.has(key)||previous?.segments?.includes(key));
                 const disabledAfter=!!currentGroup(c)?.disabled_members?.includes(avatar);
                 const muteOwned=!disabledAfter&&(wasDisabled||muteOwners.length>0);
-                if(added.length||wasDisabled!==disabledAfter||muteOwned){
-                    journal[id]={...owned(),chatKey,q,avatar,at:length,preparation:{owner,segments:added,segmentOwned:added.length>0,muteOwned,
+                const save=segments.some(key=>!existing.has(key))||wasDisabled!==disabledAfter||muteOwned;
+                if(save||previous?.segments?.length>segments.length){
+                    journal[id]={...owned(),chatKey,q,avatar,at:length,preparation:{owner:previous?.owner??owner,
+                        segments,segmentOwned:segments.length>0,muteOwned,
                         openingMuted:openingMuted||muteOwners.some(e=>e.preparation.openingMuted)}};
-                    await c.saveMetadata();guard();
+                    return save;
                 }
             }
-        }
+        };
+        try{if(preparationStopped())return false;prepared=await prepare(preparation);guard();if(!still){checkPreparation?.();checkPreparation=null;}}
+        finally{if(fresh(!prepared)&&recordPreparation()){await c.saveMetadata();guard();}}
         const target=prepared.avatar??q.avatar??currentGroup(ctx())?.members?.[prepared.at];
         const presence=()=>JSON.stringify([ctx().chatMetadata.contextIsolation?.anchors?.[target]?.segments??[],ctx().chatMetadata.rpeManualMuted?.[target]??null]);
         const preparedPresence=presence();
@@ -4274,6 +4322,7 @@ async function runScheduled(q, prepare) {
             ctx().chatMetadata.contextIsolation?.anchors?.[target]?.rpeManualRevision??null]);
         const preparedManual=manual();
         if(chat.length!==length)throw Error('已有新消息，停下重新核对');
+        if(still)guard();started=!!q.execution;
         if(q.execution){const r=await api('turn-result',{chatKey,id:q.execution.id,result:'start'});guard();if(!r.ok)throw Object.assign(Error(r.why),{result:r.replan?'replan':'unconfirmed'});if(r.execution?.state==='delivered')return true;}
         journal[id]={...owned(),chatKey,result:'running',avatar:q.avatar,at:length,q,reason:`正在叫${q.who}`};await c.saveMetadata();guard();
         auto.executionStatus={who:q.who,result:'running',reason:`正在叫${q.who}`,id};render();
@@ -4303,6 +4352,13 @@ async function runScheduled(q, prepare) {
         if(landed()){await report('delivered',`${q.who}的消息已落下`);return true;}
         await report('unconfirmed',`${q.who}的生成已返回，但没找到本人新消息，请核对后重试`);return false;
     }catch(error){
+        if(!issued&&!fresh(true)){
+            if(started||!still(false))return {started,pendingConfirmation:!started};
+            const reason=`${previousAttempt?'':'尚未发出生成命令；'}${error.message}`;
+            if(q.execution)journal[id]??={chatKey,q,avatar:q.avatar,at:length,result:'unconfirmed',reason};
+            auto.executionStatus={who:q.who,result:'unconfirmed',reason,id};globalThis.toastr?.warning(reason,'接话已停下');
+            render();return {started,pendingConfirmation:true};
+        }
         if(checkPreparation&&preparationStopped())return false;
         if(state.chatKey!==chatKey||state.epoch!==epoch||!localTarget(c))return false;
         if(error.result==='replan'&&!issued&&!previousAttempt){
@@ -4335,15 +4391,28 @@ function scheduledStatusHtml() {
     for(const p of board?.people??[])if(['present','remote'].includes(p.status)&&currentGroup(c)?.disabled_members?.includes(p.avatar))lines.push(`${p.name}在场，${c.chatMetadata?.rp_emergence?.openingMuted?.includes(p.avatar)?'系统静音待核对':'手动静音，暂停发言'}`);
     return review+lines.filter(Boolean).map(line=>`<div>${escapeHtml(line)}</div>`).join('')+(!off&&status&&['muted','error','cancelled','unconfirmed','running','waiting','paused'].includes(status.result)?'<button class="menu_button" data-action="schedule-retry" title="先核对是否已有本人消息，再重试">核对后重试接话</button>':'');
 }
-async function retryScheduled() {
+async function retryScheduled(latest = () => true) {
     if(auto.on===false)return false;
     const c=ctx(),chatKey=state.chatKey,epoch=state.epoch;
     if(auto.executionStatus?.result==='paused'){auto.blocked=null;return autoDrive('normal');}
-    const here=()=>chatKey===state.chatKey&&epoch===state.epoch&&ctx().chat===c.chat;
-    const requeue=()=>{auto.blocked=null;auto.lastTurn=null;auto.executionStatus=null;render();return autoDrive('normal');};
-    const entry=Object.entries(c.chatMetadata.rpeExecution??{}).filter(([,e])=>e.chatKey===chatKey&&e.q&&e.result!=='superseded').at(-1);
+    const here=()=>chatKey===state.chatKey&&epoch===state.epoch&&ctx().chat===c.chat&&latest();
+    const requeue=async execution=>{auto.blocked=null;auto.lastTurn=null;auto.executionStatus=null;render();
+        const r=await autoDrive('normal');return r?.pendingConfirmation||r?.started?{...r,execution}:r;
+    };
+    const entries=Object.entries(c.chatMetadata.rpeExecution??{}).filter(([,e])=>e.chatKey===chatKey&&e.q&&e.result!=='superseded');
+    const entry=entries.find(([id])=>id===auto.executionStatus?.id)??entries.at(-1);
     if(!entry)return requeue();
     const [id,e]=entry;
+    const metadata=c.chatMetadata, previous=auto.executionStatus;
+    const confirmed=async()=>{
+        e.result='delivered';e.reason='已核实本人消息，无需重发';
+        await c.saveMetadata();
+        if(here()&&auto.on!==false&&ctx().chatMetadata===metadata&&auto.executionStatus===previous){
+            auto.executionStatus={id,who:e.q.who,result:'delivered',reason:e.reason};
+            render();
+        }
+        return true;
+    };
     if(activeGeneration())throw Error('生成还在进行，请先停止或等它完成');
     if(await syncNow(true)===false)throw Error('消息还没核对完成');
     if(!here())return false;
@@ -4358,17 +4427,20 @@ async function retryScheduled() {
             await c.saveMetadata();
             return here()?requeue():false;
         }
-        if(r.execution.state==='delivered'){e.result='delivered';e.reason='已核实本人消息，无需重发';await c.saveMetadata();render();return true;}
+        if(r.execution.state==='delivered')return confirmed();
         if(r.item){
             e.result='superseded';
             c.chatMetadata.rpeExecution[r.execution.id]={chatKey,result:'queued',avatar:r.item.avatar,at:c.chat.length,q:r.item};
-        }else {e.result='queued';e.q.execution=r.execution;}
-    }else if(c.chat.slice(e.at).some(m=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()&&speakerOf(m,fallbackAvatar(c))===e.avatar)){e.result='delivered';await c.saveMetadata();render();return true;}
+        }else {e.result='queued';delete e.reason;e.q.execution=r.execution;}
+        await c.saveMetadata();return here()?requeue(r.execution):false;
+    }else if(c.chat.slice(e.at).some(m=>!m.is_user&&!m.is_system&&String(m.mes??'').trim()
+        &&speakerOf(m,fallbackAvatar(c))===e.avatar))return confirmed();
     if(!e.q.execution)delete c.chatMetadata.rpeExecution[id];
     await c.saveMetadata();return here()?requeue():false;
 }
 // 叫一个人说：旁白走旁白卡；静音着的（这会儿不在场）不叫
 async function autoSpeak(q) {
+    const still = arguments[1];
     return runScheduled(q,async preparation=>{
         const c=ctx(),group=currentGroup(c);
         if(!group)throw Error('当前群不存在');
@@ -4377,7 +4449,8 @@ async function autoSpeak(q) {
         const ch=camera?cameraOf(c):await resolveCard(q.who,q.avatar,{interactive:false});
         if(!ch || q.avatar&&ch.avatar!==q.avatar)throw Error(`${q.who}的卡未能唯一匹配，请确认卡文件`);
         check(undefined,ch.avatar);
-        if(q.enter&&!group.members.includes(ch.avatar))await changeMembers([ch.avatar],()=>run(`/member-add ${ch.avatar}`))
+        if(q.enter&&!group.members.includes(ch.avatar))await changeMembers([ch.avatar],()=>run(`/member-add ${ch.avatar}`),undefined,
+            still&&(()=>check('members',ch.avatar)))
             .then(()=>check('members',ch.avatar));
         const at=group.members.indexOf(ch.avatar);
         if(at<0)throw Error(`${q.who}不在当前群里，请先核对成员`);
@@ -4385,7 +4458,8 @@ async function autoSpeak(q) {
             const manual=c.chatMetadata.rpeManualMuted?.[ch.avatar];
             const owned=!manual&&c.chatMetadata.rp_emergence?.openingMuted?.includes(ch.avatar);
             if(manual||!owned&&!q.back&&!q.enter)throw Error(`${q.who}现在手动静音中，要发言请解除静音后重试`);
-            await setMemberMuted(ch.avatar,false).then(()=>check('disabled',ch.avatar));
+            if(still)await setMemberMuted(ch.avatar,false,undefined,undefined,()=>check('disabled')).then(()=>check('disabled',ch.avatar));
+            else await setMemberMuted(ch.avatar,false).then(()=>check('disabled',ch.avatar));
             if(currentGroup(ctx()).disabled_members?.includes(ch.avatar))throw Error(`${q.who}解除静音后核实失败`);
             if(owned){c.chatMetadata.rp_emergence.openingMuted=c.chatMetadata.rp_emergence.openingMuted.filter(a=>a!==ch.avatar);
                 check('opening',ch.avatar);await c.saveMetadata();check();}
@@ -4393,10 +4467,11 @@ async function autoSpeak(q) {
         if(q.back||q.enter){await openPresence(ch,q.enter?.at,opening(ch));check();}
         auto.noRepeat=q.noRepeat?ch.avatar:null;
         return {at,avatar:ch.avatar};
-    });
+    },still);
 }
 // 后台说该叩门了：拉进群、取消静音、从这条起在场（区间）、让他自己写那一条；他那条落下时 MESSAGE_RECEIVED 给它记号
 async function autoKnock(k) {
+    const still = arguments[1];
     return runScheduled(k,async preparation=>{
         const {check,opening,stopped}=preparation();
         const c=ctx(),group=currentGroup(c),ch=await resolveCard(k.who,k.avatar,{interactive:false});
@@ -4410,8 +4485,14 @@ async function autoKnock(k) {
             const remove=opened&&anchor?.segments?.includes(opened)&&JSON.stringify(opened)===openedKey;
             if(remove)anchor.segments=anchor.segments.filter(s=>s!==opened);
             const owned=c.chatMetadata.rpeExecution?.[k.execution?.id]?.preparation;
-            if(owned){owned.segments=[];owned.segmentOwned=false;owned.muteOwned=false;}
+            if(owned){
+                const keys=(anchor?.segments??[]).map(s=>fingerprintMessage({mes:JSON.stringify(s)},ch.avatar));
+                owned.segments=owned.segments.filter(key=>keys.includes(key));
+                owned.segmentOwned=owned.segments.length>0;
+                if(!owned.segmentOwned)owned.muteOwned=false;
+            }
             if((remove||persist&&owned)&&localTarget(c,undefined,{requireHead:true}))await c.saveMetadata();
+            if(still&&stopped())return;
             const liveGroup=currentGroup(ctx()),restoreMute=wasDisabled&&liveGroup&&liveGroup.id==group.id&&!liveGroup.disabled_members?.includes(ch.avatar)&&localTarget(c);
             if(restoreMute&&!localTarget(c,undefined,{requireHead:true})){(liveGroup.disabled_members??=[]).push(ch.avatar);followBase();}
             else if(restoreMute){await setMemberMuted(ch.avatar,true);const restored=currentGroup(ctx());if(restored?.id!=group.id||!restored?.disabled_members?.includes(ch.avatar))throw Error('叩门静音恢复核实失败');}
@@ -4421,16 +4502,17 @@ async function autoKnock(k) {
         try{
             if(!group.members.includes(ch.avatar)){await run(`/member-add ${ch.avatar}`);check('members',ch.avatar);}
             const at=group.members.indexOf(ch.avatar);if(at<0)throw Error('叩门角色没有加入群');
-            if(wasDisabled){await setMemberMuted(ch.avatar,false);check('disabled',ch.avatar);}
+            if(wasDisabled){await setMemberMuted(ch.avatar,false,undefined,undefined,still&&(()=>check('disabled',ch.avatar)));check('disabled',ch.avatar);}
             if(group.disabled_members?.includes(ch.avatar))throw Error('叩门解除静音未落实');
             await openPresence(ch,null,opening(ch));
+            if(still&&stopped())check();
             opened=(c.chatMetadata.contextIsolation?.anchors?.[ch.avatar]?.segments??[]).find(s=>!existing.has(s));
             openedKey=JSON.stringify(opened);
             auto.pending.set(ch.avatar,{who:ch.name,way:k.way});
             return {at,avatar:ch.avatar,rollback};
         }catch(error){if(!stopped())await rollback();throw error;}
         finally{release();followBase();}
-    });
+    },still);
 }
 // 他走了（后台已经记了去向）、这次叩门作废了（他没进过场）：关区间、静音，不移出群
 const ackLeave=(chatKey,receipt)=>api('leave-ack',{chatKey,receipts:[receipt]});
@@ -4906,20 +4988,20 @@ function acquireMemberChange(avatar) {
         if(count>1)entering.set(avatar,count-1);else entering.delete(avatar);
     };
 }
-async function changeMembers(avatars, apply, beforeSave) {
+async function changeMembers(avatars, apply, beforeSave, still) {
     const c=ctx(),group=currentGroup(c),releases=[...new Set(avatars)].map(acquireMemberChange);
     try { return await apply(); }
     finally {
         // ST 没发 GROUP_UPDATED 或命令部分成功后报错时，也让基线跟上。
-        try { if(ctx().chat===c.chat&&currentGroup(ctx())===group){watchMembers(beforeSave);followBase();} }
+        try { if(ctx().chat===c.chat&&currentGroup(ctx())===group&&(still?.()??true)){watchMembers(beforeSave);followBase();} }
         finally { for(const release of releases)release(); }
     }
 }
 // 系统改静音统一从这里走；直接保存名单也使用同一个 changeMembers。
-async function setMemberMuted(avatar, disabled, execute = run, beforeSave) {
+async function setMemberMuted(avatar, disabled, execute = run, beforeSave, still) {
     const group=currentGroup(ctx()),at=group?.members.indexOf(avatar)??-1;
     if(at<0)return;
-    return changeMembers([avatar],()=>execute(`/member-${disabled?'disable':'enable'} ${at}`),beforeSave);
+    return changeMembers([avatar],()=>execute(`/member-${disabled?'disable':'enable'} ${at}`),beforeSave,still);
 }
 function cardNamed(c, who, avatar = null) {
     const group=currentGroup(c),members=group?.members??[c.characters?.[c.characterId]?.avatar].filter(Boolean);
@@ -4931,14 +5013,16 @@ async function resolveCard(who, avatar = null, { interactive = true, retry = fal
     if (String(avatar??'').startsWith('face:')) return null;
     if (!group) return cardNamed(c,who,avatar??cards[c.characterId]?.avatar);
     const choices=(c.chatMetadata.rpeCardChoices??={})[chatKey]??={};
-    const remember=async ch=>{
+    const remember=async (ch,fill=true)=>{
         if(!ch||!here())return null;
         if(choices[who]?.avatar===ch.avatar&&!choices[who].synced){
             const choice=choices[who];
+            const previousStatus=choice.status;
             choice.status='unsaved';
             try {
-                const r=await api('card-choice',{chatKey,name:who,avatar:ch.avatar});
+                const r=await api('card-choice',{chatKey,name:who,avatar:ch.avatar,...(fill?{mode:'fill'}:{})});
                 if(!here()||choices[who]!==choice)return null;
+                if(!r.ok&&r.reason==='choice-changed'){if(!choice.synced&&choice.status==='unsaved')choice.status=previousStatus;return null;}
                 if(!r.ok)throw Error(r.why||'认卡选择尚未保存');
                 choice.synced=true;choice.status='confirmed';await c.saveMetadata();
             } catch(error) { if(here()){choice.synced=false;choice.status='unsaved';state.note=`认卡后台未保存：${String(error.message).slice(0,100)}；可以重新认卡。`;await c.saveMetadata();render();}throw error; }
@@ -4973,7 +5057,7 @@ async function resolveCard(who, avatar = null, { interactive = true, retry = fal
         // 取消一次选择不抹掉先前确认的身份；没有确认过的保持可重试。
         choices[who]=ch?{status:'unsaved',avatar:ch.avatar,synced:false}:previous?.avatar?{...previous,status:'cancelled'}:{status:'cancelled',avatar:null};
         await c.saveMetadata();if(!here())return null;
-        return remember(ch);
+        return remember(ch,false);
     } finally { if(state.cardFlight===task)state.cardFlight=null;if(here())render(); }
 }
 async function resolveCastChoices(names = []) {

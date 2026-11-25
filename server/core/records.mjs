@@ -1,5 +1,6 @@
 import { freshChain } from './store.mjs';
 import { isPrivate, visibilityTag, visOf, visibleTo } from './visibility.mjs';
+import { isSelfLabel } from '../extension/sync.mjs';
 import { parseOutput } from './extract.mjs';
 import { sameIdentity } from './cast.mjs';
 import { sourceRows, emptySegment } from './landing.mjs';
@@ -126,6 +127,7 @@ export function legacyMenuCopies(db, chatKey) {
     return out;
 }
 
+const LISTENS = Symbol('phone listeners');
 function canAuthorizeListener(channel, proof, name, legacyReaders) {
     if (channel?.way !== '电话' || !proof) return channel?.way === '电话' && legacyReaders.includes(name);
     const prior = visibilityTag(proof.channel);
@@ -182,24 +184,38 @@ export function recordAudienceFor(db, chatKey) {
         const proof = known?.find(entry => Array.isArray(entry?.bystanders));
         const channel = visOf(message);
         const readers = !proof && channel?.way === '电话' && (!r.source_instance || JSON.parse(r.source_instance)?.legacy) ? legacyListeners(r) : [];
+        const listens = name => canAuthorizeListener(channel, proof, name, readers);
+        if (channel?.way === '电话') Object.defineProperty(r, LISTENS, { value: listens, configurable: true });
         return audience.filter(name => name === r.holder_name || visibleTo({ message, viewer: name, userName, roster })
-            || canAuthorizeListener(channel, proof, name, readers));
+            || listens(name));
     };
 }
 
 // record 须是已过现有来源检查的普通账，audience 须是当前投影后的数组。
-export function decideRecordKnowledge(record, reader, { speakerName, names, sourceOf, stableNameAt, same, userName }) {
-    const source = sourceOf(record), { avatar, kind } = reader;
-    if (!source || !Array.isArray(record.audience)) return { allow: false, reason: 'source-pending' };
+export function decideRecordKnowledge(record, reader, { speakerName, names, sourceOf, same, userName, projected, stableNameAt = () => projected }) {
+    if (!Array.isArray(record.audience)) return { allow: false, reason: 'source-pending' };
     const known = recordKnownTo(record, speakerName, same);
-    if (kind !== 'card') return { allow: known, reason: known ? 'legacy-name' : 'denied' };
-    const member = names(speakerName);
-    if (![...(member.avatars ?? [])].includes(avatar)) return { allow: false, reason: 'identity-pending' };
+    const legacy = { allow: known, reason: known ? 'legacy-name' : 'denied' };
+    const { avatar, kind } = reader;
+    if (projected && (!known && record.holder !== avatar || record.job_id == null || record.source_basis)) return legacy;
+    const source = sourceOf(record);
+    if (!source) return { allow: false, reason: 'source-pending' };
+    if (kind !== 'card') return legacy;
     const channel = visOf(source);
     if (channel === false) return { allow: false, reason: 'source-pending' };
+    const personal = ['心里', '余波'].includes(record.type), privateSource = isPrivate(source), publicRecord = !personal && !privateSource;
+    if (projected && publicRecord && known && record.holder === avatar) return legacy;
     if (record.holder === avatar) return source.speaker === avatar
+        && (!projected || publicRecord && !record.source_unknown || known && [record.holder_name, source.name].includes(speakerName))
         ? { allow: true, reason: 'exact-holder' } : { allow: false, reason: 'source-pending' };
-    if (!known || ['心里', '余波'].includes(record.type)) return { allow: false, reason: 'denied' };
+    const viewer = { avatar, name: speakerName };
+    if (projected && !personal && privateSource && !record.source_unknown && visibleTo({ message: source, viewer })) return legacy;
+    const member = names(speakerName);
+    if (projected && !personal && !privateSource && !member.avatars) return legacy;
+    if (![...(member.avatars ?? [])].includes(avatar)) return { allow: false, reason: 'identity-pending' };
+    if (record.holder === `name:${speakerName}` && member.status === 'unique') return { allow: true, reason: 'legacy-name' };
+    if (projected && record.source_unknown) return { allow: false, reason: 'source-pending' };
+    if (!known || personal) return { allow: false, reason: 'denied' };
     const labels = record.audience.filter(label => label && same(label, speakerName)).map(label => ({ label, ...names(label) }));
     const unique = labels.filter(({ status, avatars }) => status === 'unique' && avatars.next().value === avatar);
     if (!unique.length) {
@@ -208,9 +224,8 @@ export function decideRecordKnowledge(record, reader, { speakerName, names, sour
     }
     const stable = unique.filter(({ label }) => stableNameAt?.(record, label));
     if (!stable.length) return { allow: false, reason: 'identity-pending' };
-    const viewer = { avatar, name: speakerName };
-    if (isPrivate(source) && !visibleTo({ message: source, viewer, roster: [viewer] })
-        && (channel.way !== '电话' || stable.every(({ label }) => ['user', '玩家', 'narrator', '旁白', userName].includes(label))))
+    if (privateSource && !visibleTo({ message: source, viewer, roster: [viewer] })
+        && (channel.way !== '电话' || stable.every(({ label }) => isSelfLabel(label, userName) && !record[LISTENS]?.(label))))
         return { allow: false, reason: 'denied' };
     return { allow: true, reason: 'legacy-name' };
 }

@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { selectMaterial, renderPlain, finish, dayIndex, relativeDay, timeSkipIn, expiredTodo, placeRecall, faceRecall, recordKnownTo } from './recall.mjs';
 import { isPrivate, visibleTo } from './visibility.mjs';
-import { declarationGroupsOf } from './store.mjs';
+import { declarationGroupsOf, memberReaderKind } from './store.mjs';
 import { renderNarrative, narrativeState } from './assemble.mjs';
 import { matchPrices, priceLines, talksMoney, talksJobs, tiersNamed, tierPrice, standingLines, scopeOf, planPriceLines, matchHousing, housingLines } from './pricing.mjs';
 import { buildLedger, moneyLines, amountsIn, balanceLines, balances, namedParties } from './money.mjs';
@@ -379,10 +379,16 @@ export function lazyBoardAt(store, records, chatKey) {
 function materialFor(store, records, { chatKey, speaker, name, anchor = null, recent, recentUser, present, queryKeys = [], pool, sense = null, skipOpen = null, scale = 1, guard = null, boardAt = null }) {
     const chat = store.requireChat(chatKey);
     const messages = store.currentMessages(chatKey);
+    const through = anchor === 'start' ? -1 : Number(/^(\d+):.+$/.exec(anchor ?? '')?.[1] ?? Infinity) - 1;
+    let decide;
+    const knowsRecord = memberReaderKind(speaker) === 'card' && store.recordKnowledgeFor ? r => {
+        decide ??= store.recordKnowledgeFor({ chatKey, avatar: speaker, kind: 'card' }, { speakerName: name, through, projected: true });
+        return decide(r).allow;
+    } : undefined;
     // 她的伤病那几条按守门过（预跑别人那一格时也一样：组装好的会被留着直接用）
     const keep = (guard ?? bodyGuardFor(store, records, chatKey, { anchor, recentUser, knower: name, speaker })).keep;
     const material = selectMaterial({
-        name, avatar: speaker, present, messages, records: records.visible(chatKey).filter(keep),
+        name, avatar: speaker, present, messages, records: records.visible(chatKey).filter(keep), knowsRecord,
         openIdeaIds: new Set(records.openIdeas(chatKey).map(r => r.id)), recent, recentUser, queryKeys, queryWide: queryKeys.wide ?? [], sense,
         recalled: store.recentSlotIds?.({ chatKey, speaker, anchor }) ?? new Map(),
         timeMarks: timeMarksFor(store, records, chatKey), timeRecs: records.visible(chatKey).filter(r => r.type === '时间'),
@@ -391,8 +397,12 @@ function materialFor(store, records, { chatKey, speaker, name, anchor = null, re
     });
     const historyTimeline = timelineFor(store, records, chatKey, messages, { seen: true });
     material.historyWhen = r => r.lesson || material.state.includes(r) || material.open.includes(r) ? material.when(r) : historyTime(historyTimeline, r.pos);
+    const cut = { ...material };
+    if (knowsRecord) for (const key of ['hits', 'plainHits', 'state', 'open', 'pool', 'lessons']) cut[key] = material[key].filter(knowsRecord);
+    if (['plainHits', 'state', 'open', 'lessons'].some(key => cut[key].length !== material[key].length))
+        Object.defineProperty(cut, 'cutChars', { value: renderPlain(material).length - renderPlain(cut).length });
     const byPos = new Map(messages.map(m => [m.pos, m.text]));
-    return { material, messageText: pos => byPos.get(pos) ?? '' };
+    return { material: cut, messageText: pos => byPos.get(pos) ?? '' };
 }
 
 // 按角色组装（不钉住）。records 模块缺席时（老测试）返回空。
@@ -688,7 +698,8 @@ function finishSlot(store, records, args, opts, { chat, messages, camera, eyes, 
     // 以前想起的旧事算在 1600 里、自己又不让，一长就把眼下这一轮的挤掉；现在各让各的。想起的那块：玩家在问以前的事时放宽。
     const split = opts.slot?.split !== false;
     const recallCap = Math.round((asksPast(args.recentUser, scaleFor(store, chatKey)) ? RECALL_CHARS_ASKED : RECALL_CHARS) * fit.s);
-    const kept = new Set([...fitParts(0, all.filter(p => p.place === 'base'), BASE_CHARS), ...fitParts(base.text?.length ?? 0, all.filter(p => p.place === 'recall'), recallCap),
+    const kept = new Set([...fitParts(0, all.filter(p => p.place === 'base'), BASE_CHARS),
+        ...fitParts(recallLength(base), all.filter(p => p.place === 'recall'), recallCap),
         ...fitParts(0, all.filter(p => p.place !== 'base' && p.place !== 'recall'), opts.slot?.maxChars ?? SLOT_CHARS)]);
     for (const p of all) if (kept.has(p)) {
         p.lines = dedupHistoryLines(p.lines);
@@ -965,6 +976,7 @@ export function splitTies(lines, name) {
     }
     return { ties, rest };
 }
+const recallLength = base => (base.text?.length ?? 0) + (base.mode === 'narrative' ? 0 : base.material.cutChars ?? 0);
 export function fitParts(baseLen, parts, cap = SLOT_CHARS) {
     const size = p => p.lines.reduce((s, l) => s + String(l).length + 1, 0);
     let total = baseLen + parts.reduce((s, p) => s + size(p), 0);

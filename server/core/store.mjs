@@ -484,23 +484,23 @@ export function openStore(file) {
     }
 
     // 每次读取重新取快照。stableNameAt 由调用方按笔确认历史标签，当前名册唯一不能代替这一证据。
-    function recordKnowledgeFor(reader, { speakerName, through = Infinity, stableNameAt, same = (a, b) => a === b } = {}) {
+    function recordKnowledgeFor(reader, { speakerName, through = Infinity, stableNameAt, projected = false, same = (a, b) => a === b } = {}) {
         const { chatKey, avatar, kind } = reader;
         if (!chatKey || kind !== memberReaderKind(avatar)) return () => ({ allow: false, reason: 'identity-pending' });
         const names = memberNameIndex(chatKey);
         const window = currentMessages(chatKey).filter(m => m.pos <= through);
         const messages = new Map(window.map(m => [m.pos, m])), userName = window.findLast(m => m.is_user)?.name;
-        const jobs = new Set(q('select id from extract_jobs where chat_key = ?').all(chatKey).map(row => row.id));
+        const jobs = projected ? null : new Set(q('select id from extract_jobs where chat_key = ?').all(chatKey).map(row => row.id));
         const sourceOf = record => {
-            if (record.status !== 'ok' || record.source_unknown !== false || record.source_basis || !jobs.has(record.job_id)) return null;
+            if (record.status !== 'ok' || record.source_basis || jobs && (record.source_unknown !== false || !jobs.has(record.job_id))) return null;
             const message = messages.get(record.pos);
-            if (!message || message.fp !== record.fp || !message.sent_at) return null;
+            if (!message || message.fp !== record.fp || !projected && !message.sent_at) return null;
             const raw = record.source_instance, ref = typeof raw === 'string' ? fromJson(raw) : raw;
-            if (raw != null && (ref?.ambiguous || ref?.pos !== message.pos || ref.fp !== message.fp || ref.sentAt !== message.sent_at
+            if (!projected && raw != null && (ref?.ambiguous || ref?.pos !== message.pos || ref.fp !== message.fp || ref.sentAt !== message.sent_at
                 || (ref.sw !== message.sw && !(ref.legacy && ref.sw == null)) || (ref.revision != null && ref.revision !== message.doorRevision))) return null;
             return message;
         };
-        return record => decideRecordKnowledge(record, { chatKey, avatar, kind }, { speakerName, names, sourceOf, stableNameAt, same, userName });
+        return record => decideRecordKnowledge(record, reader, { speakerName, names, sourceOf, stableNameAt, same, userName, projected });
     }
 
     function newChat({ storyId, parentKey = null, stChatId, groupId, label }) {
@@ -956,11 +956,14 @@ export function openStore(file) {
                     return sourceRows(db, chatKey, { through }).rows.flatMap(row => {
                         const bases = [row.source_basis, ...(JSON.parse(row.known ?? '[]') ?? []).map(k => k?.basis)].filter(Boolean);
                         if (!bases.every(check)) return [];
-                        return [{ row, audience: audienceFor(row, JSON.parse(row.audience)) }];
+                        return [Object.assign(row, { audience: audienceFor(row, JSON.parse(row.audience)) })];
                     });
                 });
-                const sources = candidates.filter(({ row }) => !ownAftermath || row.type !== '余波' || row.holder === reader)
-                    .map(({ row, audience }) => [row.id, row.pos, row.holder, name ? name === row.holder_name || audience.includes(name) : [...new Set(audience)].sort()]);
+                const decide = name && memberReaderKind(reader) === 'card' && candidates.length
+                    ? recordKnowledgeFor({ chatKey, avatar: reader, kind: 'card' }, { speakerName: name, through, projected: true }) : null;
+                const sources = candidates.filter(row => !ownAftermath || row.type !== '余波' || row.holder === reader)
+                    .map(row => [row.id, row.pos, row.holder, !name ? [...new Set(row.audience)].sort()
+                        : decide ? decide(row).allow : name === row.holder_name || row.audience.includes(name)]);
                 const instances = memo('authorization_messages', prefix, () => {
                     const fresh = memo('fresh_links', '', () => new Map(q("select key, value from meta where key glob 'fresh_from:*'").all().map(r => [r.key, r.value])));
                     return messages.slice(0, through + 1).map(m => ({ m, tag: visOf(m), instance: [m.pos, m.fp, m.sent_at, m.hidden, m.mark, null, m.sw, m.boardMark, m.doorRevision, fresh.get(`fresh_from:${m.fp}`)] }));

@@ -365,6 +365,8 @@ export function visibilityTag(value) {
         ...(fromAvatar ? { fromAvatar } : {}), ...(toAvatar ? { toAvatar } : {}) };
 }
 
+export const isSelfLabel = (name, userName) => ['user','玩家','旁白','narrator'].includes(name) || name === userName;
+
 // 谁看得见（和后台 core/visibility.mjs 一个判法）：发消息、打电话来的那条（extra.rp_vis.way 消息／电话）只有本人、玩家、旁白、发给的那人看得见；
 // 上门的、没带记号的谁都看得见。viewer：要看的人的名字（旁白传 '旁白'）；userName：玩家的名字
 export function visibleTo(message, viewer, userName = null, roster = []) {
@@ -373,7 +375,7 @@ export function visibleTo(message, viewer, userName = null, roster = []) {
     if (!viewer) return true;
     const name = typeof viewer === 'object' ? viewer.name : viewer;
     const explicit = typeof viewer === 'object' ? viewer.avatar : null;
-    if (!explicit && (['user','玩家','旁白','narrator'].includes(name) || name === userName)) return true;
+    if (!explicit && isSelfLabel(name, userName)) return true;
     if (v === false) return false;
     const unique = n => {
         const found = n ? roster.filter(p => p.name === n) : [];

@@ -450,7 +450,9 @@ function clusters(positions) {
 const clashes = r => (Array.isArray(r?.known) ? r.known : []).filter(k => k?.clash);
 export const withClash = r => (clashes(r).length ? { ...r, text: `${String(r.text).replace(/[。．.]+$/, '')}（这是当时的说法，和「${clashes(r).map(k => k.title).join('」「')}」对不上，以那条为准）` } : r);
 
-export function selectMaterial({ name, present = [], messages, records: given, openIdeaIds, recent = [], recentUser = '', queryKeys = [], queryWide = [], sense = null, recalled = new Map(), timeMarks = [], timeRecs = null, anchors = null, avatar = null, pool: wantPool = false, skipOpen = null, more = false, scale = 1, timeScale = DAY, tag = null, boardAt = null, timeStart = null, dayOf = null }) {
+export function selectMaterial({ name, present = [], messages, records: given, openIdeaIds, recent = [], recentUser = '', queryKeys = [],
+    queryWide = [], sense = null, recalled = new Map(), timeMarks = [], timeRecs = null, anchors = null, avatar = null, pool: wantPool = false,
+    skipOpen = null, more = false, scale = 1, timeScale = DAY, tag = null, boardAt = null, timeStart = null, dayOf = null, knowsRecord }) {
     if (!Array.isArray(recent)) recent = recent ? [String(recent)] : [];
     // scale：跟着 ST 的上下文大小（slot.roomFit，N-288）：旧事给几条照它放宽、收窄，至少一条
     const n = k => Math.max(1, Math.round(k * (Number(scale) > 0 ? scale : 1)));
@@ -463,7 +465,7 @@ export function selectMaterial({ name, present = [], messages, records: given, o
     const today = toDay(lastPos + 0.5);   // 最后一条之后刚离开过（离开记在那条之后半格）：回来先开口的这一轮，今天已经是离开之后
     // tag(第几格, 今天)：场记里说"哪天"的同一种写法（timeline.timeTag）；没给照旧说离今天多远
     const when = r => (tag ? tag(toDay(r.pos), today) : relativeDay(today - toDay(r.pos), timeScale));
-    const mine = records.filter(r => knows(r, name));
+    const mine = records.filter(r => knows(r, name) || r.holder === avatar && knowsRecord?.(r));
     // 最近几条里记的不当"旧事"想（聊天里看得见）；后台替他补记的（镜头外自己碰上的、这段时间干了什么、听说的）不在正文里，最近的也算
     // （试玩 10/7：中介那件交给他、他那条没提，下一条被问起时它还在"最近"里，就没想起来）
     // 最近的也只算他看得见的：他的隔离区间只给他在场的那几段，没在场（刚进场前、远程）的那部分他看不见，哪怕在最近几条里也算旧事（章程 #9）。
