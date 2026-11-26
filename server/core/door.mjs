@@ -1,7 +1,7 @@
 // 门只列人选，不替旁白或玩家决定谁此刻进场。
 import { createHash } from 'node:crypto';
 import { assertKnockReader } from './store.mjs';
-import { sameIdentity, resolveIdentity } from './cast.mjs';
+import { sameIdentity, resolveIdentity, closeness } from './cast.mjs';
 import { hasCard, wayOf, partsBetween } from './arrival.mjs';
 import { confirmedContacts } from './contact-verdict.mjs';
 import { boardFor } from './board.mjs';
@@ -203,8 +203,10 @@ export function doorAt(input = {}) {
         if (called || requested) add('named', request?.at ?? last, true, true, `玩家${called || '叫他过来'}`, `玩家${called || '叫他过来'}`, called);
         for (const p of promises) add('promise', p.source?.id ?? p.id, p.status === '到了', true, p.text, p.text);
         // 给玩家看的那句不带后台用语（排着、到了）：只说他去办什么，办得差不多了说一声
-        const errandsDue = errands.every(e => e.status !== '排着') && person.plan?.back !== '不回来' && (['上门', '消息', '电话'].includes(person.plan?.back) || !!person.plan?.backLine);
-        if (errands.length) add('errand', errands[0].id, errandsDue, true, `在外头办事：${errands.map(e => e.text).join(' → ')}${errandsDue ? '，差不多办完了' : ''}`, context);
+        // T149g：去办的事全到了、回不回来写的是"没说"又没留话：也算到时候，方式用消息（最不打扰）；明写"不回来"的照旧不算
+        const unsaid = errands.length > 0 && errands.every(e => e.status !== '排着') && person.plan?.back === '没说' && !person.plan?.backLine;
+        const errandsDue = errands.every(e => e.status !== '排着') && person.plan?.back !== '不回来' && (['上门', '消息', '电话'].includes(person.plan?.back) || !!person.plan?.backLine || unsaid);
+        if (errands.length) add('errand', errands[0].id, errandsDue, true, `在外头办事：${errands.map(e => e.text).join(' → ')}${errandsDue ? '，差不多办完了' : ''}`, context, unsaid ? '消息' : '');
         for (const m of pockets) {
             const way = m.entry === '电话' ? '打来电话' : m.entry === '消息' ? '发来消息' : wayOf(`${m.title ?? ''}${m.surface ?? ''}`);
             // 旁白已经替他把消息、来电递出来了（拿出来了、不是他自己当面拿的）：门上写"发来过消息：露面那句"，方式只给那一种；
@@ -353,4 +355,49 @@ export function doorLines(items) {
         ...items.map(item => `· ${item.who}：${item.lines.join('；')}（可选：${item.ways.join('、')}）`),
         '这几位里哪位这会儿顺理成章该出现了（说好的时候到了、玩家正往他那儿去、他该来消息了）：消息、电话写出玩家看得到的消息抬头或来电显示上的来信人名字，到这里停，正文留给他自己说；他过来、去找他，写到他出现之前那一刻停。末尾单独一行：（该来：名字／去找他、他过来、消息、电话里挑一个）。没到时候就不写这一行。一段最多点一个。',
     ];
+}
+
+// 门上长期没人时兜底挑谁（T149b）：和玩家最有牵连、又不在场的那一位。只读现有数据，不碰 doorAt 的判定。
+// 分数＝亲疏（cast.closeness：名册 bond，没设按档位默认；加近几天来往、关系大事、一起在做的事、最近来往）
+//   ＋他和玩家之间还开着的约定（排着、到了；每件 1 分，至多 2 分）＋最新规划里他对玩家压着的心事（1 分）＋生效的亲密线里有他和玩家（1 分）。
+// 同分：离开得近的先（since 大），再按名册顺序。只挑有卡、离开过的（场面表 away／absent）；跟着别人出现的、在冷却里的（cooling(人)）不挑。
+// 认人照 doorAt：名册卡按 avatar（sameIdentity）；记账、规划里写的名字按 resolveIdentity 唯一认到这张卡才算。
+export function mostTied({ roster = [], board = {}, relations = null, userName = '玩家', pending = {}, hearts = [], intimate = [], closenessOf = null, cooling = () => false } = {}) {
+    const names = roster.map(e => e.name);
+    const rel = relations ? normalizeRelations(relations) : null;
+    const same = (a, b) => !!a && !!b && (sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names)));
+    const cards = roster.filter(e => hasCard(e) && e.name !== '旁白' && !same(e.name, userName) && e.role !== '路过');
+    const out = [];
+    for (const [order, card] of cards.entries()) {
+        const uniqueName = name => resolveIdentity(roster.filter(hasCard), name).person?.avatar === card.avatar;
+        const person = list(board.people).find(p => sameIdentity(p, card, roster));
+        if (!person || !['away', 'absent'].includes(person.status)) continue;
+        if (rel && leaderOf(rel, card.name, names)) continue;
+        if (cooling(card)) continue;
+        const promises = list(pending.items).filter(p => p.kind === '约定' && ['到了', '排着'].includes(p.status)
+            && [...(p.who ?? []), ...(p.with ?? [])].some(uniqueName) && [...(p.who ?? []), ...(p.with ?? [])].some(n => same(n, userName))).length;
+        const heart = list(hearts).some(h => uniqueName(String(h?.谁 ?? '').trim()) && same(String(h?.对谁 ?? '').trim(), userName)) ? 1 : 0;
+        const line = list(intimate).some(x => (x?.谁 ?? []).some(uniqueName) && (x?.谁 ?? []).some(n => same(n, userName))) ? 1 : 0;
+        const close = closenessOf ? Number(closenessOf(card.name, card)?.score) || 0 : 0;
+        const parts = { 亲疏: close, 约定: Math.min(2, promises), 心事: heart, 亲密线: line };
+        out.push({ who: card.name, avatar: card.avatar, score: Math.round(Object.values(parts).reduce((s, v) => s + v, 0) * 10) / 10, parts, since: Number(person.since ?? -1), order });
+    }
+    out.sort((a, b) => b.score - a.score || b.since - a.since || a.order - b.order);
+    return out;
+}
+// 读口：从同一窗口的现有数据拼 mostTied 的输入（规划节点、亲密线由调用方给，免得这里再去读规划）
+export function fallbackPick(store, records, chatKey, { timeline = null, hearts = [], intimate = [], cooling = () => false } = {}) {
+    const chat = store.requireChat(chatKey);
+    const messages = store.currentMessages(chatKey);
+    timeline ??= timelineFor(store, records, chatKey, messages);
+    const roster = store.getCast?.(chat.story_id) ?? [];
+    const visible = records.visible(chatKey);
+    const lastPos = messages.at(-1)?.pos ?? 0;
+    const userName = [...messages].reverse().find(m => m.is_user)?.name ?? '玩家';
+    const dayOf = timeline.firmDayOf ?? timeline.dayOf ?? (() => 0);
+    const openIdeaIds = new Set((records.openIdeas?.(chatKey) ?? []).map(r => r.id));
+    const board = boardFor(store, records, chatKey, { present: [], timeline });
+    const pending = pendingFor(store, records, chatKey, { present: [], timeline });
+    const closenessOf = (name, entry) => closeness({ name, userName, entry, records: visible, dayOf, lastPos, openIdeaIds });
+    return mostTied({ roster, board, relations: store.relationsOf?.(chat.story_id) ?? null, userName, pending, hearts, intimate, closenessOf, cooling });
 }

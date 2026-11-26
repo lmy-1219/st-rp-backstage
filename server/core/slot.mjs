@@ -53,7 +53,7 @@ import { matchFacts, factLines, planFactLines } from './facts.mjs';
 import { driftItems, longGive, activeLong } from './drift.mjs';
 import { episodeLines, asksPast, EPISODE_CHARS } from './episodes.mjs';
 import { lifeSheet, lifeLines, homeLines, ownHomeLines, seedOf } from './life.mjs';
-import { hasCard, arrivedLines, isRemote, remoteLine, playerThereLines, validAwayPlan, remoteAt } from './arrival.mjs';
+import { hasCard, arrivedLines, isRemote, remoteLine, playerThereLines, validAwayPlan, remoteAt, lastLeave, awaySpan } from './arrival.mjs';
 import { boardFor, boardLoader, departureSource } from './board.mjs';
 import { pendingFor } from './pending.mjs';
 import { doorFor, doorLines } from './door.mjs';
@@ -62,7 +62,7 @@ import { enteredSince, emptySegment } from './landing.mjs';
 import { arrivalLive, sourceProjection } from './landing.mjs';
 import { settleMatters, mattersFor, sharedMatter, matterLines, matterBrief, PURSUE, closeLed, closeIntents, handOf, stageLines, LEAD, INTENT, closeDue, lapseMatters, gapSteps } from './matters.mjs';
 import { optionsFor } from './options.mjs';
-import { findSkip, liveSkips, settleSkip, skipDays, skipPromptLines, firstAfterSkip, skipLines, SKIP_MISSED, skipEvents } from './skip.mjs';
+import { findSkip, liveSkips, settleSkip, skipDays, skipPromptLines, firstAfterSkip, skipLines, SKIP_MISSED, skipEvents, skipSize, sceneSkip, sceneSkipLines, SKIP_WINDOW } from './skip.mjs';
 import { applyMoves, movesOf, eventStep, leadNotice, markLeadGiven, moveEvent, echoEvent, markEchoed, availableWays } from './eventlead.mjs';
 import { bareText } from './records.mjs';
 import { pairImpressions } from './impressions.mjs';
@@ -158,11 +158,13 @@ export const cameraRule = (name, others = [], { cards = [], remote = [] } = {}) 
     `· 不写什么：${cards.length ? `有自己卡的人（${cards.join('、')}）` : '有自己卡的人'}的话和动作，一个字都不替他们写；他们要来，写到他出现之前就停；消息或电话可以写抬头、来电显示上的名字，正文由他自己说。${name}的话、心思和决定是${name}自己的：不替${name}说话，不写${name}心里想什么，不替${name}拿主意、动手；旁白写的是这个世界和这些人对它的回应。`,
     ...remote.map(p => `${p.name}隔着${p.way || '消息／电话'}联系，人不在身边。`),
     `· 要紧的事不编：有名有姓的新人、具体的地址和门路、价钱、哪个势力在干什么、谁在找谁——场记里没给的别造。${name}问起场记里没有的，让人答得含糊（"认识个人，回头给你地方"）或者答不上，后面自会有安排。能编的只是眼前的小东西：光、声音、一个路人、一句搭腔。`,
-    `· 写到哪停：写到${name}能接话的地方就停；篇幅跟着${name}走——${name}写两句，旁白三五句就够，不比${name}写得多。抓${name}这句里的事回应，别顺着自己上一条往下铺；没卡的人答了就停，不替${name}总结局面、不抒情。没什么事就写一小段安静的此刻，别硬造事。`,
+    `· 写到哪停：写到${name}能接话的地方就停；篇幅跟着${name}走——${name}写两句，旁白三五句就够，不比${name}写得多。抓${name}这句里的事回应，别顺着自己上一条往下铺；没卡的人答了就停，不替${name}总结局面、不抒情。没什么事就写一小段安静的此刻，不凭空造要紧的事。`,
     '样子（只看写法，内容照眼下的场面）：',
     '（雨顺着窗缝往下淌。楼道里有人拖着箱子走过，轮子磕在门槛上，停了一下，又走远了。你屋里只剩那台机器低低地响。）',
     '（门外响了两下。）"送东西的，"门外那人隔着门喊，"签个字。"',
 ].join('\n');
+// 后台没递东西的那一轮给旁白的许可（T149c）：只给许可和动机；名字、数目、谁在找谁这类账面事实仍照上面"要紧的事不编"
+export const NO_SUPPLY_LEAVE = '· 这一轮后台没有递来要写的事。不必干等：可以顺着前文里已经露出的苗头和人物各自的处境，自己往前走一小步，让该出现的人或事自然出现——故事不该因为没人递东西就停住。';
 export const cameraNudge = name => `（旁白：叙述用第三人称，正文里称${name}为"你"，不出现"我"；有卡的人不替他写。）`;
 // 卡里这份不随场面变化；在场名单仍由每轮的 cameraRule 给。
 export const cameraCardPrompt = () => ({
@@ -1272,6 +1274,14 @@ function staleMindReasons(store, planId) {
         return Array.isArray(stale) ? stale : [];
     } catch { return []; }
 }
+// D-294/D-297（T149f）：跳时间以后，每个有卡的人头一次开口，程序给一两句头，不调模型、不等后台。
+// 给前台的自然语言，只报时间事实（用这一局的单位），不写"隔得久=情绪重"这类定性；
+// 让前台从这些事实推出角色的心理、化成表现，别复述。旁白不拿（旁白跳后只拿玩家能知道的）。
+export function skipOpenLines({ name = '', span = '', parted = '', leaving = '' } = {}) {
+    const who = String(name ?? '').trim() || '这个人';
+    const facts = [span ? `这一别过了${span}` : '', parted ? `上一回分开是${parted}` : '', leaving ? `走前：${leaving}` : ''].filter(Boolean).join('，');
+    return [`（${who}跳时间后头一回开口。${facts}${facts ? '。' : ''}结合${who}的性子和这世界里这段时间算长算短，推${who}此刻的心思，化成表现；别把上面这些时间再复述一遍。）`];
+}
 function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = null, recent = [], recentUser = '', present = [], camera = false }, { economy = null, contacts = null, absence = null, planner = null, world = null, factions = null, situation = null, pendingAway = false, pendingLedger = null, slot = null, backstoryPick = null, drift = null, promised = null, pace = null, mood = null, guard: given = null, scene = null, protectAfter = false }, base) {
     const drama = fullPlay(store, chatKey);
     const ts = scaleFor(store, chatKey);   // 这一局的时间尺度（章程 G2）
@@ -1793,6 +1803,36 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             add(0, skipLines(skip, { userName: userName ?? '玩家', settled, missed, seen, overdue }), 'now', camera ? 'scene' : 'person');
         }
     } catch {}
+    // 跳时间的头（D-294/D-297，T149f）：跳时间以后，每个有卡的人头一次开口给一两句头（隔了多久、上回怎么分开），
+    // 纯程序、不调模型。第二次开口不再给：看他在跳时间那一楼之后有没有有效回复（删掉那条就重给，不新建记号）。
+    // 一格以内（skipSize 为 none）不给；小跳、大跳都给，措辞一样只报事实（不定性）。旁白不拿这一块。
+    try {
+        let skips = [];
+        try { skips = liveSkips(JSON.parse(store.getMeta?.(`skips:${chatKey}`) ?? '[]'), messages, dayOf).filter(s => !s.timeBasis || timeBasisLive(store, records, chatKey, s.timeBasis)); } catch {}
+        let skip = skips.at(-1);
+        // 未记账那一楼当场也要认得出（D-294）：skips 元数据还没写时，用 seen 时间线（含临时认的跨天）现算
+        if (!skip) try { skip = findSkip({ messages, timeRecs, marks, dayOf: historyTimeline.dayOf }); } catch {}
+        if (skip && skipSize(skip, ts) !== 'none' && !camera && cardOf(name)) {
+            const person = scenePerson(name);
+            // 头一次：他本人在跳时间那一楼（skip.pos）之后还没有有效回复
+            const already = messages.some(m => !m.is_user && m.pos > skip.pos && messageIsPerson(m, person, roster));
+            if (!already) {
+                const rows = historyTimeline.rows;
+                const rowAt = p => rows.find(r => r.pos === p) ?? null;
+                const nowRow = rowAt(lastPos) ?? { day: skip.toDay, part: null };
+                let left = null, anchors = {};
+                try { anchors = JSON.parse(store.requireChat(chatKey).anchors ?? 'null') ?? {}; } catch {}
+                if (person?.avatar) left = lastLeave(anchors, person.avatar, lastPos + 1);
+                const beforeRow = left != null ? (rowAt(left - 1) ?? rowAt(left)) : (rowAt(skip.fromPos) ?? rowAt(skip.pos));
+                const parted = awaySpan(beforeRow ?? { day: skip.fromDay, part: null }, nowRow, ts);
+                const leaving = left != null
+                    ? messages.filter(m => m.pos >= left - 2 && m.pos < left && !m.hidden)
+                        .map(m => `${m.is_user ? (userName ?? '玩家') : (m.name ?? m.speaker)}：${String(m.text ?? '').replace(/\s+/g, ' ').trim().slice(-120)}`).join(' ／ ')
+                    : '';
+                add(0, skipOpenLines({ name, span: ts.span(skip.span), parted, leaving }), 'now', 'person');
+            }
+        }
+    } catch {}
     // 碰上的事（matters.mjs，用户 10/7："只要提起了就可以追查/解决/找源头……他可以隐瞒不说但不该不出现在场记里"）：
     // 后台排的事真发生了、还没下文的，知道的人每次开口都带着（这几天的；早的聊到了才带），直到正文里有了着落。
     // 镜头照玩家的眼睛看：玩家这边的；这句在追那件事（问为什么、要去查）时，交给镜头它的来由。不让位：至多四行，只有他知道的那几件聊天里没有，让掉就又"只影响了一轮"
@@ -1830,6 +1870,8 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
                 add(carrying ? 0 : 1, doorLines([shown]), 'now', 'scene', { kind: 'door', sourceKey: item.source?.type === 'pocket' ? menuDeliveryKey(item.source.id) : item.source?.type === 'reach' ? `contact:${item.who}:${item.source.id}` : `door:${item.source?.type}:${item.source?.id ?? item.who}`,
                     ...(carrying ? { carry: true } : {}), rank: [1, recent ? 0 : 1, 0, 0, 0] });
             }
+            // 后台这一轮没东西可递（门上没人、口袋和来联系都没有）：别连旁白也压住（D-298）——只给许可和动机，不给规矩；不编账面事实的话在上面照旧
+            if (drama && !doors.length && !contact && !menuLines.length) add(1, [NO_SUPPLY_LEAVE], 'now', 'scene');
         } catch {}
     }
     if (drama && !contact && !menuLines.length && store.menuOf && planner?.record !== false) {
@@ -2018,12 +2060,21 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
                 for (const m of dated.off) echoEvent(store, records, chatKey, m, { at, day: skipNew.toDay, roster, userName, player, storyId, why: '玩家交代跳过的这段时间里，那边照常办了' });
                 markEchoed(store, chatKey, dated.off.map(m => m.id), at, skipNew.toDay);
                 const spare = new Set([...dated.move, ...dated.off].map(m => m.id));
-                for (const c of settleSkip(menu, skipNew, { keep: promised?.keeps ?? (() => false), blocked, isPlayer, spare: m => spare.has(m.id) })) {
+                // 幅度分三档（D-297，skip.skipSize）：一格以内照旧（settleSkip 本来只管两格以上）；小跳照现有按空白处理；大跳当换幕，旧口袋整体作废
+                const size = skipSize(skipNew, scaleFor(store, chatKey));
+                const changes = size === 'big' ? sceneSkip(menu, skipNew, { keep: promised?.keeps ?? (() => false), spare: m => spare.has(m.id) })
+                    : settleSkip(menu, skipNew, { keep: promised?.keeps ?? (() => false), blocked, isPlayer, spare: m => spare.has(m.id) });
+                for (const c of changes) {
                     store.updateMenu(chatKey, c.id, { status: c.status, why: c.why, by: '空白', basisDay: skipNew.toDay, timeBasis: skipNew.timeBasis, at });
                     // 沉底那句进"这段时间"那一块，不再单给一回
                     if (c.status === 'sunk') store.updateMenu(chatKey, c.id, { status: 'sunk_told', why: c.why, by: '空白', basisDay: skipNew.toDay, timeBasis: skipNew.timeBasis, at });
-                    store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : 'menu_skip', { id: c.id, why: c.why });
+                    store.logEvent?.(chatKey, c.status === 'expired' ? 'menu_expired' : c.status === 'void' ? 'menu_void' : 'menu_skip', { id: c.id, why: c.why });
                 }
+                // 跳后补（T149a）：小跳、大跳都让规划下一轮能走到补拍（复用现有 beat；只在场面缺料时起作用，补过一次就清）；
+                // 挂在玩家交代的那条上，删了就不算；离那条太远（SKIP_WINDOW 的两倍）、换了一份规划也不算
+                if (size !== 'none') saveEvaluation(store, chatKey, { refill: { pos: at.pos, fp: at.fp, until: at.pos + SKIP_WINDOW * 2, planId: store.lastReadyPlan?.(chatKey)?.id ?? null } });
+                // 大跳：节点检查顺带问原目标还成立否（nodeCheckTaken 带上），不另加触发
+                if (size === 'big') store.setMeta?.(`skip_scene:${chatKey}`, JSON.stringify({ planId: store.lastReadyPlan?.(chatKey)?.id ?? null, pos: at.pos, fp: at.fp, span: skipNew.span, said: skipNew.said }));
             }
             kept = [...kept, skipNew].slice(-6);
         }
@@ -2211,7 +2262,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             for (const p of board.people.filter(p => p.card && p.name !== CAMERA_NAME && ['away', 'absent', 'never'].includes(p.status))) {
                 const busy = p.status === 'away' && pending.items.some(i => i.owner === p.name && ((i.kind === '去办' && ['排着', '到了'].includes(i.status)) || (i.kind === '等回音' && i.status === '等着')));
                 if (!busy && !ownDue(p)) continue;
-                try { settle({ chatKey, who: p.name, avatar: p.avatar, reason: '换时段' })?.catch?.(() => {}); } catch {}
+                try { settle({ chatKey, who: p.name, avatar: p.avatar, reason: '换时段', backfill: true })?.catch?.(() => {}); } catch {}
             }
         }
     }
@@ -2282,7 +2333,7 @@ export function completePlanningBeat(store, records, chatKey, input, empty) {
     const at = input.context.messages.at(-1);
     const fresh = (input.scene.echoes ?? []).map(e => ({ key: JSON.stringify(e), at: at && { pos: at.pos, fp: at.fp } }));
     saveEvaluation(store, chatKey, { echoesDone: [...done, ...fresh.filter(e => !done.some(x => x.key === e.key && JSON.stringify(x.at) === JSON.stringify(e.at)))],
-        failures: 0, coolUntil: 0, pending: [] });
+        failures: 0, coolUntil: 0, pending: [], refill: null });
     const current = planningInput(store, records, chatKey, { through: input.snapshot.through });
     const basis = evaluationBasis(current.snapshot, current.scene);
     saveEvaluation(store, chatKey, { empty: empty ? basis : null,
@@ -2294,7 +2345,7 @@ export function planningEvaluation(store, records, chatKey, planner = {}, option
     const input = planningInput(store, records, chatKey, { ...options, board: null, promised: null, today: null, dayOf: null, through: stable?.pos ?? -1 }), { snapshot, scene } = input;
     let state = evaluationState(store, chatKey);
     if (state.planId !== snapshot.planId) state = saveEvaluation(store, chatKey, { planId: snapshot.planId, checked: null, checking: null, verification: {}, supplemented: null, failures: 0, coolUntil: 0, empty: null });
-    state = { ...state, retryMax: retryKnob(planner.retryMax, 'max') };
+    state = { ...state, retryMax: retryKnob(planner.retryMax, 'max'), stuckGap: retryKnob(planner.stuckBeatGap, 'stuckGap') };
     const agenda = verificationAgenda(snapshot, scene, state);
     const exhausted = eligibilityFrom(store, records, chatKey, input, state, planner, agenda);
     const lastPlan = store.lastPlan(chatKey);
@@ -2311,7 +2362,8 @@ export function planningEvaluation(store, records, chatKey, planner = {}, option
     const seen = Number(store.getMeta?.(`turn_checked:${chatKey}`) ?? -1);
     const fresh = (snapshot.recent ?? snapshot.history).filter(r => r.id > seen && r.pos > (lastPlan?.anchor_pos ?? -1));
     const outside = scene.world;
-    if (lastPlan?.status === 'ready' && stable && !state.checking && agenda.some(x => x.due)
+    // 缺料越过核验的补拍（T149a）不再被改回核验：那几件已经核不出结论，再核一遍只是又一次没结论
+    if (lastPlan?.status === 'ready' && stable && !state.checking && agenda.some(x => x.due) && !decision.stuck
         && ((decision.kind === 'beat' && fresh.length) || (firstVerificationDue(agenda, state, decision.basis) && outside.length && decision.kind !== 'full'))) decision = { ...decision, kind: 'verify' };
     const selection = selectVerification(snapshot, { scene, state });
     return { input, snapshot, scene, state, lastPlan, verdict, stable, fresh, outside, decision, selection, exhausted };
@@ -2382,8 +2434,10 @@ export function finishPlanningCheck(store, chatKey, request, result, planner = {
         const status = conclusion?.state ?? (typeof conclusion?.value === 'object' ? conclusion.value?.状态 : conclusion?.value);
         const known = conclusion && status != null && status !== '拿不准';
         const failures = known ? 0 : (item.previous?.failures ?? 0) + 1;
+        // 累计账（T149a）：只认这一行自身内容，内容不变就接着数，不因新来一楼清零；内容一变就从头数
+        const tally = item.content ? { tally: { content: item.content, unknown: !known, failures: known ? 0 : (item.tally?.content === item.content ? item.tally.failures ?? 0 : 0) + 1 } } : {};
         verification[item.key] = { basis: item.basis, attempted: true, attempts: (item.previous?.attempts ?? 0) + 1,
-            conclusion: known ? conclusion : null, unknown: !known, failures,
+            conclusion: known ? conclusion : null, unknown: !known, failures, ...tally,
             coolUntil: known ? 0 : now + retryKnob(planner.retryGapMin, 'gapMin') * 60000,
             ...(known ? {} : { failure: result?.error ?? (result?.stale ? '来源已变' : result?.skipped ? '跳过' : '没有有效结论') }) };
     }
@@ -2418,6 +2472,8 @@ export function evaluatePlanning(store, records, chatKey, planner, options = {})
         if (decision.why !== 'first' || store.setupOf?.(input.context.chat.story_id) || store.currentMessages(chatKey).some(m => m.is_user))
             requestPlanNow(store, records, chatKey, planner, { reason: decision.why, present: scene.here, verdict: verdict?.why, thread: verdict?.thread, ...(decision.why === 'first' ? {} : { anchor: at, basis: at }) });
     } else if (decision.kind === 'beat') {
+        // 记下这次补拍发起在哪条（缺料补拍的间隔从这里算；那条删了就不算）
+        if (at) saveEvaluation(store, chatKey, { beatAt: { pos: at.pos, fp: at.fp } });
         planner.onBeat?.({ chatKey, planId: snapshot.planId, at, basis: decision.basis, input })?.catch?.(() => {});
     }
     return decision;
@@ -3656,7 +3712,11 @@ export function nodeCheckTaken(store, records, chatKey, planId) {
         return `· 「${bare(g.题)}」→「${bare(g.续成) || '（没写接着它的那件）'}」${next ? `：${next.who}，${STEP_WORDS[next.status] ?? next.status}；${String(next.surface ?? '').slice(0, 80)}` : ''}`;
     });
     const queued = menu.filter(m => ['waiting', 'pocket'].includes(m.status)).slice(0, 20).map(m => `· ${m.line ? `〔${m.line}〕` : ''}${m.who}「${m.title}」：${String(m.surface ?? '').slice(0, 80)}`);
-    return { continued, queued };
+    // 大跳当换幕（D-297，T149a）：这一份规划是跳之前排的、交代跳的那条还在，就顺带问原目标还成立否（不另加触发）
+    let jump = null;
+    try { jump = JSON.parse(store.getMeta?.(`skip_scene:${chatKey}`) ?? 'null'); } catch {}
+    const live = jump && jump.planId === planId && store.currentMessages(chatKey).some(m => m.pos === jump.pos && m.fp === jump.fp);
+    return { continued, queued, ...(live ? { sceneSkip: sceneSkipLines(jump, scaleFor(store, chatKey)) } : {}) };
 }
 
 // 离开期间推演（away.mjs）要的材料：这一局此刻的账，外加最后那一幕的原文、程序按亲疏算的"谁找过用户"。

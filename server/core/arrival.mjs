@@ -286,7 +286,7 @@ export function awaySpan(a, b, timeScale = DAY) {
     const ts = scaleOf(timeScale);
     const days = (b.day ?? 0) - (a.day ?? 0);
     const same = ts.unit === '天' ? '同一天' : `同一${ts.word === '个月' ? '个月' : ts.word}`;
-    if (days > 0) return `过了 ${ts.span(days)}${a.part || b.part ? `（${a.part || '?'}走的，现在${b.part || '?'}）` : ''}`;
+    if (days > 0) return `过了 ${ts.span(days)}${a.part && b.part ? `（${a.part}走的，现在${b.part}）` : a.part ? `（${a.part}走的）` : b.part ? `（现在${b.part}）` : ''}`;
     return a.part && b.part && a.part !== b.part ? `${same}，${a.part}走的，现在${b.part}` : `${same}，没过多久`;
 }
 

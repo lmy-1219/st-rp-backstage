@@ -111,6 +111,13 @@ function executionSourceMatches(e,messages) {
     // 旧指纹只覆盖末楼；无法证明更早正文是否改变时保留原来的暂停与显式核对。
     return e.source===createHash('sha256').update(JSON.stringify([e.through,messages.find(m=>m.pos===e.through)?.fp??null])).digest('hex');
 }
+function retiredSuccessor(all, retired, kind, avatar, through, messages) {
+    const parent = all.findLast(e => e.newAttempt && retired.includes(e.id) && e.kind === kind
+        && e.avatar === avatar && e.through === through && executionSourceMatches(e,messages));
+    const child = parent && (all.find(e => e.id === parent.newAttempt.execution.id) ?? parent.newAttempt.execution);
+    return child && child.state !== 'superseded' ? child : null;
+}
+
 export function executionFor(store, chatKey, item, kind = 'speak', retryOf = null) {
     if (!store.db.isTransaction) return store.commitSlot(() => executionFor(store,chatKey,item,kind,retryOf));
     store.externalVersion?.();
@@ -133,10 +140,8 @@ export function executionFor(store, chatKey, item, kind = 'speak', retryOf = nul
     const held=all.find(e=>e.avatar===(item.avatar??null)&&e.through===through&&executionSourceMatches(e,messages)
         &&(['running','unconfirmed','cancelled','error','waiting','delivered'].includes(e.state)||e.retryOf&&e.state==='queued'));
     const retired = read(store,`auto_execution_retired:${chatKey}`,[]);
-    const parent = !retryOf && !held && all.findLast(e => e.newAttempt && retired.includes(e.id) && e.kind === kind
-        && e.avatar === (item.avatar ?? null) && e.through === through && executionSourceMatches(e,messages));
-    const child = parent && (all.find(e => e.id === parent.newAttempt.execution.id) ?? parent.newAttempt.execution);
-    if (child && child.state !== 'superseded') return { ...item, execution: child };
+    const child = !retryOf && !held && retiredSuccessor(all, retired, kind, item.avatar ?? null, through, messages);
+    if (child) return { ...item, execution: child };
     // 改稿又换回原稿时来源哈希会回到旧值，不能复用已经作废的同名执行 ID。
     if(!retryOf&&!held)retryOf=all.find(e=>e.avatar===(item.avatar??null)&&e.through===through&&e.state==='superseded'
         &&e.source&&executionSourceMatches(e,messages))?.id??null;
@@ -161,6 +166,17 @@ export function executionFor(store, chatKey, item, kind = 'speak', retryOf = nul
     if (arrival && !e.arrivalId) { e.arrivalId = arrival.source_basis.id; write(store, `auto_execution:${chatKey}`, all.slice(-60)); }
     return { ...item, execution: { ...e } };
 }
+
+// protocolMarker 预留给后续协议子项，本段沿用原有 ID。
+function createSuccessor(store, chatKey, e, item, retired, protocolMarker) {
+    const q = executionFor(store,chatKey,item,e.kind,e.id);
+    const parent = {...e,state:'superseded',newAttempt:{ok:true,execution:q.execution,item:q}};
+    write(store,`auto_execution:${chatKey}`,[...read(store,`auto_execution:${chatKey}`,[]).filter(x => x.id !== e.id),parent].slice(-60));
+    write(store,`auto_execution_retired:${chatKey}`,[...retired,e.id]);
+    if (e.kind === 'knock') write(store,PENDING(chatKey),{...item,error:null,execution:q.execution.id});
+    return parent.newAttempt;
+}
+
 export function executionResult(store, chatKey, receipt, { records = null, config = null } = {}) {
     if (store.commitSlot && !store.db.isTransaction) return store.commitSlot(() => executionResult(store,chatKey,receipt,{records,config}));
     store.externalVersion?.();
@@ -227,12 +243,7 @@ export function executionResult(store, chatKey, receipt, { records = null, confi
                 return reject('在场或成员资格已改变，请重新排队','eligibility_changed');
             if (cleanup) write(store,`arrivals:${chatKey}`,[...readRaw(store,`arrivals:${chatKey}`,[]),...cleanup.arrivals]);
             if (cleanup?.arrived && !read(store,`arrived:${chatKey}`,null)) write(store,`arrived:${chatKey}`,cleanup.arrived);
-            const q = executionFor(store,chatKey,item,e.kind,e.id);
-            const parent = {...e,state:'superseded',newAttempt:{ok:true,execution:q.execution,item:q}};
-            write(store,`auto_execution:${chatKey}`,[...read(store,`auto_execution:${chatKey}`,[]).filter(x => x.id !== e.id),parent].slice(-60));
-            write(store,retiredKey,[...retired,e.id]);
-            if (e.kind === 'knock') write(store,PENDING(chatKey),{...pending,error:null,execution:q.execution.id});
-            return parent.newAttempt;
+            return createSuccessor(store, chatKey, e, item, retired);
         } catch (error) {
             store.db.exec('rollback to auto_attempt');
             throw error;
@@ -491,7 +502,9 @@ export function knockCandidate(store, records, chatKey, { present = [], timeline
     if (handoff?.reason) return reject(handoff.reason);
     if (handoff?.consumed) return { who: null, why: '原旁白交接已经准备进场', handoff };
     const recentUser = messages.at(-1)?.is_user ? messages.at(-1).text : '';
-    const occasion = occasionStrict(messages, { roster: ctx.roster, relations: ctx.relations, userName: ctx.userName, names: present });
+    // 场上有卡、在场的他人（只读板，同 knockNow 的口径）；板读不出来就不知道，照旧判
+    let scene; try { scene = ctx.board().people.filter(p => p.card && ['present', 'remote'].includes(p.status)).map(p => p.name); } catch {}
+    const occasion = occasionStrict(messages, { roster: ctx.roster, relations: ctx.relations, userName: ctx.userName, names: present, scene });
     const intimate = occasion ? intimateContacts(store, records, chatKey, ctx) : new Set();
     const eligible = item => (!pausedAvatar || item.avatar !== pausedAvatar || ['电话','消息'].includes(item.playerRequest?.way))
         && (!occasion || !!item.playerRequest || item.source.type === 'named'

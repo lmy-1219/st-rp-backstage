@@ -71,7 +71,9 @@ import { retryKnob } from './planner.mjs';
 import { guideConfig } from './guide.mjs';
 export function loadConfig(home) {
     let raw = {};
-    try { raw = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')); } catch {}
+    // 带 BOM 的 config.json（记事本等另存时常加）：去掉再解析，不当成没配（T152）；读不出照旧用默认并留一行
+    try { raw = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8').replace(/^\uFEFF/, '')); }
+    catch (error) { if (error?.code !== 'ENOENT') console.error(`config.json 读不出，按默认配置起：${error.message}`); }
     const e = raw.extractor ?? {};
     const extractor = {
         baseUrl: typeof e.baseUrl === 'string' ? e.baseUrl.replace(/\/+$/, '') : null,
@@ -148,6 +150,8 @@ export function loadConfig(home) {
             briefChars: Number(pl.briefChars ?? 60000),
             // 规划连不上自己再试（T074）：隔几分钟、同一份至多几次（默认、范围见 planner.RETRY_AUTO；没填、乱填按默认）
             retryGapMin: retryKnob(pl.retryGapMin, 'gapMin'), retryMax: retryKnob(pl.retryMax, 'max'),
+            // 核验没结论、场面缺料时越过核验补拍（T149a）：两次之间至少隔几楼
+            stuckBeatGap: retryKnob(pl.stuckBeatGap, 'stuckGap'),
             // 节点检查：每个剧情日用便宜模型看一眼这个节点算成／落空没有（钥匙、地址同叙事组装那一格）；不填型号就用组装那个
             judge: pl.judge !== false,
             // 转向检查先程序初筛（10/16）：玩家随口的"说"、没闹大字眼的"做"不叫模型；关了每批新记录都问
@@ -199,7 +203,12 @@ export function loadConfig(home) {
         // remoteQuiet＝远程的人连着几句玩家没对他说算结束；chain＝角色之间点名、问话连着接，这一句之后至多几手（默认、范围见 director.CHAIN，T071；没填、乱填按默认）
         auto: { enabled: raw.auto?.enabled !== false, knock: raw.auto?.knock !== false, turn: raw.auto?.turn !== false, leave: raw.auto?.leave !== false, buttons: raw.auto?.buttons !== false,
             maxTurns: Math.max(1, Number(raw.auto?.maxTurns ?? 2) || 2), cap: Number.isFinite(Number(raw.auto?.cap)) && Number(raw.auto?.cap) > 0 ? Number(raw.auto.cap) : null,
-            remoteQuiet: Math.max(1, Number(raw.auto?.remoteQuiet ?? 3) || 3), chain: chainOf(raw.auto?.chain) },
+            remoteQuiet: Math.max(1, Number(raw.auto?.remoteQuiet ?? 3) || 3), chain: chainOf(raw.auto?.chain),
+            // 门上长期没人时的兜底结算（T149b）：玩家连着 fallbackTurns 句门上都没有到时候的人（她一个人、没在承接、不在亲密戏），
+            // 替和她最有牵连、不在场的那一位跑一次时间结算；同一人兜过以后玩家再说 fallbackCooldown 句才再兜他；
+            // 末楼时间没确认时至多往回退 fallbackBack 条找确认过的那条挂上。fallbackTurns 填 0 就关掉
+            fallbackTurns: Math.max(0, Number(raw.auto?.fallbackTurns ?? 6) || 0), fallbackCooldown: Math.max(0, Number(raw.auto?.fallbackCooldown ?? 12) || 0),
+            fallbackBack: Math.max(0, Number(raw.auto?.fallbackBack ?? 8) || 0) },
         // 停住时的「接下来」路标卡（core/guide.mjs，T074）：quiet＝玩家连着几条没新事算停住，scene＝换地方后发了几条算停住，max＝卡上至多几条路标（默认、范围见 guide.GUIDE）
         guide: guideConfig(raw.guide),
         // 局势（core/situation.mjs，Q-8②）：一个剧情日推一次各方的动向、消息怎么传开；默认关。model 不填用叙事组装那档（同一条线路）

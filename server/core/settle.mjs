@@ -25,7 +25,30 @@ export function settlementTimes(tl, { departure = null, previous = null } = {}) 
     const row = departure == null ? null : tl.rows.filter(r => r.pos < departure).at(-1) ?? tl.rows.find(r => r.pos === departure);
     return { world, departureDay: row?.day ?? null, away: row ? `从${tag(row.day)}至${tag(end)}，共${tl.scale.span(Math.max(0, end - row.day))}` : '离开起点不明，离开多久未确认' };
 }
-export function settlePrompt({ who, userName = '玩家', span = '', worldTime = null, leaving = '', errands = [], waits = [], profile = '', tie = '', place = '', unanswered = [], promises = [], here = '', around = [], own = null }) {
+// 门上长期没人时的兜底（T149b）：玩家每说一句算一轮，从头一回看到"门上没人到时候"那条起数；
+// 有人到点（门上有到时候的、有候着的叩门）就清零；数够 turns 轮就该跑一次。上一回兜底挂在哪条上（runs），那条删了冷却跟着撤。
+// turns、cooldown 由调用方从配置给（core/config.mjs auto.fallbackTurns／fallbackCooldown）；没给就不跑
+const liveMark = (mark, messages) => !!mark && messages.some(m => m.pos === mark.pos && m.fp === mark.fp);
+const userSince = (messages, pos, inclusive) => messages.filter(m => m.is_user && (inclusive ? m.pos >= pos : m.pos > pos)).length;
+export function fallbackStep(prev = {}, { messages = [], ready = false, turns = null } = {}) {
+    const n = Number(turns) > 0 ? Number(turns) : Infinity;
+    const last = messages.at(-1);
+    const runs = Object.fromEntries(Object.entries(prev?.runs ?? {}).filter(([, m]) => liveMark(m, messages)));
+    if (!last || ready) return { next: { from: null, runs }, due: false, count: 0 };
+    const from = liveMark(prev?.from, messages) ? prev.from : { pos: last.pos, fp: last.fp };
+    const count = userSince(messages, from.pos, true);
+    return { next: { from, runs }, due: count >= n, count };
+}
+// 同一人兜底过以后，玩家还没说够 cooldown 句：先不再替他兜
+export const fallbackCooling = (run, messages = [], cooldown = 0) => liveMark(run, messages) && userSince(messages, run.pos, false) < (Number(cooldown) > 0 ? Number(cooldown) : 0);
+// 末楼时间没确认时往回找最近一条时间已确认的（T149b）。messages：当前稿本（按楼序）；confirmed(前缀)→这段前缀末楼的时间确认了没有；
+// back：至多往回退几条。返回能用的前缀长度：末楼本身已确认就是 messages.length；退 back 条内都没有确认的返回 0（不跑）
+export function confirmedPrefix(messages = [], confirmed = () => false, back = 0) {
+    for (let k = messages.length; k > 0 && messages.length - k <= back; k--) if (confirmed(messages.slice(0, k))) return k;
+    return 0;
+}
+
+export function settlePrompt({ who, userName = '玩家', span = '', worldTime = null, leaving = '', errands = [], waits = [], profile = '', tie = '', place = '', unanswered = [], promises = [], here = '', around = [], own = null, quiet = null }) {
     const mine = own && (own.want || own.next) ? [renderPronouns("【〔当事人〕自己惦记的事】（这阵子〔当事人〕自己想办成的、下一步要去做的；这段时间〔当事人〕会照着去办，写进\"打算\"）", { person: who }), ...(own.want ? [`· 想办成：${own.want}`] : []), ...(own.next ? [`· 下一步：${own.next}`] : [])] : [];
     return [
         `【在外头的人】${who}`,
@@ -41,6 +64,7 @@ export function settlePrompt({ who, userName = '玩家', span = '', worldTime = 
         '【等回音（事账原文）】',
         ...waits.map(w => `· ${w.text}（等${(w.with ?? []).join('、') || '对方'}；${w.elapsed || w.why || '等了多久不清楚'}）`),
         ...mine,
+        ...(quiet ? [`【${personWord(who)}有一阵没和${userName}照面了】（${quiet.turns ? `${userName}那边又过了 ${quiet.turns} 句` : '有一阵了'}）照${personWord(who)}自己这阵子的处境、和${userName}的关系定：找不找${userName}、怎么找（发消息、打电话、上门），或者先不找——写进"联系"，不找就写"不"`] : []),
         ...(unanswered.length ? [`【${personWord(who)}找过${userName}、还没人接】（也写进"等回音"，事名照这里的原文）`, ...unanswered.map(u => `· ${u.text}（${u.elapsed}；这是第 ${u.n} 回没人接）`)] : []),
         ...(promises.length ? [renderPronouns("【〔当事人〕和别人约好、还没办的】", { person: who }), ...promises.map(p => `· ${p}`)] : []),
         ...(here ? [`【${userName}此刻】${here}（${personWord(who)}不一定知道：找上门得是${personWord(who)}找得到的地方——${personWord(who)}知道${userName}去了哪儿、或者问得到；不知道就别写${personWord(who)}直接找到那儿）`] : []),

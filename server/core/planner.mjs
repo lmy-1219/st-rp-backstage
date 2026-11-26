@@ -462,9 +462,17 @@ export function verificationAgenda(snapshot, scene, state = {}, nowMs = Date.now
     return rows.map(row => {
         const basis = digest([material, row.content]), old = state.verification?.[row.key];
         const previous = old?.basis === basis ? old : null;
-        return { key: row.key, basis, previous, due: !previous || (previous.unknown && previous.failures < (state.retryMax ?? 3) && nowMs >= previous.coolUntil) };
+        // T149a：依据含最近历史和场面，每来一楼就变，previous 随之作废。另记一份只认这一行自身内容的累计账（tally）：
+        // 内容不变就接着数，不因新来一楼清零；只用于"缺料时核验不再挡补拍"，不改核验结论、不改供给资格。
+        const content = digest(row.content ?? null), tally = old?.tally?.content === content ? old.tally : null;
+        return { key: row.key, basis, previous, content, tally, due: !previous || (previous.unknown && previous.failures < (state.retryMax ?? 3) && nowMs >= previous.coolUntil) };
     });
 }
+// 这一行（同一内容）已经有过结果：核出了结论，或者累计没结论到上限。拿它不能再挡住缺料时的补拍（D-298 第四条）。
+export const verificationSettled = (row, max = 3) => !!row?.tally && (!row.tally.unknown || (row.tally.failures ?? 0) >= max);
+// 缺料补拍（核验没结论时越过核验）两次之间至少隔几楼：配置 planner.stuckBeatGap（默认、范围见 RETRY_AUTO.stuckGap）；每楼都补会把每轮都变成一次规划调用。
+const liveMark = (mark, messages) => !!mark && Number.isInteger(mark.pos)
+    && (!Array.isArray(messages) || !messages.length || messages.some(m => m.pos === mark.pos && (!mark.fp || m.fp === mark.fp)));
 export function firstVerificationDue(agenda, state, basis) {
     // 无逐项账的旧状态仍兼容 checked；有账后由同依据的尝试记录决定，不能挡下一批。
     if (state.checked === basis && !Object.keys(state.verification ?? {}).length) return false;
@@ -512,23 +520,38 @@ export function planningDecision({ snapshot, menu = snapshot.menu, scene, state 
     const basis = evaluationBasis(snapshot, scene);
     const agenda = verificationAgenda(snapshot, scene, state, nowMs);
     const supply = classifySupply(menu, { ...scene, exhausted: exhausted ?? exhaustedSupply(agenda, state, { at: scene.at }) });
-    const result = (kind, why) => ({ kind, why, basis, supply });
+    const result = (kind, why, extra = {}) => ({ kind, why, basis, supply, ...extra });
     if (running || state.checking) return result('wait', '正在核验或请求');
-    if ((snapshot.menu.length || snapshot.hearts.length) && agenda.some(x => x.due)
+    // T149a（D-298 第四条）：场面缺料（没有可用、让路、待应答的件）时，核验得不出结论不能一直挡住补拍。
+    // 越过核验的两种情况：跳时间清过口袋、还没补过（refill）；或者到期的每一行都已有过结果（核出结论，或同一内容累计没结论到上限）。
+    // 有可用供给时不走这里，行为照旧；从没核过的新件仍先核。stuck 的结果不再被改回核验（见 slot.planningEvaluation）。
+    const max = state.retryMax ?? 3;
+    const starved = !supply.some(x => ['可用', '让路', '待应答'].includes(x.kind));
+    const refill = liveMark(state.refill, scene.messages) && (state.refill.planId == null || state.refill.planId === snapshot.planId)
+        && (!Number.isFinite(state.refill.until) || !Number.isFinite(scene.at) || scene.at <= state.refill.until);
+    const stuck = starved && agenda.some(x => x.due) && (refill || agenda.every(x => !x.due || verificationSettled(x, max)));
+    const decided = (kind, why) => result(kind, why, stuck ? { stuck: true } : {});
+    if (!stuck && (snapshot.menu.length || snapshot.hearts.length) && agenda.some(x => x.due)
         && (firstVerificationDue(agenda, state, basis) || agenda.some(x => x.due && x.previous?.unknown))) return result('verify', '先核旧件与心事');
     const full = needsPlan({ lastPlan, nodeOver: verdict?.result, target: snapshot.node?.目标状态 });
-    if (full) return result('full', full);
-    if (!lastPlan || lastPlan.status !== 'ready') return result('wait', '没有就绪节点');
-    if (scene.hold || scene.stacked > 0 || scene.awaiting || supply.some(x => x.kind === '待应答')) return result('wait', '场面正在承接');
-    if (supply.some(x => x.kind === '让路')) return result('wait', '保留容量与资格让路');
-    if (supply.some(x => x.kind === '可用')) return result('wait', '已有可用供给');
+    if (full) return decided('full', full);
+    if (!lastPlan || lastPlan.status !== 'ready') return decided('wait', '没有就绪节点');
+    if (scene.hold || scene.stacked > 0 || scene.awaiting || supply.some(x => x.kind === '待应答')) return decided('wait', '场面正在承接');
+    if (supply.some(x => x.kind === '让路')) return decided('wait', '保留容量与资格让路');
+    if (supply.some(x => x.kind === '可用')) return decided('wait', '已有可用供给');
     // 本依据核验耗尽的件（T140b 第三项，D-300）：无论曾否核成"还成立"，一律不算可递供给、也不占容量，不在此拦截；
     // 事实层旧结论原样保留（见 classifySupply 不改 menu.verification）。场面缺料就照常落到下面的补拍，
     // 补拍仍受 empty/supplemented 同事实防重拍与全局补拍上限约束；已 shown、已递出待承接的件在 exhaustedSupply 里已排除。
-    if (state.empty === basis) return result('wait', '同依据成功空表');
-    if (state.supplemented === verificationMaterial(snapshot, scene)) return result('wait', '同事实已补短拍，等待新依据');
-    if ((state.failures ?? 0) >= (state.retryMax ?? 3) || nowMs < (state.coolUntil ?? 0)) return result('wait', '失败上限或冷却');
-    return result('beat', '此刻缺料');
+    if (state.empty === basis) return decided('wait', '同依据成功空表');
+    if (state.supplemented === verificationMaterial(snapshot, scene)) return decided('wait', '同事实已补短拍，等待新依据');
+    if ((state.failures ?? 0) >= (state.retryMax ?? 3) || nowMs < (state.coolUntil ?? 0)) return decided('wait', '失败上限或冷却');
+    if (stuck) {
+        // 间隔从上一次补拍发起算；跳时间后头一次补货不等间隔（补过一次、还没补成的，照样等间隔）
+        const last = liveMark(state.beatAt, scene.messages) ? state.beatAt : null;
+        const fresh = refill && (!last || last.pos < state.refill.pos);
+        if (!fresh && last && Number.isFinite(scene.at) && scene.at - last.pos < (state.stuckGap ?? RETRY_AUTO.stuckGap.default)) return decided('wait', '缺料补拍间隔未到');
+    }
+    return decided('beat', refill ? '跳时间后补货' : stuck ? '核验没结论，此刻缺料' : '此刻缺料');
 }
 function verificationProof(row, snapshot, infer = false) {
     if (row && Object.hasOwn(row, '引用')) {
@@ -589,10 +612,11 @@ function candidateProofMatches(proof, item, state, snapshot) {
     const units = proofUnits(proof, snapshot);
     const contradicts = (u, text) => directAssertion({ ...u, quote: u.fact?.text ?? u.record?.text ?? '' }, `并非${assertionText(text)}`)
         || (u.record?.type === '改变' && assertionText(u.record.life?.gone) === assertionText(text) && directAssertion(u, u.record.text));
-    const fact = text => units.some(u => directAssertion(u, text)) && !units.some(u => contradicts(u, text));
     if (state === '还成立') {
+        // D-400（T149e）："还成立"只准许拿出来试，不写事实。引文出自所引记录或事实（verificationProof）、来源有效（verificationProofLive）由调用方把关；
+        // 这里只核所引内容没有直接否定前提或任一持续条件。不再要求前提与记录全文相等（规划写前提用的是自己的话，全等永远对不上）。
         const premises = [item.premise, ...(item.conditions ?? []).map(c => c.condition)].filter(s => String(s ?? '').trim());
-        return premises.every(fact);
+        return units.length > 0 && !premises.some(text => units.some(u => contradicts(u, text)));
     }
     if (state === '办完了' || state === '演过了') {
         return menuBoundaryEvidence(item, state === '办完了' ? '收尾' : '露面', {
@@ -1730,7 +1754,9 @@ export function needsPlan({ lastPlan, activeItems, newNotes, directNotes = false
 // 规划没连上自己再试（T074）：只认"连得上就能好"的失败；格式坏了、写一半断了、被拦了、没正文的再试多半还是坏的，不自动花钱。
 // attempts：这一份规划的尝试，新的在前（store.planAttempts 的样子）。拿不准（时间读不出、没有失败记录）一律当不到时候。
 export const RETRY_FAILURES = Object.freeze(['connection', 'timeout', 'overloaded', 'unavailable']);
-export const RETRY_AUTO = Object.freeze({ gapMin: { default: 10, min: 1, max: 1440 }, max: { default: 3, min: 1, max: 10 } });
+export const RETRY_AUTO = Object.freeze({ gapMin: { default: 10, min: 1, max: 1440 }, max: { default: 3, min: 1, max: 10 },
+    // T149a：核验没结论、场面缺料时越过核验补拍，两次之间至少隔几楼
+    stuckGap: { default: 8, min: 2, max: 60 } });
 export const retryKnob = (v, k) => { const r = RETRY_AUTO[k], n = Number(v); return v != null && v !== '' && Number.isInteger(n) && n >= r.min && n <= r.max ? n : r.default; };
 export function planRetryDue({ plan, attempts = [], running = false, nowMs = Date.now(), gapMin, max } = {}) {
     if (!plan || plan.status !== 'requested' || running) return false;
@@ -1751,8 +1777,9 @@ export const takenOf = (m, messages = []) => m?.status === 'used' || (m?.status 
 // 节点检查那一问：目标、算成、落空＋最近记下的事。
 // continued：续了的那几件（这一份规划"口子"里答了续的：原来那件 → 接着它的那件，见 slot.nodeCheckTaken）；queued：还排着的事——
 // 节点检查顺带看续了的接上没有（只提醒，不强制重规划；章程 K1）
-export function nodeCheckPrompt(node, lines, { continued = [], queued = [], secrets = [] } = {}) {
+export function nodeCheckPrompt(node, lines, { continued = [], queued = [], secrets = [], sceneSkip = [] } = {}) {
     return [`【这个阶段的目标】${node.目标}`, `【怎样算成】${node.算成 || '（没写）'}`, `【怎样算落空】${node.落空 || '（没写）'}`, '', '【最近记下的事】', ...lines,
+        ...sceneSkip,
         ...(continued.length ? ['', '【续了的那几件】（原来那件 → 接着它的那件）', ...continued] : []), ...(continued.length && queued.length ? ['', '【还排着的事】', ...queued] : []),
         ...(secrets.length ? ['', '【有人瞒着的事】下面这些事有人瞒着谁。看聊天和账，被瞒的人现在是不是已经知道了；知道了写哪件、谁知道了、怎么知道的、依据一句。亲耳听到、亲眼看到、被人告诉才算；猜测不算，拿不准就不算。事文和名字照原文。', ...secrets.map(x => `· ${x.事}；知道的人：${x.知道.join('、')}；瞒着：${x.不让.join('、')}`)] : [])].join('\n');
 }

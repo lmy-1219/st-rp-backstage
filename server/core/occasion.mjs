@@ -86,20 +86,40 @@ function tenseCounts(text) {
     return { strong, soft: soft + count(text, SOFT_TENSE) };
 }
 
+// 亲密要场上除了她还有人（T149c）：scene 是此刻场上有卡、在场（present／remote）的他人名单；undefined＝不知道，照旧判。
+// 只给"此刻"一个名单：她独处时，窗口里离场者离开之前写的亲密字眼也不再让这一刻判亲密（离场后的场面不是亲密戏）。紧张不看它。
+function aloneNow(scene, userName = null) {
+    return Array.isArray(scene) && !scene.some(n => n && n !== userName && n !== CAMERA_NAME);
+}
+// 紧张字眼合计（T149g，主窗裁定 A）：她独处时，旁白那几条里的强词不单独算——窗口里她自己或有卡的人那几条也写了紧张字眼才算上；
+// "紧张字眼"按各口径自己认的算：宽口径强、弱都算，严口径本来只认强信号，这里也只认强的。有人在场、或在场名单不知道（alone 为 false）时照旧。
+// 旁白的弱词照旧计入（裁定只说强词）。
+function tenseOfRows(rows, alone, { strongOnly = false } = {}) {
+    let strong = 0, soft = 0, narStrong = 0, othersAny = false;
+    for (const m of rows) {
+        const t = tenseCounts(narrationOf(m.text) ?? '');
+        soft += t.soft;
+        if (alone && isNarrator(m)) narStrong += t.strong;
+        else { strong += t.strong; if (!isNarrator(m) && (strongOnly ? t.strong > 0 : t.strong + t.soft > 0)) othersAny = true; }
+    }
+    return { strong: strong + (othersAny ? narStrong : 0), soft };
+}
+
 /**
  * 眼下是什么场合：'亲密' | '紧张' | null。messages：到此刻为止（最后几条就够）；opts.except：不算谁写的（候着的那位自己那条）
  * 只看叙述（括号、星号里的），引号里的话不算；旁白的不算亲密（环境描写里的"床"不是在床上）但算紧张（旁白写了交火）
  */
-export function occasionOf(messages = [], { except = null, window = WINDOW, ...people } = {}) {
+export function occasionOf(messages = [], { except = null, window = WINDOW, scene, ...people } = {}) {
+    const alone = aloneNow(scene, people.userName);
     const rows = messages.filter(m => m && !(except && (m.name === except || m.speaker === except))).slice(-window);
     const together = bedTogether(messages, people);
-    let strongClose = 0, softClose = 0, strongTense = 0, softTense = 0;
+    let strongClose = 0, softClose = 0;
     for (const m of rows) {
         const nar = narrationOf(m.text) ?? '';
         if (!isNarrator(m)) { const close = closeCounts(nar, together); strongClose += close.strong; softClose += close.soft; }
-        const tense = tenseCounts(nar); strongTense += tense.strong; softTense += tense.soft;
     }
-    const close = strongClose >= 1 || softClose >= 3;
+    const { strong: strongTense, soft: softTense } = tenseOfRows(rows, alone);
+    const close = !alone && (strongClose >= 1 || softClose >= 3);
     const tense = strongTense >= 1 || softTense >= 3;
     if (close && !tense) return '亲密';
     if (tense && !close) return '紧张';
@@ -107,18 +127,19 @@ export function occasionOf(messages = [], { except = null, window = WINDOW, ...p
     return null;
 }
 // 叩门用的严口径：亲密的弱信号须在同一条里凑够三个；紧张只认强信号。
-export function occasionStrict(messages = [], { except = null, window = WINDOW, ...people } = {}) {
+export function occasionStrict(messages = [], { except = null, window = WINDOW, scene, ...people } = {}) {
+    const alone = aloneNow(scene, people.userName);
     const rows = messages.filter(m => m && !(except && (m.name === except || m.speaker === except))).slice(-window);
     const together = bedTogether(messages, people);
     const closeRows = closeCountsByMessage(rows, { window, ...people });
     const strongClose = closeRows.reduce((n, r) => n + r.strong, 0);
-    const close = strongClose >= 1 || rows.some(m => {
+    const close = !alone && (strongClose >= 1 || rows.some(m => {
         if (isNarrator(m)) return false;
         const nar = narrationOf(m.text) ?? '';
         const parts = count(nar, SOFT_PART), actions = count(nar, SOFT_CLOSE_ACTION) + closeCounts(nar, together).soft - count(nar, SOFT_CLOSE);
         return parts + actions >= 3 && actions >= 2;
-    });
-    const strongTense = tenseStrongCount(rows, { window });
+    }));
+    const strongTense = tenseOfRows(rows, alone, { strongOnly: true }).strong;
     const tense = strongTense >= 1;
     if (close && !tense) return '亲密';
     if (tense && !close) return '紧张';

@@ -35,7 +35,7 @@ import { planRoster, normalizeRelations, personOf, leaderOf } from './relations.
 import { ARRIVAL_SYSTEM, arrivalPrompt, parseArrival, groundedArrivalReason, lastLeave, awaySpan, validAwayPlan, LEAVE_SYSTEM, leavePrompt, parseLeave, isRemote, metInPerson, justLeft, openNow } from './arrival.mjs';
 import { enteredSince, landSent } from './landing.mjs';
 import { intentRecord, closeIntents } from './matters.mjs';
-import { SETTLE_SYSTEM, settlePrompt, parseSettle, settlementTimes } from './settle.mjs';
+import { SETTLE_SYSTEM, settlePrompt, parseSettle, settlementTimes, fallbackStep, fallbackCooling, confirmedPrefix } from './settle.mjs';
 import { crewOf, crewEntry, latestNode, crewPushDue, pushedMeta, pushKey, pushText, effectiveNode } from './crew.mjs';
 import { secretCandidates, recordSecretLeaks, activeLeaks, secretLeakLines } from './held.mjs';
 import { bodyGate, holdBodyContact, heldContactText } from './body.mjs';
@@ -45,10 +45,10 @@ import { boardFor, sourceVersion } from './board.mjs';
 import { executionFor, unrequestedFollower } from './auto.mjs';
 import { awayPlansOf } from './opening.mjs';
 import { unansweredLine, promisesFor, pullOf, placeNow } from './waiting.mjs';
-import { doorFor, narratorHandoff, doorHandoffLive } from './door.mjs';
+import { doorFor, narratorHandoff, doorHandoffLive, fallbackPick } from './door.mjs';
 import { knockNow, knockCandidate, beginKnock, knockAdvance, answerKnock, turnFor, autoLeave, markLeft, waitingKnock, pendingKnock, knocksOf, sourceStep, recentLapsed, leaveDoubts, answerLeaves, cameDoubts, answerCame, takePendingLeft, acknowledgeLeaves, KNOCK_JUDGE_SYSTEM, knockJudgePrompt, parseKnockJudge } from './auto.mjs';   // 自动进离场与调度（D-201）
 import { pendingFor } from './pending.mjs';
-import { beatBrief, planningInput, completePlanningBeat, receivePlanningCheck, planningCheckBasis, planBrief, planningView, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimatePlanOptions } from './slot.mjs';
+import { beatBrief, planningInput, completePlanningBeat, receivePlanningCheck, planningCheckBasis, planBrief, planningView, nodeCheckLines, nodeCheckTaken, writeNodeVerdict, awayMaterial, storyContext, sceneMaterial, advanceImpulse, prepMaterial, situationMaterial, prefetchFor, intimatePlanOptions, intimateSetup } from './slot.mjs';
 import { AWAY_SYSTEM, AWAY_REVISE_SYSTEM, parseAway, awayPrompt, revisePrompt, pinNames, actualDaysOf } from './away.mjs';
 import { FRESH_SYSTEM, freshPrompt, staleSpans, applyFresh, freshAnswerValid, voiceOf, PREVIOUS } from './fresh.mjs';
 import { STAY_SYSTEM, stayPrompt, parseStay, applyStay } from './stay.mjs';
@@ -62,7 +62,7 @@ import { stripper } from './extract.mjs';
 import { LORE_SYSTEM, lorePrompt, parseLore, LORE_VERSION, loreBatch, loreTried, GIVE_UP_VERDICT } from './lore.mjs';
 import { createMaterials, createRelationsDrafts, LOOK_SYSTEM, lookPrompt, parseLook, RELATIONS_SYSTEM } from './materials.mjs';
 import { weekOf, rollLong, activeLong, LONG_SYSTEM, longPrompt, parseLong } from './drift.mjs';
-import { briefSection } from './setup.mjs';
+import { briefSection, activeIntimate } from './setup.mjs';
 import { playModeOf, playStop, holdPlanPersona, clockFor, requestPlanNow, stablePlanEdge, stateBlock, timelineFor, timeStateFor, timeVersionOf, timeBasisFor, timeBasisLive, confirmedDayFor, settledBy, CAMERA_NAME, scaleFor, pastNodesOf, RECENT_NODES, sofarOf, planSystemOf } from './slot.mjs';
 import { withTaste } from './taste.mjs';   // 模型口味层：规划、检查的通用底后面按型号补几句口味（用户 10/15）
 import { extractSystem } from './extract.mjs';
@@ -911,10 +911,15 @@ async function leaveNow({ chat, chatKey, who, avatar, msgs, last, how = null }) 
 
 // unanswered（waiting.mjs，用户 10/9）：他找过玩家、门上一直没人接——这回专为它结算（不受"一个时段一回"管，次数由 waiting 管）
 const settling = new Set();
-async function settleAway({ chatKey, who, avatar = null, reason = '换时段', unanswered = null }) {
+// fallback（T149b）：门上长期没人，替最有牵连的不在场的人跑的这一回 { turns: 玩家那边过了几句 }——不要求他手上有待办，不受"一个时段一回"管（冷却由 autoTurn 那一支管）
+async function settleAway({ chatKey, who, avatar = null, reason = '换时段', unanswered = null, fallback = null, backfill = false }) {
+    // 每道没跑的闸都留一笔（T149b：以前静默返回，32 楼一次没跑也查不出卡在哪）
+    const skip = (why, out) => { log(`settle ${chatKey} ${who}（${reason}）没跑：${why}`); return out; };
+    // 只记忆、暂停总结（playStop）是用户自己关的，不算静默闸；返回里带着原因
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
-    const chat = store.requireChat(chatKey), messages = store.currentMessages(chatKey), last = messages.at(-1);
-    if (!last) return { ok: true, skipped: true };
+    const chat = store.requireChat(chatKey);
+    let messages = store.currentMessages(chatKey), last = messages.at(-1);
+    if (!last) return skip('还没有消息', { ok: true, skipped: true });
     // 人名认成名册里的写法（试玩 10/12：等着没人接那条路用短名记下"要来联系"，名册里是全名——后来他进了场、用掉了都认不出，那条一直挂着）
     {
         const castRows = store.getCast?.(chat.story_id) ?? [], names = castRows.map(c => c.name);
@@ -928,21 +933,31 @@ async function settleAway({ chatKey, who, avatar = null, reason = '换时段', u
         let anchors = null, arrivals = [];
         try { anchors = JSON.parse(chat.anchors ?? 'null'); } catch {}
         try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
-        if (enteredSince(unanswered.since.pos, { who, avatar, messages, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey) })) return { ok: true, skipped: true, entered: true };
+        if (enteredSince(unanswered.since.pos, { who, avatar, messages, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey) })) return skip('等的那条以后他自己进了场', { ok: true, skipped: true, entered: true });
+    }
+    if (timeStateFor(store, records, chatKey, messages).status !== 'confirmed') {
+        // 兜底这一回（T149b，D-298 拿不准就动）：末楼时间还没确认（多半是刚发的那条还没记账），往回找最近一条时间已确认的，
+        // 挂在那条上跑——天、时段都是确认过的，不把暂定的日子记成确认；那条删了产出跟着撤。退 auto.fallbackBack 条内都没确认的就记一笔不跑
+        // backfill（T149g）：普通换时段那回是组格时调的，玩家刚发的那条还没记账，也照这样往回找
+        const back = fallback || backfill ? Math.max(0, Number(getConfig().auto?.fallbackBack ?? 8) || 0) : 0;
+        const k = back ? confirmedPrefix(messages, ms => timeStateFor(store, records, chatKey, ms).status === 'confirmed', back) : 0;
+        if (!k) return skip(back ? `时间未确认，往回 ${back} 条内也没有确认的` : '时间未确认', { ok: false, reason: '时间未确认' });
+        log(`settle ${chatKey} ${who}（${reason}）：末楼时间未确认，挂在已确认的第 ${messages[k - 1].pos} 条上跑`);
+        messages = messages.slice(0, k); last = messages.at(-1);
     }
     const tl = timelineFor(store, records, chatKey, messages);
-    if (timeStateFor(store, records, chatKey, messages).status !== 'confirmed') return { ok: false, reason: '时间未确认' };
     const firm = { ...tl, today: tl.firmToday, part: tl.firmPart, rows: tl.firmRows, dayOf: tl.firmDayOf };
     let settled = null;
     try { settled = JSON.parse(store.getMeta(`settled:${chatKey}:${who}`) ?? 'null'); } catch {}
-    if (!unanswered && settled && settled.fp && messages.some(m => m.pos === settled.pos && m.fp === settled.fp)
-        && settled.day === firm.today && settled.part === firm.part) return { ok: true, skipped: true, idempotent: true };
+    if (!unanswered && !fallback && settled && settled.fp && messages.some(m => m.pos === settled.pos && m.fp === settled.fp)
+        && settled.day === firm.today && settled.part === firm.part) return skip('这一格时间已经结算过', { ok: true, skipped: true, idempotent: true });
     const busyKey = `${chatKey}\u0001${who}`;
-    if (settling.has(busyKey)) return { ok: true, skipped: true, busy: true };
+    if (settling.has(busyKey)) return skip('正在结算', { ok: true, skipped: true, busy: true });
     settling.add(busyKey);
-    try { return await settleOnce({ chat, chatKey, messages, last, tl: firm, who, avatar, unanswered }); } finally { settling.delete(busyKey); }
+    try { return await settleOnce({ chat, chatKey, messages, last, tl: firm, who, avatar, unanswered, fallback, reason }); } finally { settling.delete(busyKey); }
 }
-async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unanswered }) {
+async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unanswered, fallback = null, reason = '换时段' }) {
+    const skip = (why, out) => { log(`settle ${chatKey} ${who}（${reason}）没跑：${why}`); return out; };
     const timeBasis = timeBasisFor(store, records, chatKey, messages);
     // 开局单里开场不在场的那份去向也算（opening.mjs）：结算写回时一起存下，之后就是记下的去向
     const plans = awayPlansOf(store, chatKey, { messages });
@@ -952,7 +967,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
     const sameP = (a, b) => sameName(a, b, roster) || (!!rel && !!personOf(rel, a, roster) && personOf(rel, a, roster) === personOf(rel, b, roster));
     // 只跟着别人出现的人（关系表"跟着"）：镜头外不单独替他结算——他不单独办事、不单独联系人，跟着的那人结算时他就在旁边（T135：依附的人自己发了消息）。
     // 没人接的那一回照旧（那是他已经找过来、门上挂着的）
-    if (!unanswered && rel && leaderOf(rel, who, roster)) return { ok: true, skipped: true, follower: true };
+    if (!unanswered && rel && leaderOf(rel, who, roster)) return skip('他只跟着别人出现', { ok: true, skipped: true, follower: true });
     const plan = Object.values(plans).find(p => sameP(p?.who, who) || (!!avatar && p?.avatar === avatar));
     const person = board.people.find(p => sameP(p.name, who) && p.status !== 'never') ?? board.people.find(p => sameP(p.name, who));
     const pending = pendingFor(store, records, chatKey, { present: [], timeline: tl });
@@ -983,24 +998,26 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
     const { plan: lastPlan, node } = latestNode(store, chatKey);
     const ownEntry = crewEntry(node, who, sameP);
     const ownDue = crewPushDue({ who, userName, crew: crewOf(store.setupOf?.(chat.story_id)?.data ?? null, node, userName), entry: ownEntry, pushed: pushedMeta(store, chatKey, who), today: tl.today, messages, same: sameP });
-    if (!errands.length && !waits.length && !unanswered && !ownDue) return { ok: true, skipped: true };
+    // 兜底那一回（T149b）不要求手上有待办：门上久没人，让他照自己的处境定找不找她
+    if (!errands.length && !waits.length && !unanswered && !ownDue && !fallback) return skip('没有去办、等回音，也不是主角团该推的', { ok: true, skipped: true });
     const own = ownDue ? { want: String(ownEntry.想干 ?? '').trim(), next: String(ownEntry.下一步 ?? '').trim() } : null;
     const rowAt = pos => tl.rows.find(r => r.pos === pos) ?? tl.rows.filter(r => r.pos <= pos).at(-1) ?? null;
     const unans = unanswered ? [unansweredLine(unanswered, { userName, span: awaySpan(rowAt(unanswered.since?.pos ?? last.pos), tl.rows.at(-1) ?? { day: tl.today, part: tl.part }, tl.scale) + `（隔了 ${last.pos - (unanswered.since?.pos ?? last.pos)} 条消息）` })] : [];
     const promises = unanswered ? promisesFor(pending.items, { who, userName, same: sameP, plans: Object.values(plans).map(p => validAwayPlan(p, messages, source => store.sourceLive(chatKey, source), store.knockLiveFor?.(chatKey))).filter(Boolean) }) : [];
-    const spot = unanswered ? placeNow(store.stateNotesOf?.(chatKey) ?? [], { lastPos: last.pos, sameDay: pos => (tl.rows.filter(r => r.pos <= pos).at(-1)?.day ?? tl.today) === tl.today, fallback: board.camera?.from === 'state' || board.camera?.from === 'mark' ? board.camera.place ?? '' : '' }) : '';
-    const here = unanswered ? [spot && `在${spot}`, (p => (p.length ? `身边有${p.join('、')}` : '身边没别人'))(board.people.filter(p => ['present', 'remote'].includes(p.status) && p.name !== CAMERA_NAME).map(p => p.name))].filter(Boolean).join('，') : '';
+    const spot = unanswered || fallback ? placeNow(store.stateNotesOf?.(chatKey) ?? [], { lastPos: last.pos, sameDay: pos => (tl.rows.filter(r => r.pos <= pos).at(-1)?.day ?? tl.today) === tl.today, fallback: board.camera?.from === 'state' || board.camera?.from === 'mark' ? board.camera.place ?? '' : '' }) : '';
+    const here = unanswered || fallback ? [spot && `在${spot}`, (p => (p.length ? `身边有${p.join('、')}` : '身边没别人'))(board.people.filter(p => ['present', 'remote'].includes(p.status) && p.name !== CAMERA_NAME).map(p => p.name))].filter(Boolean).join('，') : '';
     const around = unanswered ? board.people.filter(p => p.card && p.name !== who && p.name !== CAMERA_NAME && ['away', 'absent'].includes(p.status) && (p.place || p.plan?.doing || p.plan?.errands?.length))
         .slice(0, 6).map(p => `${p.name}：${p.place || p.plan?.doing || (p.plan.errands ?? []).map(e => e?.text ?? e).join('；')}`) : [];
     const cfg = getConfig(), s = cfg.stages.scene;
-    if (!s?.baseUrl || !s.apiKey || !s.model || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return { ok: true, skipped: true };
+    if (!s?.baseUrl || !s.apiKey || !s.model) return skip('快活那档没配好', { ok: true, skipped: true });
+    if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) return skip('今天的预算用完了', { ok: true, skipped: true });
     const started = Date.now();
     try {
-        const r = await createModelClient({ ...s, maxOutputTokens: 1500 }).complete({ system: renderPronouns(SETTLE_SYSTEM, { ...playerContext(store, chatKey), person: who }), user: settlePrompt({ who, userName, span, worldTime, leaving, errands, waits, profile, tie, place: person?.place ?? '', unanswered: unans, promises: promises.map(p => p.text), here, around, own }) });
+        const r = await createModelClient({ ...s, maxOutputTokens: 1500 }).complete({ system: renderPronouns(SETTLE_SYSTEM, { ...playerContext(store, chatKey), person: who }), user: settlePrompt({ who, userName, span, worldTime, leaving, errands, waits, profile, tie, place: person?.place ?? '', unanswered: unans, promises: promises.map(p => p.text), here, around, own, quiet: fallback ? { turns: fallback.turns ?? null } : null }) });
         const costUsd = ((r.usage?.input ?? 0) * s.priceInPerM + (r.usage?.output ?? 0) * s.priceOutPerM) / 1e6;
         records.logAssemble({ chatKey, speaker: '(结算)', model: s.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
-        const got = parseSettle(r.text); if (!got) return { ok: false };
-        if (!timeBasisLive(store, records, chatKey, timeBasis)) return { ok: false, stale: true };
+        const got = parseSettle(r.text); if (!got) return skip('回包读不出，原样不动', { ok: false });
+        if (!timeBasisLive(store, records, chatKey, timeBasis)) return skip('结算期间时间依据变了，作废这回', { ok: false, stale: true });
         const fp = last.fp, source = { pos: last.pos, fp, day: tl.today, timeBasis };
         const addSettle = data => records.addDerived({ ...data, known: [...(data.known ?? []), { basis: source }] });
         // 他按自己的打算办到哪：落成他自己的一条（照去办的落法），下次露面那一格里带着（slot 的主角团那一块）；
@@ -1024,18 +1041,20 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
         store.setMeta(`away_plan:${chatKey}`, JSON.stringify(Object.fromEntries(Object.entries(plans).filter(([, p]) => !p?.seed || p.who === who))));
         // 刚走没多久（同一格里，span 以"同一"开头）、不是没人接那种、他走时说的事还没到办的时候：结算说要联系也先按下——记成他心里的，不挂门上
         // （试玩 10/11：他下午刚道别说明天复查，过了一个时段就又发消息问药劲散没散；两条消息前才分开，不像人）
-        const justLeft = !unanswered && (neverHere || (times.departureDay != null && times.departureDay === tl.today && !(got.errands ?? []).some(e => e.result === '办了')));
+        // 兜底那一回（T149b）是门上已经连着几轮没人了，不算"刚分开"；这局从没出场的照旧先按下
+        const justLeft = !unanswered && (neverHere || (!fallback && times.departureDay != null && times.departureDay === tl.today && !(got.errands ?? []).some(e => e.result === '办了')));
         // 不为问身子上门（用户 10/12，方案 叙事节奏与防棘轮 第四节；body.mjs）：要联系的来意是问她身子的，而她最近几条没提身子（或说已经好了）——
         // 照上面"刚分开先按下"的做法记成他心里惦记的，不挂门上；没人接的那一回照旧由下面管
         const gate = bodyGate({ messages, userName });
         const herAliases = rel ? (p => (p ? [p.名, ...(p.又名 ?? [])].filter(Boolean) : []))(personOf(rel, userName, roster)) : [];
         const bodyHold = !unanswered && holdBodyContact({ contact: got.contact, gate, userName, aliases: herAliases });
-        let contactStep = 0;
-        try { contactStep = Number(JSON.parse(store.getRawMeta(`settled_contact:${chatKey}:${who}`) ?? 'null')?.step) || 0; } catch {}
+        let contactStep = 0, origin = null;
+        // 原来那条的来路（兜底写的 from:'fallback'）别被后一次结算盖掉：留成 origin（T149g）
+        try { const old = JSON.parse(store.getRawMeta(`settled_contact:${chatKey}:${who}`) ?? 'null'); contactStep = Number(old?.step) || 0; origin = old?.origin ?? (old?.from && old.from !== 'unanswered' ? old.from : null); } catch {}
         const nextContactStep = () => ++contactStep;
         if (got.contact?.way !== '不' && justLeft) addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}想过要${got.contact.way === '上门' ? '过去一趟' : got.contact.way === '电话' ? '打个电话' : '发条消息'}（${String(got.contact.text ?? '').slice(0, 80)}），${neverHere ? '先按下了' : '想想刚分开没多久，先按下了'}`, holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
         else if (bodyHold) addSettle({ storyId: chat.story_id, fp, type: '心里', text: heldContactText({ who, way: got.contact.way, userName, gate }), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
-        else if (got.contact?.way !== '不') store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way: got.contact.way, text: got.contact.text, at: last.pos, fp, basisDay: tl.today, timeBasis, step: nextContactStep(), used: false }));
+        else if (got.contact?.way !== '不') store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way: got.contact.way, text: got.contact.text, at: last.pos, fp, basisDay: tl.today, timeBasis, step: nextContactStep(), used: false, ...(fallback ? { from: 'fallback' } : origin ? { origin } : {}) }));
         // 没人接的那一回（waiting.mjs）：再找（发消息、打电话、找上门）→ 门上换成这一回的；放下 → 门上那一项收起（挂在这一条上，删回去就回来）
         if (unans.length) {
             const u = unans[0];
@@ -1050,7 +1069,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
                 let earlier = null;
                 if (src?.type === 'pocket') { const m = store.menuOf(chatKey).find(x => x.id === Number(src.id)); if (m) earlier = { way: u.how === '打来电话' ? '电话' : '消息', title: m.title ?? '', surface: m.surface ?? '', respond: m.respond ?? '' }; }
                 if (src?.type === 'contact') { try { earlier = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null')?.earlier ?? null; } catch {} }
-                store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way, text: (got.contact?.way !== '不' && got.contact?.text) || note, at: last.pos, fp, basisDay: tl.today, timeBasis, step: nextContactStep(), used: false, from: 'unanswered', ...(pull ? { pull } : {}), ...(earlier?.surface ? { earlier } : {}) }));
+                store.setMeta(`settled_contact:${chatKey}:${who}`, JSON.stringify({ way, text: (got.contact?.way !== '不' && got.contact?.text) || note, at: last.pos, fp, basisDay: tl.today, timeBasis, step: nextContactStep(), used: false, from: 'unanswered', ...(origin ? { origin } : {}), ...(pull ? { pull } : {}), ...(earlier?.surface ? { earlier } : {}) }));
                 addSettle({ storyId: chat.story_id, fp, type: '心里', text: `${who}找过${userName}没人接，又${way === '上门' ? '找上门去' : way === '电话' ? '打了电话' : '发了一条'}：${note}`.slice(0, 200), holder: avatar ?? `name:${who}`, holderName: who, audience: [who], about: who });
             } else if (result === '放下') {
                 const src = unanswered.item?.source;
@@ -2212,6 +2231,8 @@ async function autoRun({ chatKey }) {
     if (!cfg.auto?.enabled) {
         // sync 已提交稿本后后台理好手动进场那份；不把这次工作串到发送前。
         await confirmation;
+        // 关着也把人送到门那一栏（T149i）：只写 settled_contact，不叩门、不进场；没有队列，present 用空（在场看稿本里的 board）
+        if (Number(cfg.auto?.fallbackTurns) > 0) fallbackTick({ chatKey });
         const handoff = narratorHandoff(store, chatKey);
         if (!handoff || handoff.reason || handoff.consumed) return { ok: true, skipped: true };
         const c = knockCandidate(store, records, chatKey, { prepare: true });
@@ -2280,6 +2301,11 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
             } catch (error) { knock = null; t.complete = false; t.why = `建立联系失败：${error.message}`; log(`auto ${chatKey}: arrive for knock failed ${error.message}`); }
         } else t.why = t.why ? `${t.why}；${k.why}` : k.why;
     }
+    // 门上长期没人（T149b，G1）：玩家连着 auto.fallbackTurns 句门上都没有到时候的人，就替和她最有牵连、不在场的那一位跑一次时间结算，
+    // 让他照自己的处境定联系、上门还是放下；结算写下的联系照旧挂门上（settled_contact，挂在结算那条上，删了跟着撤）。
+    // 不跑：门上有人到点、有候着的叩门；场上有别的有卡的人（亲密线里的人在场就是亲密戏）；场面正在承接（说好的今天在办、递出的口袋件还没接）；同一人还在冷却里。
+    // 没配（测试里的裸配置）就不进这一支
+    if (!knock && cfg.auto.knock !== false && Number(cfg.auto.fallbackTurns) > 0) fallbackTick({ chatKey, present, answering: t.queue.some(q => q.role === '答') });
     // 调度式预跑：排在头一个的，这句的那一格先组装起来（打字时的草稿和发出去的不一样时，草稿那份用不上）
     if(sourceVersion(store,chatKey)!==source)return {queue:[],complete:false,knock:null,left,why:'来源已改变，停下重新核对',...tail()};
     const first = t.queue.find(q => q.avatar);
@@ -2287,6 +2313,48 @@ async function autoTurn({ chatKey, present = [], recentUser = '', peek = false }
     const out = { queue: t.queue.map(q=>executionFor(store,chatKey,q)), complete:t.complete, why: t.why, ...(t.pendingContact ? { pendingContact: t.pendingContact } : {}), knock: knock ? executionFor(store,chatKey,{ who: knock.who, avatar: knock.avatar, way: knock.way, at: knock.at, fp: knock.fp, label: knock.label ?? '', ...(knock.handoff ? { handoff: knock.handoff } : {}) },'knock') : null, left, ...tail() };
     log(`turn ${chatKey}: [${out.queue.map(q => `${q.who}·${q.role}${q.back ? '·叫回来' : ''}`).join(' ')}]${out.knock ? ` 叩门 ${out.knock.who}（${out.knock.way}）` : ''}${out.waiting ? ` 候着 ${out.waiting.who}` : ''}${out.lapsed.length ? ` 作废 ${out.lapsed.map(l => l.who).join(' ')}` : ''}${found.length ? ` 新判定走了 ${found.map(l => l.who).join(' ')}` : ''}${!out.queue.length ? ` — ${out.why}` : ''}`);
     return out;
+}
+// 门上长期没人的兜底（T149b，T149i 抽出）。开着时 autoTurn 调（叩门条件 auto.knock 由它那边把关：开着时没有叩门就没有"门上没人"一说）；
+// 关着时 autoRun 调（关着本来就不叩门，门栏靠按钮，所以不看 auto.knock）。这里只写 settled_contact，不叩门、不进场。
+// answering：开着时队列里有点名答话的；关着时没有队列，恒 false
+function fallbackTick({ chatKey, present = [], answering = false }) {
+    const cfg = getConfig();
+    try {
+        const all = store.currentMessages(chatKey).filter(m => !m.hidden);
+        const tl = timelineFor(store, records, chatKey, store.currentMessages(chatKey));
+        const door = doorFor(store, records, chatKey, { present, timeline: tl });
+        // 到点了的才算有人（叩过、没人接作废了的那一项不算，同 auto.knockCandidate）
+        const lapsedKeys = new Set(knocksOf(store, chatKey).filter(k => k.lapsed && k.source).map(k => `${k.source.type}:${k.source.id}`));
+        const ready = (door.allReady ?? []).some(i => !(i.source && lapsedKeys.has(`${i.source.type}:${i.source.id}`))) || !!waitingKnock(store, records, chatKey) || answering;
+        let prev = {}; try { prev = JSON.parse(store.getMeta(`fallback_wait:${chatKey}`) ?? '{}') ?? {}; } catch {}
+        const { next, due, count } = fallbackStep(prev, { messages: all, ready, turns: cfg.auto.fallbackTurns });
+        const save = value => { if (JSON.stringify(value) !== JSON.stringify(prev)) store.setMeta(`fallback_wait:${chatKey}`, JSON.stringify(value)); };
+        save(next);
+        if (due) {
+            const board = boardFor(store, records, chatKey, { present, timeline: tl });
+            // 场上有别的有卡的人（当面、远程）就不兜：亲密戏只会是和场上的人（亲密线里的人在场）；她一个人时叙述里的字眼不算亲密戏（第一步：独处楼被字眼误判）
+            const others = board.people.filter(p => p.card && p.name !== CAMERA_NAME && ['present', 'remote'].includes(p.status));
+            const intimate = activeIntimate(intimateSetup(store, chatKey));
+            const close = others.some(p => intimate.some(x => (x.谁 ?? []).includes(p.name) || (x.可加入 ?? []).includes(p.name)));
+            const scene = others.length ? null : planningInput(store, records, chatKey, { present }).scene;
+            const why = close ? '亲密戏' : others.length ? `场上有${others.map(p => p.name).join('、')}` : scene.hold || scene.stacked > 0 ? '场面正在承接' : '';
+            if (why) log(`auto ${chatKey}: 门上 ${count} 句没人，兜底先不跑：${why}`);
+            else {
+                const pick = fallbackPick(store, records, chatKey, { timeline: tl, hearts: latestNode(store, chatKey).node?.心事 ?? [], intimate,
+                    cooling: card => fallbackCooling(next.runs?.[card.avatar], all, cfg.auto.fallbackCooldown) })[0];
+                if (!pick) log(`auto ${chatKey}: 门上 ${count} 句没人，兜底没有可挑的人`);
+                else {
+                    const tip = all.at(-1);
+                    // 冷却从挂上这一下算；没调模型就没跑成的（时间几条内都没确认、闸门拦下）撤掉这一笔，下一轮再试——调过模型的（回包读不出、依据变了）冷却照算，免得每轮花钱
+                    save({ from: null, runs: { ...next.runs, [pick.avatar]: { pos: tip.pos, fp: tip.fp } } });
+                    log(`auto ${chatKey}: 门上 ${count} 句没人，兜底替${pick.who}结算（牵连 ${pick.score}：${Object.entries(pick.parts).filter(([, v]) => v).map(([k, v]) => `${k}${v}`).join('、')}）`);
+                    const undo = () => { try { const cur = JSON.parse(store.getMeta(`fallback_wait:${chatKey}`) ?? '{}') ?? {}; if (cur.runs?.[pick.avatar]?.fp === tip.fp) { delete cur.runs[pick.avatar]; store.setMeta(`fallback_wait:${chatKey}`, JSON.stringify(cur)); } } catch {} };
+                    Promise.resolve(settleAway({ chatKey, who: pick.who, avatar: pick.avatar, reason: '兜底', fallback: { turns: count } }))
+                        .then(r => { if (r?.skipped || r?.reason === '时间未确认') undo(); log(`auto ${chatKey}: 兜底结算${pick.who}：${r?.ok === false ? `没成（${r.reason ?? (r.stale ? '依据变了' : '回包读不出')}）` : r?.skipped ? '没跑' : r?.contact?.way && r.contact.way !== '不' ? `要${r.contact.way}` : '先不找'}`); }, error => { undo(); log(`auto ${chatKey}: 兜底结算失败 ${error.message}`); });
+                }
+            }
+        }
+    } catch (error) { log(`auto ${chatKey}: 兜底判断失败 ${error.message}`); }
 }
 // 打字时预跑问"这句之后谁会开口"（server /v1/prefetch）：排到的人、门上该叩的那位；关着返回 null（照旧替在场的人都预跑）
 function autoPredict({ chatKey, present = [], recentUser = '' }) {

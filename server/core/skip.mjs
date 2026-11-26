@@ -10,6 +10,7 @@
 // 题材无关：日子、地方、人都来自聊天、记账和规划。
 import { entryOf, ttlOf, SCENE_TTL, nearPlace } from './planner.mjs';
 import { datedEvent, mainEvent } from './eventlead.mjs';
+import { scaleOf, DAY } from './timescale.mjs';
 
 export const SKIP_WINDOW = 12;     // 跨天那条离最新一条超过这么多条就不认了（头一回启用时不补认早先的跨天）
 export const SKIP_RUNS = 3;        // 局势补跑至多几次
@@ -62,6 +63,26 @@ export function inSkip(m, skip) {
 const saidThere = (m, said) => !nearPlace(m, '') && nearPlace(m, said);
 
 export const SKIP_MISSED = '玩家交代的这段时间里来过，没人应';
+
+// 跳后补算按幅度分三档（D-297），幅度按这一局的单位相对算：span 是跳过的格数（这一局的单位）。
+//   一格以内（span ≤ 1）：不补；小跳（2 ～ 门槛-1）：照现有（口袋按空白处理），清完让规划补货；
+//   大跳（span ≥ 门槛）：当换幕——旧口袋整体作废，节点检查顺带问原目标还成立否。门槛取这一局的 expire（"待办记下多久以后不算"，timescale）。
+export function skipSize(skip, timeScale = DAY) {
+    const span = Number(skip?.span);
+    if (!Number.isFinite(span) || span <= 1) return 'none';
+    return span >= scaleOf(timeScale).expire ? 'big' : 'small';
+}
+export const SKIP_SCENE = '玩家交代跳过了很长一段，当换了一幕：之前排着的这件作废';
+// 大跳作废旧口袋：还排着的、口袋里的都作废；镜头外的、跟着一件还没办的约定的（keep）、有日子的活动另有处理（spare）不动
+export function sceneSkip(menu, skip, { keep = () => false, spare = () => false } = {}) {
+    return (menu ?? []).filter(m => ['waiting', 'pocket'].includes(m.status) && entryOf(m) !== '镜头外' && !keep(m) && !spare(m))
+        .map(m => ({ id: m.id, status: 'void', why: SKIP_SCENE }));
+}
+// 节点检查顺带的那一问（大跳以后、这一份规划还是跳之前排的）
+export function sceneSkipLines(jump, timeScale = DAY) {
+    if (!jump) return [];
+    return ['', `【跳过的一段】玩家交代一下过了 ${scaleOf(timeScale).span(jump.span)}（原话：${clip(jump.said, 120)}）。照玩家交代的为准，看这个阶段的目标还成不成立：已经不成立、或者这一段里已经有了结局的，"结果"写"落空"并在"依据"里说清；还成立就照常判。`];
+}
 // 口袋按空白处理（settleSkip）：返回 [{ id, status, why }]——过期（expired）静静撤；沉底（sunk）照沉底的后果走。
 // keep(m)：跟着一件还没办的约定的，等那件事，不动；blocked(m)：前面那件还没了结的，不动。
 // isPlayer(名字)：到现场的那件，去的人（谁去）是别的角色、不是玩家——玩家跳过这段不等于他没去，不算过期，照旧
