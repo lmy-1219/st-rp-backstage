@@ -2246,6 +2246,12 @@ async function syncOnce(force = false, light = false) {
             if (!here()) return false;
             state.collapsed = result.collapsed ?? null;
             if (result.committed !== true || result.need?.length || state.collapsed) { setStage(state, 'sync', '等待', '后台提交待确认'); return false; }
+            // T154e：分支窗首次同步，后台量出共有前缀 k；前端元数据按这个 k 截一次（不用此刻的楼数）
+            if (typeof cutBranchMetadata === 'function' && Number.isInteger(result.branchCut?.k) && ctx().chat === c.chat && ctx().chatMetadata === c.chatMetadata
+                && cutBranchMetadata(c, { k: result.branchCut.k, chatKey: state.chatKey })) {
+                if (typeof c.saveMetadata === 'function') await c.saveMetadata();
+                state.dirty = true;
+            }
             if (intent && state.cameraIntent === intent && flight.confirmation?.handoff !== intent) state.cameraIntent = null;
             if (state.pendingSyncEpoch === epoch) state.pendingSyncEpoch = null;
             // 记下后台这次认得的序列：生成前用它判断锚点那条是不是已经同步过（anchorCovered）
@@ -2503,20 +2509,28 @@ function reconnect(manual = false) {
 // 没记楼数的老条目（老窗里的静音标记）保留不动。
 // 第二十一封：从分支再开分支时，ST 把源窗的元数据整份复制过来（含源窗的 rpeBranchCut），只换 main_chat。
 // 所以标记只有在「是为这个窗写的」时才算截过：from 等于当前 main_chat，且记了窗名的要和当前窗名一致。
-function cutBranchMetadata(c) {
-    const meta = c?.chatMetadata;
-    if (!meta || !meta.main_chat || !Array.isArray(c.chat)) return false;
+// T154e：切点 k 用后台首次同步量出的共有前缀（result.branchCut.k），不用此刻的楼数；没给 k 就不截。标记认接入时后台确认的 chatKey：
+// 标记有 chatKey 的只认 chatKey 相等；v6.31 的 {from, at, chat} 按窗名认；更老的 {from, at} 只看 from。
+function cutBranchMetadata(c, opts = {}) {
+    const meta = c?.chatMetadata, k = opts?.k, chatKey = opts?.chatKey ?? null;
+    if (!meta || !meta.main_chat || !Array.isArray(c.chat) || !Number.isInteger(k) || k < 0 || chatKey == null) return false;
     const self = c.chatId ?? c.getCurrentChatId?.() ?? null, done = meta.rpeBranchCut;
-    if (done != null && done.from === meta.main_chat && (done.chat == null || self == null || done.chat === self)) return false;
-    const k = c.chat.length;
-    const drop = (obj, floorOf) => { if (obj && typeof obj === 'object') for (const key of Object.keys(obj)) { const f = floorOf(obj[key], key); if (Number.isFinite(f) && f > k) delete obj[key]; } };
-    drop(meta.rpeExecution, e => e?.at);
-    drop(meta.rpeLeaveEvents, r => r?.after?.to != null ? r.after.to - 1 : null);
-    if (meta.rpeManualMuted && typeof meta.rpeManualMuted === 'object') {
-        const at = meta.rpeManualMutedAt ?? {};
-        for (const avatar of Object.keys(meta.rpeManualMuted)) if (Number.isFinite(at[avatar]) && at[avatar] > k) { delete meta.rpeManualMuted[avatar]; delete at[avatar]; }
+    if (done != null) {
+        if (done.chatKey != null) { if (done.chatKey === chatKey) return false; }
+        else if (done.from === meta.main_chat && (done.chat == null || self == null || done.chat === self)) return false;
     }
-    meta.rpeBranchCut = { from: meta.main_chat, at: k, ...(self != null ? { chat: self } : {}) };   // 记在分支窗自己的元数据里；父窗那份不动
+    // T154e2：记录自己带着 chatKey 且等于本窗的，是子窗自己写的，留下；别的窗的才按楼号截；没记归属的老条目照旧按楼号
+    const drop = (obj, floorOf, ownerOf) => { if (obj && typeof obj === 'object') for (const key of Object.keys(obj)) {
+        if (ownerOf(obj[key], key) === chatKey) continue;
+        const f = floorOf(obj[key], key); if (Number.isFinite(f) && f > k) delete obj[key];
+    } };
+    drop(meta.rpeExecution, e => e?.at, e => e?.chatKey);
+    drop(meta.rpeLeaveEvents, r => r?.after?.to != null ? r.after.to - 1 : null, r => r?.chatKey);
+    if (meta.rpeManualMuted && typeof meta.rpeManualMuted === 'object') {
+        const at = meta.rpeManualMutedAt ?? {}, by = meta.rpeManualMutedBy ?? {};
+        for (const avatar of Object.keys(meta.rpeManualMuted)) if (by[avatar] !== chatKey && Number.isFinite(at[avatar]) && at[avatar] > k) { delete meta.rpeManualMuted[avatar]; delete at[avatar]; delete by[avatar]; }
+    }
+    meta.rpeBranchCut = { from: meta.main_chat, at: k, chatKey };   // 记在分支窗自己的元数据里；父窗那份不动
     return true;
 }
 
@@ -2553,7 +2567,6 @@ async function openCurrent(c, epoch, mark, manual) {
             if (epoch !== state.epoch || ctx().chat !== c.chat) return false;
         }
         const ids = chatIds(ctx());
-        if (typeof cutBranchMetadata === 'function' && result.status === 'branch' && ctx().chatMetadata === c.chatMetadata && cutBranchMetadata(c)) await c.saveMetadata();
         if (state.leaveWindow === gate && ids.stChatId === stChatId && ids.groupId === groupId && ctx().chatMetadata === c.chatMetadata) {
             Object.assign(gate, { stChatId, groupId, chat: c.chat, metadata: c.chatMetadata });
         }
@@ -4746,7 +4759,7 @@ async function applyAutoClose(l,why,chatKey,valid = () => true) {
             resident:residentFromStart(c,{avatar:ch.avatar,name:ch.name,firstSnapshot:state.firstMemberSnapshot})});
         if(decision.status==='correction') throw Error(decision.reason);
         if(decision.status==='superseded') {
-            journal[key]={...(receipt??{}),avatar:ch.avatar,status:'superseded',observed:true};
+            journal[key]={...(receipt??{}),chatKey:receipt?.chatKey??chatKey,avatar:ch.avatar,status:'superseded',observed:true};
             await save();
             guard();
             if(l.id) await ackLeave(chatKey,{id:l.id,version:l.version,action:l.action,result:'superseded'});
@@ -4756,7 +4769,8 @@ async function applyAutoClose(l,why,chatKey,valid = () => true) {
     // 本次事件的重试复用最初的快照，刷新页面后也一样。
     if(l.action!=='undo' && (!receipt || receipt.undone)) {
         guard();
-        journal[key]={avatar:ch.avatar,before:copy(anchor()),wasDisabled:!!group.disabled_members?.includes(ch.avatar)};
+        // T154e 第二十五封：日常自动离场也记归属（入口拿到的就是本窗 chatKey），截分支时认它
+        journal[key]={chatKey,avatar:ch.avatar,before:copy(anchor()),wasDisabled:!!group.disabled_members?.includes(ch.avatar)};
         await save();
     }
     const rec=journal[key];
@@ -4873,7 +4887,7 @@ async function pickPresence() {
         if(JSON.stringify(now)!==JSON.stringify(x.segs))throw Error('在场区间已改变，请重新核对');
         const anchor=c.chatMetadata?.contextIsolation?.anchors?.[x.ch.avatar];if(anchor)anchor.rpeManualRevision=crypto.randomUUID();
         const g=currentGroup(c),member=g?.members.indexOf(x.ch.avatar)??-1,wasDisabled=!!g?.disabled_members?.includes(x.ch.avatar);
-        const journal=c.chatMetadata.rpeLeaveEvents??={},rec=journal[x.key]??={avatar:x.ch.avatar,before:structuredClone(c.chatMetadata?.contextIsolation?.anchors?.[x.ch.avatar]??null),wasDisabled};
+        const journal=c.chatMetadata.rpeLeaveEvents??={},rec=journal[x.key]??={chatKey:c.chatMetadata.rp_emergence?.chatKey??state.chatKey,avatar:x.ch.avatar,before:structuredClone(c.chatMetadata?.contextIsolation?.anchors?.[x.ch.avatar]??null),wasDisabled};
         if(x.candidate){rec.after=structuredClone(x.candidate);rec.observed=true;rec.status='achieved';}
         else {const done=await closeSegment(c,{avatar:x.ch.avatar,name:x.ch.name,at,resident:true,disabled:wasDisabled});rec.after=structuredClone(done.segment);rec.closed=true;rec.status='applied';}
         journal[x.key]=rec;await c.saveMetadata();
@@ -5410,7 +5424,7 @@ function watchMembers(beforeSave) {
     const save=()=>c.saveMetadata().catch(error=>{state.note=`静音归属尚未保存：${error.message}`;render();});
     let cleaned=false;
     // 标记只对实际静音的人有效；首次接入、系统解静音也要清旧脏数据。
-    for(const avatar of Object.keys(manual))if(!snap.disabled.includes(avatar)){delete manual[avatar];if(c.chatMetadata.rpeManualMutedAt)delete c.chatMetadata.rpeManualMutedAt[avatar];cleaned=true;}
+    for(const avatar of Object.keys(manual))if(!snap.disabled.includes(avatar)){delete manual[avatar];if(c.chatMetadata.rpeManualMutedAt)delete c.chatMetadata.rpeManualMutedAt[avatar];if(c.chatMetadata.rpeManualMutedBy)delete c.chatMetadata.rpeManualMutedBy[avatar];cleaned=true;}
     if (!base || base.key !== snap.key) { if(cleaned)save();return; }
     const now = snap.members;
     const sources = state.panelArrivalSources ??= new WeakMap();
@@ -5457,6 +5471,7 @@ function watchMembers(beforeSave) {
     }
     for(const avatar of snap.disabled.filter(a=>!base.disabled.includes(a)&&now.includes(a)&&!state.entering.has(a))){
         manual[avatar]=true;(c.chatMetadata.rpeManualMutedAt??={})[avatar]=(c.chat??[]).length;
+        (c.chatMetadata.rpeManualMutedBy??={})[avatar]=c.chatMetadata.rp_emergence?.chatKey??state.chatKey;   // T154e2：记归属，截分支时认
         const owned=c.chatMetadata.rp_emergence?.openingMuted;
         if(owned)c.chatMetadata.rp_emergence.openingMuted=owned.filter(a=>a!==avatar);
     }

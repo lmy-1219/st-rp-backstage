@@ -755,7 +755,10 @@ export function openStore(file) {
             // 这次没带区间（后台自己同步那回）：拿上回存的原样那份按新的序列再认一遍
             // T154c：分支窗的区间先按切出点截（ST 复制来的父窗那份带着未来的区间；分支自己后来写的留下）。没开过分支的窗不走这里。
             let cutK = null;
-            if (chat.parent_key && newFps.length) {
+            // T154e 第二十五封：切点一旦记下（branch_cut）就沿用它，不再随父窗之后的删改重算（父窗删回去、改稿都不影响已定的切点）
+            const recordedCut = chat.parent_key ? getMeta(`branch_cut:${chatKey}`) : null;
+            if (recordedCut != null && Number.isInteger(Number(recordedCut))) cutK = Number(recordedCut);
+            else if (chat.parent_key && newFps.length) {
                 const k = branchLen(chat, newFps);
                 // 从最后一楼开的分支（共有前缀就是父窗全部）：没有"未来"可截，和父窗完全一样
                 if (k < q('select count(*) n from chat_seq where chat_key = ?').get(chat.parent_key).n) cutK = k;
@@ -768,7 +771,11 @@ export function openStore(file) {
             };
             if (anchors) anchors = branchCut(anchors);
             // 第一次同步才知道切出点：open() 复制来的后台那份（chats.anchors）和草稿（door_handoffs）在这里按切出点截一次
-            if (cutK != null && getMeta(`branch_cut:${chatKey}`) == null) {
+            const storedCut = cutK != null ? getMeta(`branch_cut:${chatKey}`) : null;
+            const firstCut = cutK != null && storedCut == null;   // T154e：这一次才量出切点
+            // T154e2：切点定了以后每次都回给前端（前端靠自己的标记判断截没截过）；首次结果没落到 ST 时重进仍能补截。沿用已记的那个 k。
+            const reportK = firstCut ? cutK : (storedCut != null && Number.isInteger(Number(storedCut)) ? Number(storedCut) : null);
+            if (firstCut) {
                 setMeta(`branch_cut:${chatKey}`, String(cutK));
                 let own = null;
                 try { own = JSON.parse(chat.anchors ?? 'null'); } catch {}
@@ -796,7 +803,7 @@ export function openStore(file) {
             if (authorizationWrite) bumpAuthorization(chatKey);
             setMeta(`sync_rev:${chatKey}`, String(Number(syncRevision(chatKey)) + 1));
             return { committed: true, need: [], total: newFps.length, ...change, hasAnchorProjection: raw != null || chat.anchors != null,
-                ...(edits.length ? { edited: edits.map(e => e.pos) } : {}), ...(repaired ? { repaired } : {}) };
+                ...(edits.length ? { edited: edits.map(e => e.pos) } : {}), ...(repaired ? { repaired } : {}), ...(reportK != null ? { branchCut: { k: reportK } } : {}) };
         }
     }
 
