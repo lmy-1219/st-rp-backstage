@@ -11,7 +11,7 @@ export { RELEASE_REPOSITORY, isReleaseOrigin } from './install.mjs';
 
 // 装进 ST 的文件：扩展、转发插件（插件的 config.json 是每个 ST 自己的，不在这里）
 export const INSTALL = [
-    { from: 'extension', to: ['data', 'default-user', 'extensions', 'rp-emergence'], files: ['manifest.json', 'index.js', 'sync.mjs', 'lifecycle.mjs', 'presence.mjs', 'presence-events.mjs', 'presence-import.mjs', 'presence-write.mjs'] },
+    { from: 'extension', to: ['data', 'default-user', 'extensions', 'rp-emergence'], files: ['manifest.json', 'index.js', 'sync.mjs', 'lifecycle.mjs', 'presence.mjs', 'presence-events.mjs', 'presence-import.mjs', 'presence-write.mjs', 'presence-confirm.mjs'] },
     { from: 'plugin', to: ['plugins', 'rp-emergence'], files: ['index.js', 'package.json'] },
 ];
 
@@ -44,6 +44,26 @@ function extensionClone(stRoot) {
     return candidates.find(dir => fs.existsSync(dir)) ?? null;
 }
 
+// 每版的说明写在发布仓那版的 release.json 的 notes 字段里；没写（旧版本）就给占位。
+export const NO_NOTES = '这一版没有写说明';
+const versionNotes = info => {
+    if (!info || !Number.isSafeInteger(info.version)) return [];
+    const text = typeof info.notes === 'string' ? info.notes.trim().slice(0, 600) : '';
+    return [{ version: info.version, label: /^\d+(\.\d+)?$/.test(String(info.label ?? '')) ? String(info.label) : null, notes: text || NO_NOTES, written: !!text }];
+};
+async function releaseNotes(repo, range, currentVersion, max = 30) {
+    const commits = (await git(repo, ['rev-list', '-n', String(max), range])).out.split('\n').filter(Boolean);
+    const seen = new Set(), out = [];
+    for (const hash of commits) {
+        const r = await git(repo, ['show', `${hash}:release.json`]);
+        if (!r.ok) continue;
+        let info; try { info = JSON.parse(r.out); } catch { continue; }
+        if (!Number.isSafeInteger(info?.version) || info.version <= currentVersion || seen.has(info.version)) continue;
+        seen.add(info.version); out.push(...versionNotes(info));
+    }
+    return out.sort((a, b) => b.version - a.version);
+}
+
 // 看一眼：这份拷贝在哪个版本、正本推送到了哪、差几个提交、改到了哪些地方
 export async function checkRelease({ repo, stRoot = null, follow = 'origin/main', fetch = true, acceptsOrigin = isReleaseOrigin }) {
     repo=releaseRoot(repo);
@@ -61,6 +81,7 @@ export async function checkRelease({ repo, stRoot = null, follow = 'origin/main'
     const count = async range => Number((await git(repo, ['rev-list', '--count', range])).out || 0);
     const pluginBehind = await count(`HEAD..${follow}`), ahead = await count(`${follow}..HEAD`);
     let behind = pluginBehind, extensionBehind = 0;
+    let notesRange = `HEAD..${follow}`, notesFrom = info?.version ?? 0;
     let changed = behind ? (await git(repo, ['diff', '--name-only', `HEAD..${follow}`])).out.split('\n').filter(Boolean) : [];
     let log = behind ? (await git(repo, ['log', '--format=%s', '-n', '10', `HEAD..${follow}`])).out.split('\n').filter(Boolean) : [];
     if (info?.layout === 2 && stRoot) {
@@ -71,6 +92,8 @@ export async function checkRelease({ repo, stRoot = null, follow = 'origin/main'
                 extensionBehind = await count(`${extHead.out}..${target.out}`);
                 if (pluginBehind === 0 && extensionBehind > 0) {
                     behind = extensionBehind;
+                    notesRange = `${extHead.out}..${target.out}`;
+                    notesFrom = readReleaseInfo(ext)?.version ?? 0;
                     changed = (await git(repo, ['diff', '--name-only', `${extHead.out}..${target.out}`])).out.split('\n').filter(Boolean);
                     log = (await git(repo, ['log', '--format=%s', '-n', '10', `${extHead.out}..${target.out}`])).out.split('\n').filter(Boolean);
                     const extInfo = readReleaseInfo(ext);
@@ -81,8 +104,11 @@ export async function checkRelease({ repo, stRoot = null, follow = 'origin/main'
     }
     let targetInfo;
     try { const r = await git(repo, ['show', `${follow}:release.json`]); if (r.ok) targetInfo = JSON.parse(r.out); } catch {}
+    // 这几版各自写了什么（从新到旧）；拿不到就是空数组，不影响更新。已是最新时给当前这一版的。
+    let notes = [];
+    try { notes = behind ? await releaseNotes(repo, notesRange, notesFrom) : targetInfo ? versionNotes(targetInfo) : []; } catch { notes = []; }
     return {
-        ok: true, ...channel,
+        ok: true, ...channel, notes,
         head: head.out.slice(0, 7), headFull: head.out, target: target.out.slice(0, 7), targetFull: target.out, targetLabel: published ? label(targetInfo?.label) : null, behind, extensionBehind, ahead, dirty, log,
         changed: changed.length,
         // 改到转发插件的，要重启 ST 才生效；改到扩展的，刷新网页

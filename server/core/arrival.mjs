@@ -208,13 +208,14 @@ export function metInPerson(messages, { who, names = [], userName = null, notes 
 // 返回名字集合；要分电话还是消息用 remoteWayAt
 export function remoteAt(pos, opts = {}) { return new Set(remoteWayAt(pos, opts).keys()); }
 // 同上，返回 Map：名字 → '电话' | '消息'（隔着电话的，话筒收得到那头所有说出口的话；隔着消息的只收得到玩家对他说的、他自己说的）
-export function remoteWayAt(pos, { arrivals = [], anchors = null, members = [], messages = null, userName = null, notes = [], knockLive = null } = {}) {
+export function remoteWayAt(pos, { arrivals = [], anchors = null, members = [], messages = null, userName = null, notes = [], knockLive = null, confirmFloor = null } = {}) {
     assertKnockReader(knockLive, remoteWayAt);
     const out = new Map();
     const entries = (Array.isArray(arrivals) ? arrivals : Object.values(arrivals ?? {})).filter(e => e && Number.isFinite(Number(e.at)));
     const list = messages ? [...messages].sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0)) : null;
-    const fpOk = e => e.source_basis || e.recs?.length || e.menus?.length
-        ? arrivalLive(e, list ?? [], entries, anchors, knockLive)
+    // T150f：确认楼起的进场记录不再有资格说"他在场"（faced 照旧用带确认楼的核），但"他是隔着电话、消息来的"只记在它上面，开区间的那条（openers）要照常核，否则远程方式丢了
+    const fpOk = (e, floor = confirmFloor) => e.source_basis || e.recs?.length || e.menus?.length
+        ? arrivalLive(e, list ?? [], entries, anchors, knockLive, 'prepare', floor)
         : !list || list.find(m => m.pos === Number(e.at) - 1)?.fp === e.fp;
     const user = userName ?? (list ? [...list].reverse().find(m => m.is_user && m.name)?.name ?? null : null);
     const marks = (list ?? []).filter(m => m.pos <= pos && m.boardMark).map(m => {
@@ -229,9 +230,12 @@ export function remoteWayAt(pos, { arrivals = [], anchors = null, members = [], 
         if (seg) {
             since = Number(seg.from);
             const mine = entries.filter(e => (member.avatar && e.avatar === member.avatar) || e.who === member.name);
-            const openers = mine.filter(e => Number(e.at) === since && isRemote(e.how) && fpOk(e));
-            const opened = openers.length > 0;
-            way = openers.some(e => /电话|来电/.test(e.how ?? '')) ? '电话' : '消息';
+            const sealed = confirmFloor != null && since >= Number(confirmFloor);
+            const openers = mine.filter(e => Number(e.at) === since && isRemote(e.how) && fpOk(e, sealed ? null : confirmFloor));
+            // 新区间自己带了方式的（segment.way）以新区间为准，没带才看进场记录
+            const segWay = sealed && ['远程', '电话', '消息', '当面'].includes(seg.way) ? seg.way : null;
+            const opened = segWay ? segWay !== '当面' : openers.length > 0;
+            way = segWay === '电话' ? '电话' : segWay === '消息' ? '消息' : openers.some(e => /电话|来电/.test(e.how ?? '')) ? '电话' : '消息';
             const faced = mine.some(e => Number(e.at) > since && Number(e.at) <= pos && !isRemote(e.how) && fpOk(e));
             const met = opened && !faced && !!list && metInPerson(list.filter(m => m.pos >= since && m.pos <= pos), { who: member.name, userName: user, since, notes: near });
             remote = opened && !faced && !met;

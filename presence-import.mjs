@@ -36,6 +36,8 @@ function legacyEndpoint({ type, avatar, at, id, record: receipt }, row, { card, 
 export function importLegacyPresence(input) {
     const { chat, roster, generating, fallbackAvatar, openingSnapshot, localWindow = null, chatKey = null,
         chatMetadata: metadata = {}, materials } = input;
+    // T150a：确认楼。只给楼号 >= floor 的旧账痕迹记账；没有楼号的整窗级项照旧。不传则逐值不变。
+    const floor = Number.isSafeInteger(input.floor) && input.floor > 0 ? input.floor : null;
     const { prefix, locate, changes, rejected, withdrawn, unresolved: diagnostics } = presenceEvidence(input);
     const length = prefix.length, anchors = metadata.contextIsolation?.anchors ?? {};
     const originalRows = chat.slice(0, (input.through ?? chat.length - 1) + 1);
@@ -55,7 +57,8 @@ export function importLegacyPresence(input) {
     const reasons = [], blockers = [], byAvatar = Object.create(null);
     const reasonAt = (avatar, at, reason, sourceRefs = [], candidates = [], range) =>
         ({ avatar, candidates, at, range, reason, sourceRefs, owner: reason === 'manual-review' ? 'd2' : 'c' });
-    const block = (...args) => reasons.push(reasonAt(...args)), gate = (...args) => blockers.push(reasonAt(...args));
+    const block = (...args) => reasons.push(reasonAt(...args));
+    const gate = (...args) => { if (floor === null || !(Number.isSafeInteger(args[1]) && args[1] < floor)) blockers.push(reasonAt(...args)); };
     const trace = (type, avatar, at, ref, candidates) => gate(avatar ?? null, Number.isSafeInteger(at) && at >= 0 ? at : null, 'legacy-unverified', [{ ...ref, type }], candidates);
     const cards = roster.filter(card => card?.avatar && !isCamera(card));
     const avatars = new Set([...cards.map(card => card.avatar), ...Object.keys(anchors)]);

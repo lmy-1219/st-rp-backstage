@@ -14,7 +14,7 @@ import { sharedMatter } from './matters.mjs';
 import { narrationOf, canonicalPart, PARTS } from './timeline.mjs';
 // slot.mjs 也 import 这里（旁白那一格读名单）：两边都只在调用时用对方，循环引用没事
 import { timelineFor, playModeOf, menuDays, paceFor, supplyEligibility } from './slot.mjs';
-import { enteredSince, emptySegment, arrivalLive } from './landing.mjs';
+import { enteredSince, emptySegment, arrivalLive, confirmFloorOf } from './landing.mjs';
 import { leadReady } from './eventlead.mjs';
 import { PER_PART } from './knock.mjs';
 import { paceName, MID } from './tempo.mjs';
@@ -165,7 +165,7 @@ export function doorAt(input = {}) {
         // 拿出来那条以后他自己进了场（landing.enteredSince）：这件门上不再挂——他来过了，后半截他在场时自己说（slot.menuFor 照旧给他）
         const pocketAt = m => (m.status === 'shown' ? m.settled_pos ?? m.pocket_pos : m.pocket_pos);
         const pockets = (memory ? [] : menu).filter(m => ownIdentity(m) && !m.exhausted && (m.status === 'pocket' || m.status === 'shown') && (m.status === 'shown' || !afterBlocked(m, menu, x => x.status, { visible: input.visible, messages })) && (entryOf(m) === '找上门' || ['消息', '电话'].includes(m.entry))
-            && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivalHistory ?? input.arrivals ?? [], knockLive: input.knockLive }));
+            && !enteredSince(pocketAt(m), { who, avatar: card.avatar, messages, anchors: input.anchors ?? null, arrivals: input.arrivalHistory ?? input.arrivals ?? [], knockLive: input.knockLive, confirmFloor: input.confirmFloor ?? null }));
         const reached = !memory && reach && ownIdentity({...reach,who:reach.person ?? reach.who});
         let playerRequest = (input.playerRequests ?? []).find(r => ownIdentity(r));
         const called = playerRequest ? playerRequest.way === '电话' ? '打来电话' : playerRequest.way === '上门' ? '叫他过来' : '发来消息'
@@ -253,6 +253,18 @@ export function doorAt(input = {}) {
     return { items: itemsReady, allReady };
 }
 
+// 这个时段里已经到场的人（节奏上限的"已到场次数"）。T150f：只看"他来过"，不看"他在不在"——确认楼不挡，挡了上限会放过更多人
+export function cameThisPart(entries, { messages, anchors, knockLive, last, now, parts, rowAt, same }) {
+    const came = [];
+    for (const e of entries) {
+        if (!Number.isFinite(Number(e?.at)) || Number(e.at) > last + 1 || partsBetween(rowAt(Number(e.at)), now, parts) !== 0
+            // 已到场次数是交付事实；本人首回的 prepare 不能提前占掉另一人的供给名额。
+            || !arrivalLive(e, messages, entries, anchors, knockLive, 'fact', null) || !e.who || came.some(w => same(w, e.who))) continue;
+        came.push(e.who);
+    }
+    return came;
+}
+
 // 只在门对外展示与自动叩门挑人时限量；组格和等待记录仍读 doorFor 的原始 items。
 export function capFresh(store, records, chatKey, { present = [], recentUser = '', timeline = null, litWho = null, litPerson = null, automatic = false, eligible = null } = {}) {
     const messages = store.currentMessages(chatKey);
@@ -270,13 +282,8 @@ export function capFresh(store, records, chatKey, { present = [], recentUser = '
     try { anchors = JSON.parse(chat.anchors ?? 'null'); } catch {}
     const last = messages.at(-1)?.pos ?? 0, parts = timeline.parts ?? PARTS;
     const rowAt = pos => (timeline.firmRows ?? timeline.rows)?.filter(r => r.pos <= pos).at(-1) ?? { day: timeline.firmToday ?? timeline.today, part: timeline.firmPart ?? timeline.part };
-    const now = rowAt(last), came = [];
-    for (const e of entries) {
-        if (!Number.isFinite(Number(e?.at)) || Number(e.at) > last + 1 || partsBetween(rowAt(Number(e.at)), now, parts) !== 0
-            // 已到场次数是交付事实；本人首回的 prepare 不能提前占掉另一人的供给名额。
-            || !arrivalLive(e, messages, entries, anchors, store.knockLiveFor?.(chatKey), 'fact') || !e.who || came.some(w => same(w, e.who))) continue;
-        came.push(e.who);
-    }
+    const now = rowAt(last);
+    const came = cameThisPart(entries, { messages, anchors, knockLive: store.knockLiveFor?.(chatKey), last, now, parts, rowAt, same });
     const paceValue = paceFor(store, chatKey);
     const pace = paceName(paceValue?.name ?? paceValue) ?? MID;
     const limit = PER_PART[pace];
@@ -338,7 +345,7 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const reach = contacts?.enabled === false || !recentUser || (justBack != null && lastPos - justBack <= 8) ? null
         : already ? reachable.find(p => p.person === already.person) : pickContact({ people: reachable, dayOf, lastPos, offers, minGap: contacts?.minGap ?? 16 });
     const input = { playMode: playModeOf(store, chatKey), board, pending, roster, relations, menu, visible, holds, request, messages, userName, recentUser,
-        playerRequests: contactRequests(store, chatKey, messages), timeline: timeline ?? {}, present, reach, anchors, arrivals, arrivalHistory, knockLive: store.knockLiveFor?.(chatKey), knocks, members, pace: paceFor(store, chatKey) };
+        playerRequests: contactRequests(store, chatKey, messages), timeline: timeline ?? {}, present, reach, anchors, arrivals, arrivalHistory, knockLive: store.knockLiveFor?.(chatKey), knocks, members, pace: paceFor(store, chatKey), ...(confirmFloorOf(store, chatKey) == null ? {} : { confirmFloor: confirmFloorOf(store, chatKey) }) };
     const key = `${chatKey}:${createHash('sha1').update(JSON.stringify(input)).digest('hex')}`;
     let cache = caches.get(store);
     if (!cache) caches.set(store, cache = new Map());

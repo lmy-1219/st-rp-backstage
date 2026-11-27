@@ -255,6 +255,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 chatKey, seq, force: !!b.force,
                 members: Array.isArray(b.members) ? b.members : null,
                 anchors: b.anchors && typeof b.anchors === 'object' ? b.anchors : null,
+                confirmFloor: Number.isSafeInteger(b.confirmFloor) && b.confirmFloor >= 0 ? b.confirmFloor : null,
             }));
             if (result.committed) syncDoorHandoffs(store, records, chatKey, b.doorHandoffs);
             // 开局单"人物开场状态"里要记成记录的那几类（约定、欠账、名声、手头的事）落到第一条消息上；开局单没变就不动（opening.mjs）

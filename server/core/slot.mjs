@@ -58,7 +58,7 @@ import { boardFor, boardLoader, departureSource } from './board.mjs';
 import { pendingFor } from './pending.mjs';
 import { doorFor, doorLines } from './door.mjs';
 import { stepWaits, dropTry } from './waiting.mjs';
-import { enteredSince, emptySegment } from './landing.mjs';
+import { enteredSince, emptySegment, confirmFloorOf } from './landing.mjs';
 import { arrivalLive, sourceProjection } from './landing.mjs';
 import { settleMatters, mattersFor, sharedMatter, matterLines, matterBrief, PURSUE, closeLed, closeIntents, handOf, stageLines, LEAD, INTENT, closeDue, lapseMatters, gapSteps } from './matters.mjs';
 import { optionsFor } from './options.mjs';
@@ -875,7 +875,7 @@ function witnessed(store, chatKey, name, roster, from, to) {
     let arrivals = [];
     try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
     if (!(Array.isArray(arrivals) ? arrivals : Object.values(arrivals ?? {})).length) return true;
-    return !remoteAt(to, { knockLive: store.knockLiveFor?.(chatKey), arrivals, anchors, members: [card], messages: store.currentMessages(chatKey), notes: store.stateNotesOf?.(chatKey) ?? [] }).has(card.name);
+    return !remoteAt(to, { knockLive: store.knockLiveFor?.(chatKey), confirmFloor: confirmFloorOf(store, chatKey), arrivals, anchors, members: [card], messages: store.currentMessages(chatKey), notes: store.stateNotesOf?.(chatKey) ?? [] }).has(card.name);
 }
 export function episodeBlock(store, records, chatKey, { name, text = '', hits = [], messages = store.currentMessages(chatKey), roster = [], cap = EPISODE_CHARS, count = 2 }) {
     const episodes = store.episodesOf?.(chatKey) ?? [];
@@ -1236,6 +1236,11 @@ function awayDue(store, chatKey, { speaker, name, userName = null, camera = fals
     return { due, fresh, opening, away: awayLines(fresh.story, { name, userName: userName ?? '对方', same, opening }) };
 }
 
+// 结算认"他在 pos 这条之后进场"的那份进场记录。T150f：只问"他来过、怎么来的"，不问"他在不在"，确认楼不挡（挡了结算里 arrivedAt 恒为空，当面进场的来意记不下来）
+export function arrivalAtPos(arrivals, messages, pos, who, rosterNames, knockLive) {
+    return (Array.isArray(arrivals) ? arrivals : []).findLast(x => x && Number(x.at) === pos + 1 && x.fp === messages.find(m => m.pos === pos)?.fp && sameName(x.who, who, rosterNames) && knockLive?.(x, { phase: 'prepare' }) !== false && arrivalLive(x, messages, arrivals, null, knockLive, 'fact', null)) ?? null;
+}
+
 // 场记的参与口径只从当前锚点的同一身份投影取得；旧进场不能替未知场面补成在场。
 export function slotScene(store, records, { chatKey, speaker, speakerName, anchor = null, present = [], recentUser = '', timeline = null }) {
     const chat = store.requireChat(chatKey);
@@ -1251,7 +1256,11 @@ export function slotScene(store, records, { chatKey, speaker, speakerName, ancho
     } catch {}
     const same = x => !!person && sameIdentity(x, person, roster);
     const row = person ? board?.people?.find(same) ?? null : null;
-    const valid = e => same(e) && arrivalLive(e, messages, entries, anchors, store.knockLiveFor?.(chatKey)) && store.knockLiveFor?.(chatKey)?.(e, { phase: 'prepare' }) !== false;
+    // T150f：确认楼起的进场记录不再有资格说"他在场"，但他怎么来的、来意只记在它上面：新记录说他从这一楼起在场（面板那行的 since 就是它），这条照常取
+    const floor = confirmFloorOf(store, chatKey);
+    const valid = e => same(e) && store.knockLiveFor?.(chatKey)?.(e, { phase: 'prepare' }) !== false
+        && (arrivalLive(e, messages, entries, anchors, store.knockLiveFor?.(chatKey), 'prepare', floor)
+            || (floor != null && ['present', 'remote'].includes(row?.status) && Number(e.at) === Number(row.since) && arrivalLive(e, messages, entries, anchors, store.knockLiveFor?.(chatKey), 'prepare', null)));
     const arrival = [...entries, ...(meta ? [meta] : [])].filter(valid).sort((a,b) => a.at - b.at).at(-1) ?? null;
     const arr = arrival ? { ...arrival, ...arrival.brief } : null;
     const spoke = arr && person ? messages.filter(m => m.pos >= arr.at && messageIsPerson(m, person, roster)).length : 0;
@@ -2143,7 +2152,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             let arrivals = [];
             try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
             const arrivedAt = (pos, who) => {
-                const e = (Array.isArray(arrivals) ? arrivals : []).findLast(x => x && Number(x.at) === pos + 1 && x.fp === messages.find(m => m.pos === pos)?.fp && sameName(x.who, who, rosterNames) && store.knockLiveFor?.(chatKey)?.(x, { phase: 'prepare' }) !== false && arrivalLive(x, messages, arrivals, null, store.knockLiveFor?.(chatKey), 'fact'));
+                const e = arrivalAtPos(arrivals, messages, pos, who, rosterNames, store.knockLiveFor?.(chatKey));
                 return e ? { how: String(e.how ?? ''), source_basis: sourceProjection(store.db, chatKey).arrivalBasis(e) } : null;
             };
             settleMatters({ store, records, chatKey, storyId, messages, presentAt, remoteAt: remoteHere, placeAt, arrivedAt, holderOf: n => cardOf(n)?.avatar ?? `name:${n}`, userName, player, camera: CAMERA_NAME, same: (a, b) => sameName(a, b, rosterNames) });
@@ -2279,7 +2288,7 @@ function advanceWorld(store, records, chatKey, { planner = null, situation = nul
             let anchors = null, arrivals = [];
             try { anchors = JSON.parse(store.requireChat(chatKey).anchors ?? 'null'); } catch {}
             try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
-            const entered = (who, pos, item) => enteredSince(pos, { who, avatar: item?.avatar ?? null, messages, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey) });
+            const entered = (who, pos, item) => enteredSince(pos, { who, avatar: item?.avatar ?? null, messages, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), confirmFloor: confirmFloorOf(store, chatKey) });
             const { next, due } = stepWaits({ prev, door, messages, rowAt, entered, parts: time.parts });
             if (JSON.stringify(next) !== JSON.stringify(prev)) store.setMeta?.(`door_wait:${chatKey}`, JSON.stringify(next));
             for (const d of due) {
@@ -2551,7 +2560,7 @@ function moveLiveCtx(store, chatKey, { records, principal }) {
     let anchors = null, arrivals = [];
     try { anchors = JSON.parse(store.requireChat(chatKey).anchors ?? 'null'); } catch {}
     try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
-    return { records, principal, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey) };
+    return { records, principal, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), confirmFloor: confirmFloorOf(store, chatKey) };
 }
 
 // 局势推演要的材料（main.mjs runSituation）：势力账、上次推演之后记下的事（第一次只看前一天起的）、托出去还没了结的事、
@@ -3117,7 +3126,7 @@ export function pocketGone(store, records, chatKey, { messages, roster = [], ros
     const ctx = { today, dayOf, at: messages.at(-1)?.pos ?? 0, partAt, placeAt: pos => boardAt(pos)?.camera?.place ?? null, placeNow: board?.camera?.place ?? null, names: nameFinder(rel, rosterNames),
         presentAt: pos => presentOn(boardAt(pos)), presentNow: here, same: (a, b) => sameName(a, b, rosterNames) };
     const names = rosterNames.filter(n => n && n !== CAMERA_NAME);
-    return m => premiseGone(m, { names, since: sinceOf, entered: (who, pos) => enteredSince(pos, { who, avatar: avatarOf(who), messages, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey) }) }) ?? expiredPocket(m, ctx);
+    return m => premiseGone(m, { names, since: sinceOf, entered: (who, pos) => enteredSince(pos, { who, avatar: avatarOf(who), messages, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), confirmFloor: confirmFloorOf(store, chatKey) }) }) ?? expiredPocket(m, ctx);
 }
 
 // 一场戏里已经叠了几件（章程 H2，给 stepPocket 的 stacked）：拿出来还没下文的那几件，拿出来那条上的场面（镜头在哪、谁在场）

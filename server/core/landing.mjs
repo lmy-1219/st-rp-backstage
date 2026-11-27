@@ -30,8 +30,10 @@ export const emptySegment = s => s?.to != null && num(s.to) != null && num(s?.fr
 const leftSilent = (e, anchors) => { const segs = (e?.avatar ? anchors?.[e.avatar]?.segments ?? [] : []).filter(s => num(s?.from) === num(e.at)); return segs.length > 0 && emptySegment(segs.at(-1)); };
 
 // 新来源只认本次保存版本。旧的纯消息/人工区间仍保留各自契约。
-export function arrivalLive(e, messages, entries = [], anchors = null, sourceLive = null, phase = 'prepare') {
+// T150c：confirmFloor（确认楼）给了，at ≥ 确认楼的进场一律不算数（同 boardAt 口径）；不给就和以前一样
+export function arrivalLive(e, messages, entries = [], anchors = null, sourceLive = null, phase = 'prepare', confirmFloor = null) {
     assertKnockReader(sourceLive, arrivalLive);
+    if (confirmFloor != null && num(e?.at) != null && num(e.at) >= num(confirmFloor)) return false;
     // 明确的进场产物必须拿到当前窗口的完整结论；缺上下文不能自造无限分支，
     // unknown 也不能落回“后来本人说过话”。独立人工区间保留原契约。
     if (e?.source_basis || e?.recs?.length || e?.menus?.length)
@@ -260,24 +262,52 @@ export function liveAnchors(anchors, dates = []) {
     return out;
 }
 
+// T154c：分支只继承切出（共有前缀 k 楼）以前的在场区间（D-403）。ST 开分支时把父窗的元数据整份复制过来，里面带着父窗 k 楼以后的区间；
+// 分支自己后来写的区间要留下。区分办法：起点（fromDate）那一楼的发送时间在分支自己的序列里、而且位置在 k 以后，才算分支自己的。
+// - 起点 from > k：只收起点是分支自己那一楼的；from === k：起点那条是共有的、分辨不出，父窗那边有一模一样的一段就当是父窗带来的丢掉，否则收；
+// - 起点在 k 以前、结尾 to ≥ k：结尾那条是分支自己的就留着，否则截到 k（还开着，和父窗删回 k 楼那时一样）；
+// - 拿不准（没记时间）按父窗带来的算。k 不是整数就原样还回去。parentRaw：父窗存的原样区间（认 from === k 那一种）。
+export function cutBranchAnchors(anchors, { k, dates = [], parentRaw = null } = {}) {
+    if (!anchors || typeof anchors !== 'object' || !Number.isSafeInteger(k) || k < 0) return anchors;
+    const own = (d, from) => !!d && from - 1 >= k && dates[from - 1] === String(d);   // 起点那一楼在分支序列里的同一位置对得上才算；只是别处出现过不算
+    const parentHas = (key, s) => (parentRaw?.[key]?.segments ?? []).some(p => p && p.from === s.from && (p.fromDate ?? '') === (s.fromDate ?? ''));
+    const out = {};
+    for (const [key, rec] of Object.entries(anchors)) {
+        if (!rec || !Array.isArray(rec.segments)) { out[key] = rec; continue; }
+        const segments = [];
+        for (const s of rec.segments) {
+            if (!s || typeof s !== 'object' || !Number.isFinite(s.from)) { segments.push(s); continue; }
+            if (s.from > k ? !own(s.fromDate, s.from) : s.from === k && parentHas(key, s)) continue;
+            // 结尾超过切出点：那是父窗未来才发生的离场，分支不继承（D-403），按还开着算；只有结尾那一楼和分支序列同一位置对得上（分支自己写的离场）才收
+            const ownEnd = s.toDate && s.to - 1 >= k && dates[s.to - 1] === String(s.toDate);
+            segments.push(s.to != null && s.to > k && !ownEnd ? { ...s, to: null, ...('toDate' in s ? { toDate: '' } : {}) } : s);
+        }
+        out[key] = { ...rec, segments };
+    }
+    return out;
+}
+
 // 他在 pos 那条以后自己进了场没有（场记章程 第二节第 3、10 条，试玩 10/10：结算替他写了"要联系"，之后他自己打来电话、人也在戏里，
 // 门上那条还挂着、还被当成"没人接"又结算了两回）。按消息认，删回去就回来：
 // - 隔离区间（liveAnchors 认过的那份，按 avatar）有一段从 pos 以后开始、开头那条还在这条序列里，而且这段不是一次作废了的进场开的
 //   （和场面表 board.liveSegment 一样：起点上记过他进场、那几次全不算数了，这段就不算）；
 // - 或者进场记录里有他一次 at 在 pos 以后、而且这次进场还算数（arrivalLive）。
 // 远程（电话、消息）进来的也算：他已经亲自出面说过话了，后台替他挂的那一下就过时了
-export function enteredSince(pos, { who = null, avatar = null, messages = [], anchors = null, arrivals = [], knockLive = null } = {}) {
+// T150b：confirmFloor（确认楼）及以后只认隔离区间（前端送来的新区间），进场记录里 at ≥ 确认楼的不看；不给就和以前一样
+export const confirmFloorOf = (store, chatKey) => { const v = store?.getMeta?.(`confirm_floor:${chatKey}`); return v == null || !Number.isSafeInteger(Number(v)) ? null : Number(v); };
+export function enteredSince(pos, { who = null, avatar = null, messages = [], anchors = null, arrivals = [], knockLive = null, confirmFloor = null } = {}) {
     assertKnockReader(knockLive, enteredSince);
     const p = num(pos);
     if (p == null || (!who && !avatar)) return false;
-    const entries = Array.isArray(arrivals) ? arrivals.filter(Boolean) : [];
+    const floor = confirmFloor == null ? null : num(confirmFloor);
+    const entries = (Array.isArray(arrivals) ? arrivals.filter(Boolean) : []).filter(e => floor == null || !(num(e.at) >= floor));
     const me = { who, avatar };
     const mine = entries.filter(e => isSame(e, me, scopeOf(messages, entries)));
     // 明确来源只查一次事实结论；普通对象保留原来源预检和消息/人工区间契约。
     const live = e => (e.source_basis || e.recs?.length || e.menus?.length || knockLive?.(e, { phase: 'prepare' }) !== false)
-        && arrivalLive(e, messages, entries, anchors, knockLive, 'fact');
+        && arrivalLive(e, messages, entries, anchors, knockLive, 'fact', floor);
     const segs = avatar ? anchors?.[avatar]?.segments : null;
-    const segLive = s => { const atStart = mine.filter(e => num(e.at) === s.from); return !atStart.length || atStart.some(live); };
+    const segLive = s => { if (floor != null && s.from >= floor) return true; const atStart = mine.filter(e => num(e.at) === s.from); return !atStart.length || atStart.some(live); };
     if (Array.isArray(segs) && segs.some(s => Number.isFinite(s?.from) && s.from > p && s.from <= messages.length && !emptySegment(s) && segLive(s))) return true;
     return mine.some(e => num(e.at) > p && live(e));
 }
@@ -301,13 +331,13 @@ export function contactUsed(c, messages, entries = [], opts = {}) {
     assertKnockReader(opts.knockLive, contactUsed);
     if (!c) return false;
     const who = opts.who ?? c.who ?? null, avatar = opts.avatar ?? c.avatar ?? null;
-    if (c.at != null && enteredSince(c.at, { who, avatar, messages, anchors: opts.anchors ?? null, arrivals: entries, knockLive: opts.knockLive })) return true;
+    if (c.at != null && enteredSince(c.at, { who, avatar, messages, anchors: opts.anchors ?? null, arrivals: entries, knockLive: opts.knockLive, confirmFloor: opts.confirmFloor ?? null })) return true;
     if (!c.usedAt) return !!c.used;
     const u = c.usedAt;
-    if (u.arrivalId) { const e = entries.find(e => e.source_basis?.id === u.arrivalId); return !!e && arrivalLive(e, messages, entries, opts.anchors, opts.knockLive, 'fact'); }
+    if (u.arrivalId) { const e = entries.find(e => e.source_basis?.id === u.arrivalId); return !!e && arrivalLive(e, messages, entries, opts.anchors, opts.knockLive, 'fact', opts.confirmFloor ?? null); }
     const linked = entries.filter(e => Number(e.at) === u.pos + 1 && e.fp === u.fp
         && isSame(e, { who: u.who, avatar: u.avatar }, scopeOf(messages, entries)));
-    if (linked.length) return linked.some(e => arrivalLive(e, messages, entries, opts.anchors, opts.knockLive, 'fact'));
+    if (linked.length) return linked.some(e => arrivalLive(e, messages, entries, opts.anchors, opts.knockLive, 'fact', opts.confirmFloor ?? null));
     if (messages[u.pos]?.fp !== u.fp) return false;
     if (!u.who) return true;
     return messages.length <= u.pos + 1 || messages.slice(u.pos + 1).some(m => isHis(m, { who: u.who, avatar: u.avatar ?? null }, scopeOf(messages, entries)));

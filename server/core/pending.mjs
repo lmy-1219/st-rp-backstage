@@ -13,7 +13,7 @@ import { timelineLabel, dateIn, dayNumber } from './timeline.mjs';
 import { boardFor, boardLoader } from './board.mjs';
 import { lifeSheet } from './life.mjs';
 import { awayPlansOf } from './opening.mjs';
-import { contactUsed } from './landing.mjs';
+import { contactUsed, confirmFloorOf } from './landing.mjs';
 import { sameName } from './setup.mjs';
 import { scaleOf } from './timescale.mjs';
 // timeline.scale：这一局的时间尺度（章程 G2）；"第几天""已等几天"、过期按它（没有就是天）
@@ -188,12 +188,12 @@ function matterItems(records) {
 
 // 时间结算替在外头的人写下的"要联系"（D-174 第 4 步乙）：排着等旁白递；他接上了（或被"先不"了两回）就用掉；结算那条消息删了就没这回事
 // 写下以后他自己进了场（landing.enteredSince：隔离区间、进场记录）也算用掉：anchors、arrivals 不给就只认点了门
-function contactItems(contacts, messages, { anchors = null, arrivals = [], knockLive = null } = {}) {
+function contactItems(contacts, messages, { anchors = null, arrivals = [], knockLive = null, confirmFloor = null } = {}) {
     assertKnockReader(knockLive, contactItems);
     const out = [];
     for (const c of arr(contacts)) {
         // 用掉那一下挂在哪条上（landing.contactUsed）：那条删了、进场后他那条回复没了，这条联系回来
-        if (!c || contactUsed(c, messages, arrivals, { anchors, knockLive }) || !c.fp || !messages.some(m => m.fp === c.fp)) continue;
+        if (!c || contactUsed(c, messages, arrivals, { anchors, knockLive, confirmFloor }) || !c.fp || !messages.some(m => m.fp === c.fp)) continue;
         const way = c.way;
         if (!['消息', '电话', '上门'].includes(way) || !c.who) continue;
         out.push(base({ id: `contact:${c.who}:${c.fp}`, kind: '联系', text: c.text, who: [c.who], owner: c.who,
@@ -207,7 +207,7 @@ export function foldPending(input = {}) {
     assertKnockReader(input.knockLive, foldPending);
     const same = input.same ?? ((a, b) => a === b);
     const records = [...(input.records ?? [])].sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
-    const items = [...promiseItems(records, input.timeline ?? {}, same), ...todoItems(records, input.messages ?? [], input.board ?? {}, input.timeline ?? {}, input.userName, same, input.boardAt ?? null, input.rosterNames ?? []), ...ruleItems(records, input.timeline ?? {}), ...moneyItems(records, input.named ?? [], input.rosterNames ?? input.named ?? [], input.relation ?? null), ...menuItems(input.menu), ...errandItems(input.awayPlans, input.board), ...contactItems(input.contacts, input.messages ?? [], { anchors: input.anchors ?? null, arrivals: input.arrivals ?? [], knockLive: input.knockLive }), ...matterItems(records)];
+    const items = [...promiseItems(records, input.timeline ?? {}, same), ...todoItems(records, input.messages ?? [], input.board ?? {}, input.timeline ?? {}, input.userName, same, input.boardAt ?? null, input.rosterNames ?? []), ...ruleItems(records, input.timeline ?? {}), ...moneyItems(records, input.named ?? [], input.rosterNames ?? input.named ?? [], input.relation ?? null), ...menuItems(input.menu), ...errandItems(input.awayPlans, input.board), ...contactItems(input.contacts, input.messages ?? [], { anchors: input.anchors ?? null, arrivals: input.arrivals ?? [], knockLive: input.knockLive, confirmFloor: input.confirmFloor ?? null }), ...matterItems(records)];
     const byId = new Map(items.map(item => [item.id, item]));
     // 同一件几处来源：口袋和约定对得上（规划者写明了跟着哪件，或题目、露面、用在和约定说的是一回事），两边互相记着对方的编号
     for (const p of items.filter(x => x.kind === '约定')) for (const row of arr(input.menu)) {
@@ -237,7 +237,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
         arrived: store.getMeta?.(`arrived:${chatKey}`) ?? '',
         contacts: JSON.stringify((store.getCast?.(chat.story_id) ?? []).map(c => [c.name, store.getMeta?.(`settled_contact:${chatKey}:${c.name}`) ?? ''])),
         // 他后来自己进了场，结算写的联系就作废（landing.enteredSince）：隔离区间、进场记录变了都要重算
-        anchors: chat.anchors ?? '',
+        anchors: chat.anchors ?? '', confirmFloor: confirmFloorOf(store, chatKey),
         arrivals: (store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '',
         // 钱账认人依赖完整名册及登记又名；只改这些资料也必须重折，不能沿用旧的了结状态。
         moneyIdentity: JSON.stringify({ cast: (store.getCast?.(chat.story_id) ?? []).map(c => [c.name, c.role]), relation: store.relationsOf?.(chat.story_id) ?? null }),
@@ -281,7 +281,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     let anchors = null, arrivals = [];
     try { anchors = meta.anchors ? JSON.parse(meta.anchors) : null; } catch {}
     try { arrivals = JSON.parse(meta.arrivals || '[]') ?? []; } catch {}
-    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, relation, named: namedParties(store.getCast?.(chat.story_id) ?? [], userName), same, homes: lifeSheet(visible).homes });
+    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), confirmFloor: confirmFloorOf(store, chatKey), board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, relation, named: namedParties(store.getCast?.(chat.story_id) ?? [], userName), same, homes: lifeSheet(visible).homes });
     pendingCache.set(key, value);
     while (pendingCache.size > 32) pendingCache.delete(pendingCache.keys().next().value);
     return value;

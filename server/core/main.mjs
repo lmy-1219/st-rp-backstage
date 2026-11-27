@@ -33,7 +33,7 @@ import { turnWorth, planRetryDue, verificationSnapshot, commitVerification, sign
 import { NOW_MOTIF, PLAN_SYSTEM, API_PLAN_NOTE, placePrep, parsePlan, verifiedPlanSourceIds, NODE_CHECK_SYSTEM, nodeCheckPrompt, parseNodeCheck, TURN_CHECK_SYSTEM, turnCheckPrompt, parseTurnCheck, premiseWaiting, premiseVoids, mindReasons } from './planner.mjs';
 import { planRoster, normalizeRelations, personOf, leaderOf } from './relations.mjs';
 import { ARRIVAL_SYSTEM, arrivalPrompt, parseArrival, groundedArrivalReason, lastLeave, awaySpan, validAwayPlan, LEAVE_SYSTEM, leavePrompt, parseLeave, isRemote, metInPerson, justLeft, openNow } from './arrival.mjs';
-import { enteredSince, landSent } from './landing.mjs';
+import { enteredSince, landSent, confirmFloorOf } from './landing.mjs';
 import { intentRecord, closeIntents } from './matters.mjs';
 import { SETTLE_SYSTEM, settlePrompt, parseSettle, settlementTimes, fallbackStep, fallbackCooling, confirmedPrefix } from './settle.mjs';
 import { crewOf, crewEntry, latestNode, crewPushDue, pushedMeta, pushKey, pushText, effectiveNode } from './crew.mjs';
@@ -933,7 +933,7 @@ async function settleAway({ chatKey, who, avatar = null, reason = '换时段', u
         let anchors = null, arrivals = [];
         try { anchors = JSON.parse(chat.anchors ?? 'null'); } catch {}
         try { arrivals = JSON.parse((store.getRawMeta ?? store.getMeta)(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
-        if (enteredSince(unanswered.since.pos, { who, avatar, messages, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey) })) return skip('等的那条以后他自己进了场', { ok: true, skipped: true, entered: true });
+        if (enteredSince(unanswered.since.pos, { who, avatar, messages, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), confirmFloor: confirmFloorOf(store, chatKey) })) return skip('等的那条以后他自己进了场', { ok: true, skipped: true, entered: true });
     }
     if (timeStateFor(store, records, chatKey, messages).status !== 'confirmed') {
         // 兜底这一回（T149b，D-298 拿不准就动）：末楼时间还没确认（多半是刚发的那条还没记账），往回找最近一条时间已确认的，
@@ -1262,7 +1262,7 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
             // span 是给模型看的一句话（"同一天，早上走的，现在下午"），不是场面表的 stage；stage 另带着
             let contact = null; try { contact = JSON.parse(store.getMeta(`settled_contact:${chatKey}:${who}`) ?? 'null'); } catch {}
             // 写下这条以后他已经自己进过场（landing.enteredSince 认隔离区间、进场记录）：过时了，不当"他想说的"给
-            try { if (contact?.at != null && enteredSince(contact.at, { who, avatar, messages: msgs, anchors: JSON.parse(chat.anchors ?? 'null'), arrivals: JSON.parse((store.getRawMeta ?? store.getMeta)(`arrivals:${chatKey}`) ?? '[]') ?? [], knockLive: store.knockLiveFor?.(chatKey) })) contact = null; } catch {}
+            try { if (contact?.at != null && enteredSince(contact.at, { who, avatar, messages: msgs, anchors: JSON.parse(chat.anchors ?? 'null'), arrivals: JSON.parse((store.getRawMeta ?? store.getMeta)(`arrivals:${chatKey}`) ?? '[]') ?? [], knockLive: store.knockLiveFor?.(chatKey), confirmFloor: confirmFloorOf(store, chatKey) })) contact = null; } catch {}
             // 结算替他记下的（住处、心里、放下了什么）当事实给；去办的那几件 away.plan 上已经带着结果，不重复
             const settled = visible.filter(r => r.holder_name === who && ['改变', '心里'].includes(r.type) && r.pos >= left).map(r => r.text).filter(Boolean).slice(-6);
             away = { from: left, span: awaySpan(rows.get(left - 1) ?? rows.get(left), rows.get(msgs.at(-1)?.pos), tlNow.scale), stage: boardPerson?.stage ?? null, home, plan, contact, settled,

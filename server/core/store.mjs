@@ -4,7 +4,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { liveEpisodes } from './episodes.mjs';
-import { arrivalBasis, sourceProjection, sourceRows, liveAnchors, setSourceContext } from './landing.mjs';
+import { arrivalBasis, sourceProjection, sourceRows, liveAnchors, cutBranchAnchors, setSourceContext } from './landing.mjs';
 import { identifyNode, createMenuVerifier } from './held.mjs';
 import { currentMenuRecords, menuRecordVersion, shownMenuProofLive } from './menu-evidence.mjs';
 import { decideRecordKnowledge, recordAudienceFor, legacyMenuCopies } from './records.mjs';
@@ -647,16 +647,16 @@ export function openStore(file) {
 
     const syncRevision = chatKey => q('select value from meta where key = ?').get(`sync_rev:${chatKey}`)?.value ?? 0;
     // 浏览器报来当前序列（每条的指纹）。缺正文 ⇒ 列出来让它补传；齐了 ⇒ 整体替换该窗口的序列。
-    function sync({ chatKey, seq, members = null, anchors = null, force = false }) {
+    function sync({ chatKey, seq, members = null, anchors = null, confirmFloor = null, force = false }) {
         const chat = requireChat(chatKey);
         if (!Array.isArray(seq) || seq.some(x => !x || !isFp(x.f) || !validSwipeEvidence(x))) throw Object.assign(new Error('seq entry invalid'), { status: 400 });
         const known = q('select 1 from messages where story_id = ? and fp = ?');
         const need = [...new Set(seq.map(x => x.f))].filter(fp => !known.get(chat.story_id, fp));
         if (need.length) return { committed: false, need };
-        return measure('sync.tx', () => tx(() => syncKnown(chatKey, chat, seq, members, anchors, force)));
+        return measure('sync.tx', () => tx(() => syncKnown(chatKey, chat, seq, members, anchors, force, confirmFloor)));
     }
 
-    function syncKnown(chatKey, chat, seq, members, anchors, force) {
+    function syncKnown(chatKey, chat, seq, members, anchors, force, confirmFloor = null) {
         const oldRows = q(`select pos, fp, hidden, sent_at, mark, sw, swipes, board_mark, vis
             from chat_seq where chat_key = ? order by pos`).all(chatKey)
             .map(r => ({ ...r, swipes: r.swipes ? JSON.parse(r.swipes) : null }));
@@ -753,7 +753,36 @@ export function openStore(file) {
             }
             // 隔离扩展的在场区间：存原样的，后台用按两头时间认过位置的（landing.liveAnchors；删回去以后截短不作废、新写的不算进去）。
             // 这次没带区间（后台自己同步那回）：拿上回存的原样那份按新的序列再认一遍
+            // T154c：分支窗的区间先按切出点截（ST 复制来的父窗那份带着未来的区间；分支自己后来写的留下）。没开过分支的窗不走这里。
+            let cutK = null;
+            if (chat.parent_key && newFps.length) {
+                const k = branchLen(chat, newFps);
+                // 从最后一楼开的分支（共有前缀就是父窗全部）：没有"未来"可截，和父窗完全一样
+                if (k < q('select count(*) n from chat_seq where chat_key = ?').get(chat.parent_key).n) cutK = k;
+            }
+            const branchCut = a => {
+                if (!a || cutK == null) return a;
+                let parentRaw = null;
+                try { parentRaw = JSON.parse(getMeta(`anchors_raw:${chat.parent_key}`) ?? 'null'); } catch {}
+                return cutBranchAnchors(a, { k: cutK, dates: seq.map(x => x.d ?? null), parentRaw });
+            };
+            if (anchors) anchors = branchCut(anchors);
+            // 第一次同步才知道切出点：open() 复制来的后台那份（chats.anchors）和草稿（door_handoffs）在这里按切出点截一次
+            if (cutK != null && getMeta(`branch_cut:${chatKey}`) == null) {
+                setMeta(`branch_cut:${chatKey}`, String(cutK));
+                let own = null;
+                try { own = JSON.parse(chat.anchors ?? 'null'); } catch {}
+                if (own) q('update chats set anchors = ? where key = ?').run(JSON.stringify(cutBranchAnchors(own, { k: cutK, parentRaw: own })), chatKey);
+                let drafts = null;
+                try { drafts = JSON.parse(getRawMeta(`door_handoffs:${chatKey}`) ?? 'null'); } catch {}
+                if (Array.isArray(drafts)) setMeta(`door_handoffs:${chatKey}`, JSON.stringify(drafts.filter(d => !(d && Number.isInteger(d.pos) && d.pos >= cutK))));
+            }
             if (anchors) setMeta(`anchors_raw:${chatKey}`, JSON.stringify(anchors));
+            // T150b：确认楼跟着前端送来的区间走（anchors 里确认楼及以后已经是新记录算的）；这次带了区间却没带确认楼就清掉。后台自己同步（没带区间）不动它。没有确认楼的窗不写这一行。
+            if (anchors) {
+                const floor = Number.isSafeInteger(confirmFloor) && confirmFloor >= 0 ? String(confirmFloor) : null;
+                if (floor != null || getMeta(`confirm_floor:${chatKey}`) != null) setMeta(`confirm_floor:${chatKey}`, floor);
+            }
             let raw = anchors;
             if (!raw) try { raw = JSON.parse(getMeta(`anchors_raw:${chatKey}`) ?? 'null'); } catch {}
             const live = raw ? liveAnchors(raw, seq.map(x => x.d ?? null)) : null;

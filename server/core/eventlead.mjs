@@ -17,7 +17,7 @@ import { scaleOf, DAY } from './timescale.mjs';
 import { hasCard } from './arrival.mjs';
 import { sameName } from './setup.mjs';
 import { visOf, wayOf } from './visibility.mjs';
-import { arrivalLive } from './landing.mjs';
+import { arrivalLive, confirmFloorOf } from './landing.mjs';
 
 const DONE = new Set(['shown', 'used']);
 const LIVE = new Set(['waiting', 'pocket']);
@@ -36,7 +36,7 @@ export function availableWays(store, chatKey, who, userName, messages = store.cu
     try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]'); } catch {}
     let anchors = null;
     try { anchors = JSON.parse(store.requireChat?.(chatKey)?.anchors ?? 'null'); } catch {}
-    for (const a of Array.isArray(arrivals) ? arrivals : []) if (same(a.who, who) && store.knockLiveFor?.(chatKey)?.(a, { phase: 'prepare' }) !== false && arrivalLive(a, messages, arrivals, anchors, store.knockLiveFor?.(chatKey))) add(a.way ?? a.how);
+    for (const a of Array.isArray(arrivals) ? arrivals : []) if (same(a.who, who) && store.knockLiveFor?.(chatKey)?.(a, { phase: 'prepare' }) !== false && arrivalLive(a, messages, arrivals, anchors, store.knockLiveFor?.(chatKey), 'prepare', confirmFloorOf(store, chatKey))) add(a.way ?? a.how);
     try { const c = JSON.parse(store.getMeta?.(`settled_contact:${chatKey}:${who}`) ?? 'null'); if (c && live(c)) add(c.way); } catch {}
     return [...ways];
 }

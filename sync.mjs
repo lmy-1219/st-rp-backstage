@@ -853,11 +853,14 @@ function boardEvidenceEnd(evidence, from, to, state) {
         && from < e.effectiveAt && e.effectiveAt < (end ?? to) ? e.effectiveAt : end, null);
 }
 
-export function boardDecision(c, state, group, avatar, fallback, { through = c.chat.length - 1, imported } = {}) {
-    const rec = c.chatMetadata.contextIsolation?.anchors?.[avatar], journal = c.chatMetadata.rpeBoardApplied ?? {};
-    const marks = [...readBoardMarks(c, state, group, fallback).values()].filter(m => m.avatar === avatar && m.pos <= through);
+// T150c：confirm（{ anchors, floor }，本窗确认楼 active 且没开第三方隔离扩展时才给）：
+// 确认楼之前照旧读（rp_board 标记、旧佐证）；确认楼及以后只看 confirm.anchors 里他的区间，标记、旧佐证、自带原句都不再看。不给就和以前逐值一样。
+export function boardDecision(c, state, group, avatar, fallback, { through = c.chat.length - 1, imported, confirm = null } = {}) {
+    const floor = confirm?.floor ?? null, early = at => floor == null || at < floor;
+    const rec = (confirm ? confirm.anchors : c.chatMetadata.contextIsolation?.anchors)?.[avatar], journal = c.chatMetadata.rpeBoardApplied ?? {};
+    const marks = [...readBoardMarks(c, state, group, fallback).values()].filter(m => m.avatar === avatar && m.pos <= through && early(m.pos));
     const evidence = imported?.byAvatar?.[avatar];
-    const inherited = c.chatMetadata.main_chat && Object.values(journal).some(r => r.avatar === avatar && r.edit && !r.undone
+    const inherited = c.chatMetadata.main_chat && Object.values(journal).some(r => r.avatar === avatar && r.edit && !r.undone && early(r.pos)
         && !marks.some(m => m.pos === r.pos && m.fp === r.fp && boardRecordMatches(m, r)));
     const segments = rec?.segments ?? [], closed = !!rec?.rpeBoardClosed && !segments.length;
     if (!marks.length && !inherited && !rec?.rpeBoardClosed) return null;
@@ -869,10 +872,11 @@ export function boardDecision(c, state, group, avatar, fallback, { through = c.c
         const remote = evidence?.endpoints.find(e => e.verdict === 'proven' && e.effectiveAt === mark.pos && e.state === 'remote');
         const channel = mark.status === '远程' ? remote?.channel ?? 'message' : null;
         const local = mark.window != null && mark.markKey === avatar && mark.window === JSON.stringify(state.loadedWindow?.ids);
-        return [{ from: mark.pos, to, status: mark.status, channel, grant: local && mark.status === '在场' }];
+        return [{ from: mark.pos, to: floor == null ? to : Math.min(to, floor), status: mark.status, channel, grant: local && mark.status === '在场' }];
     });
     const contains = (span, at) => span.from <= at && at < (span.to ?? Infinity);
     const blocks = at => {
+        if (floor != null && at >= floor) return !segments.some(s => contains(s, at));
         const range = ranges.find(r => contains(r, at));
         if (range?.grant) return false;
         if (closed || inherited && !evidence?.ranges.some(s => s.state === 'present' && contains(s, at))) return true;
@@ -884,7 +888,7 @@ export function boardDecision(c, state, group, avatar, fallback, { through = c.c
     };
     const fragmentDeductions = imported?.unresolved.filter(r => r.reason === 'fragment-unverified' && (r.avatar === avatar || r.avatar == null)
         && (blocks(r.at) || ranges.some(span => contains(span, r.at)) || c.chat[r.at]?.extra?.rp_vis)) ?? [];
-    return { ranges, closed, blocks, fragmentDeductions, ownFragments: evidence?.ownFragments ?? [], version: imported?.window.version };
+    return { ranges, closed, blocks, fragmentDeductions, ownFragments: (evidence?.ownFragments ?? []).filter(p => early(p.at)), version: imported?.window.version };
 }
 
 export function undoBoardSegmentEdit(segments, edit) {
