@@ -161,7 +161,7 @@ export function recordAudienceFor(db, chatKey) {
     const privateAt = new Map(messages.filter(row => row.vis)
         .map(row => [row.pos, { ...row, extra: { rp_vis: row.vis } }])
         .filter(([, message]) => isPrivate(message)));
-    const cast = privateAt.size ? q('select avatar, name from cast where story_id = ?').all(chat.story_id) : [];
+    const cast = privateAt.size ? q('select avatar, name from cast where story_id = ?').all(q('select 1 from meta where key = ?').get(`setup_split:${chatKey}`) ? chatKey : chat.story_id) : [];
     const roster = [...new Map([...cast, ...members].map(member => [member.avatar, member])).values()];
     const userName = messages.findLast(m => m.is_user)?.name;
     const legacyListeners = record => {

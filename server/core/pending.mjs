@@ -18,6 +18,7 @@ import { sameName } from './setup.mjs';
 import { scaleOf } from './timescale.mjs';
 // timeline.scale：这一局的时间尺度（章程 G2）；"第几天""已等几天"、过期按它（没有就是天）
 import { normalizeRelations, personOf } from './relations.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 const arr = value => Array.isArray(value) ? value : value && typeof value === 'object' ? Object.values(value) : [];
 const num = value => Number.isFinite(Number(value)) ? Number(value) : null;
@@ -235,12 +236,12 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
         // 记下的去向，加上开局单里开场不在场的人（opening.mjs）
         away: JSON.stringify(awayPlansOf(store, chatKey, { messages: all })),
         arrived: store.getMeta?.(`arrived:${chatKey}`) ?? '',
-        contacts: JSON.stringify((store.getCast?.(chat.story_id) ?? []).map(c => [c.name, store.getMeta?.(`settled_contact:${chatKey}:${c.name}`) ?? ''])),
+        contacts: JSON.stringify((store.getCast?.(setupKeyOfChat(store, chat)) ?? []).map(c => [c.name, store.getMeta?.(`settled_contact:${chatKey}:${c.name}`) ?? ''])),
         // 他后来自己进了场，结算写的联系就作废（landing.enteredSince）：隔离区间、进场记录变了都要重算
         anchors: chat.anchors ?? '', confirmFloor: confirmFloorOf(store, chatKey),
         arrivals: (store.getRawMeta ?? store.getMeta)?.(`arrivals:${chatKey}`) ?? '',
         // 钱账认人依赖完整名册及登记又名；只改这些资料也必须重折，不能沿用旧的了结状态。
-        moneyIdentity: JSON.stringify({ cast: (store.getCast?.(chat.story_id) ?? []).map(c => [c.name, c.role]), relation: store.relationsOf?.(chat.story_id) ?? null }),
+        moneyIdentity: JSON.stringify({ cast: (store.getCast?.(setupKeyOfChat(store, chat)) ?? []).map(c => [c.name, c.role]), relation: store.relationsOf?.(setupKeyOfChat(store, chat)) ?? null }),
     };
     // 版本里带上口袋各件的状态（进口袋、用上了是菜单日志变的，条数不变）
     const seqHash = createHash('sha1').update(messages.map(m => `${m.pos}:${m.fp}:${m.boardMark ?? ''}`).join('|')).digest('hex').slice(0, 16);
@@ -256,15 +257,15 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     let awayPlans = {};
     try { awayPlans = JSON.parse(meta.away) ?? {}; } catch {}
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? null;
-    const rosterNames = (store.getCast?.(chat.story_id) ?? []).map(e => e.name).filter(Boolean);
-    const rel = store.relationsOf?.(chat.story_id);
+    const rosterNames = (store.getCast?.(setupKeyOfChat(store, chat)) ?? []).map(e => e.name).filter(Boolean);
+    const rel = store.relationsOf?.(setupKeyOfChat(store, chat));
     const relation = rel ? normalizeRelations(rel) : null;
     const same = (a, b) => sameName(a, b, rosterNames) || (!!relation && !!personOf(relation, a, rosterNames) && personOf(relation, a, rosterNames) === personOf(relation, b, rosterNames));
     awayPlans = Object.values(awayPlans).map(p => validAwayPlan(p, messages, source => store.sourceLive?.(chatKey, source) !== false, store.knockLiveFor?.(chatKey))).filter(Boolean);
     // 结算写下的"要来联系"：按名册认人——以前有用别名记下的（试玩 10/12：等着没人接那条路写成了短名，名册里是全名，
     // 认不出"他后来自己进了场""这条用掉了"，一条早该作废的消息每轮都挂着）；同一个人有几笔，留最新那笔
     const contacts = [];
-    const cast = store.getCast?.(chat.story_id) ?? [];
+    const cast = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
     const keyed = new Map();
     const prefix = `settled_contact:${chatKey}:`;
     let rows = [];
@@ -281,7 +282,7 @@ export function pendingFor(store, records, chatKey, { anchor = null, present = [
     let anchors = null, arrivals = [];
     try { anchors = meta.anchors ? JSON.parse(meta.anchors) : null; } catch {}
     try { arrivals = JSON.parse(meta.arrivals || '[]') ?? []; } catch {}
-    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), confirmFloor: confirmFloorOf(store, chatKey), board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, relation, named: namedParties(store.getCast?.(chat.story_id) ?? [], userName), same, homes: lifeSheet(visible).homes });
+    const value = foldPending({ records: visible, menu, awayPlans, contacts, anchors, arrivals, knockLive: store.knockLiveFor?.(chatKey), confirmFloor: confirmFloorOf(store, chatKey), board, boardAt, timeline: timeline ?? {}, messages, userName, rosterNames, relation, named: namedParties(store.getCast?.(setupKeyOfChat(store, chat)) ?? [], userName), same, homes: lifeSheet(visible).homes });
     pendingCache.set(key, value);
     while (pendingCache.size > 32) pendingCache.delete(pendingCache.keys().next().value);
     return value;
@@ -301,7 +302,7 @@ export function playerView(store, records, chatKey) {
     const messages = store.currentMessages(chatKey);
     const visible = records.visible(chatKey);
     const byId = new Map(visible.map(r => [r.id, r]));
-    const players = [[...messages].reverse().find(m => m.is_user)?.name, ...(store.playerNames?.(chat.story_id) ?? [])].filter(Boolean);
+    const players = [[...messages].reverse().find(m => m.is_user)?.name, ...(store.playerNames?.(chat.story_id, chatKey) ?? [])].filter(Boolean);
     const known = r => !!r && players.some(name => recordKnownTo(r, name));
     const safeText = r => {
         let text = r.raw_text;

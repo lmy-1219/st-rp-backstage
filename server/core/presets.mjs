@@ -14,16 +14,16 @@ const strangerOf = v => v == null ? null : v === true || v === 1 || ['true', '�
 const cleanName = n => String(n ?? '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '').replace(/^\.+/, '').trim().slice(0, 60);
 
 // 这一局此刻的样子 → 一份预设
-export function snapshot(store, storyId, { name, pack = null, includeGrownFaces = false } = {}) {
-    const setup = store.setupOf(storyId)?.data ?? null;
-    const cast = store.getCast(storyId).filter(e => e.role !== '新面孔' || (isFace(e) && (e.set_by === 'user' || includeGrownFaces))).map(e => ({
+export function snapshot(store, setupKey, { name, pack = null, includeGrownFaces = false, storyId = setupKey } = {}) {
+    const setup = store.setupOf(setupKey)?.data ?? null;
+    const cast = store.getCast(setupKey).filter(e => e.role !== '新面孔' || (isFace(e) && (e.set_by === 'user' || includeGrownFaces))).map(e => ({
         avatar: e.avatar, name: e.name, ...(e.call !== undefined ? { call: e.call } : {}), ...(e.stranger !== undefined ? { stranger: strangerOf(e.stranger) } : {}), ...(e.gender !== undefined ? { gender: e.gender } : {}), role: e.role, hook: e.hook ?? null, priority: !!e.priority, bond: e.bond ?? null,
         interests: e.interests_own ? e.interests : null, byUser: e.set_by === 'user', ...(e.群体 === true ? { 群体: true } : {}),
     }));
     return {
         v: PRESET_VERSION, name, savedAt: new Date().toISOString(),
-        setup, cast, relations: store.relationsOf(storyId), pack: pack ?? store.getMeta(`pack:${storyId}`) ?? null,
-        absenceMode: store.getMeta(`absence_mode:${storyId}`) || null,
+        setup, cast, relations: store.relationsOf(setupKey), pack: pack ?? store.getMeta(`pack:${setupKey}`) ?? null,
+        absenceMode: store.getMeta(`absence_mode:${storyId}`) || null,   // D9 是 g2：照旧按局
     };
 }
 
@@ -36,9 +36,9 @@ export function summary(p) {
 
 // 套到这一局：名册按卡对（同一张卡），对不上按名字对；这一局名册里没有的人照样加进去（以后进群就认得）。
 // 开局单存成新确认的一版（旧的留在历史里）；关系表、素材包、离开计时整个换掉。
-export function applyPreset(store, storyId, p) {
+export function applyPreset(store, setupKey, p, { storyId = setupKey } = {}) {
     if (!p || p.v !== PRESET_VERSION) throw Object.assign(new Error('预设的格式不对'), { status: 400 });
-    const have = store.getCast(storyId);
+    const have = store.getCast(setupKey);
     const byAvatar = new Map(have.map(e => [e.avatar, e]));
     const warnings = [];
     const incoming = (p.cast ?? []).filter(e => {
@@ -71,13 +71,13 @@ export function applyPreset(store, storyId, p) {
         return { ...e, avatar: to };
     }).filter(Boolean);
     if (entries.length) {
-        store.putCast(storyId, entries.map(e => ({ avatar: e.avatar, name: e.name, ...(e.call !== undefined ? { call: e.call } : {}), ...(e.stranger !== undefined ? { stranger: strangerOf(e.stranger) } : {}), ...(e.gender !== undefined ? { gender: e.gender } : {}), ...(typeof e.群体 === 'boolean' ? { 群体: e.群体 } : {}), role: e.role, hook: e.hook, priority: e.priority, bond: e.bond })), { byUser: true });
-        for (const e of entries) store.setInterests(storyId, e.avatar, e.interests ?? null);
+        store.putCast(setupKey, entries.map(e => ({ avatar: e.avatar, name: e.name, ...(e.call !== undefined ? { call: e.call } : {}), ...(e.stranger !== undefined ? { stranger: strangerOf(e.stranger) } : {}), ...(e.gender !== undefined ? { gender: e.gender } : {}), ...(typeof e.群体 === 'boolean' ? { 群体: e.群体 } : {}), role: e.role, hook: e.hook, priority: e.priority, bond: e.bond })), { byUser: true });
+        for (const e of entries) store.setInterests(setupKey, e.avatar, e.interests ?? null);
     }
-    if (p.setup) store.confirmSetup({ storyId, data: p.setup });
-    if (p.relations) store.putRelations(storyId, p.relations, { by: 'preset' });
-    store.setMeta(`pack:${storyId}`, p.pack || null);
-    store.setMeta(`absence_mode:${storyId}`, p.absenceMode || null);
+    if (p.setup) store.confirmSetup({ storyId: setupKey, data: p.setup });
+    if (p.relations) store.putRelations(setupKey, p.relations, { by: 'preset' });
+    store.setMeta(`pack:${setupKey}`, p.pack || null);
+    store.setMeta(`absence_mode:${storyId}`, p.absenceMode || null);   // D9 是 g2：照旧按局
     return { mapping, ...(warnings.length ? { warnings } : {}), people: entries.length, setup: !!p.setup, relations: !!p.relations, pack: p.pack ?? null };
 }
 

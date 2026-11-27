@@ -8,6 +8,7 @@ import { addFaces, facesFromRecords } from './cast.mjs';
 import { remoteWayAt } from './arrival.mjs';
 import { boardLoader } from './board.mjs';
 import { shownMenuProofLive } from './menu-evidence.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 const MAX_FAILURES = 3;
 const TRANSIENT_RETRY_MS = 10 * 60 * 1000;
@@ -33,7 +34,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     }
 
     // 已知的事（开局单、世界书）：记账时给和这段沾边的几条，角色提起它不当新事记（用户 10/2）。
-    const knownOf = (chat, user = null) => knownItems({ setup: store.setupOf?.(chat.story_id)?.data ?? null, lore: store.loreOf?.(chat.story_id) ?? [], userName: user });
+    const knownOf = (chat, user = null) => knownItems({ setup: store.setupOf?.(setupKeyOfChat(store, chat))?.data ?? null, lore: store.loreOf?.(setupKeyOfChat(store, chat)) ?? [], userName: user });
     // 隔着电话、消息的人（场记章程第 2 条）：照进场记录、隔离区间算出那条时谁是远程——记账定"谁知道"时他不算当面在场
     const remoteOf = (chat, current) => {
         let arrivals = [], anchors = null, members = [];
@@ -60,7 +61,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     };
     const facePresentOf = chat => {
         try {
-            const allowed = new Set((store.getCast?.(chat.story_id) ?? []).filter(e => e.role !== '不用' && String(e.avatar).startsWith('face:')).map(e => e.avatar));
+            const allowed = new Set((store.getCast?.(setupKeyOfChat(store, chat)) ?? []).filter(e => e.role !== '不用' && String(e.avatar).startsWith('face:')).map(e => e.avatar));
             const board = boardLoader(store, records, chat.key);
             return pos => { try { return board.atPos(pos).people.filter(p => p.status === 'present' && allowed.has(p.avatar)).map(p => p.name); } catch { return []; } };
         } catch { return () => []; }
@@ -84,7 +85,7 @@ export function createWorker({ store, records, getConfig, clientFactory = create
     const noteFaces = chat => {
         if (!store.getCast) return;
         const messages = store.currentMessages(chat.key);
-        const faces = addFaces(store, chat.story_id, facesFromRecords(records.visible(chat.key), { roster: store.getCast(chat.story_id), userName: userName(messages) }));
+        const faces = addFaces(store, setupKeyOfChat(store, chat), facesFromRecords(records.visible(chat.key), { roster: store.getCast(setupKeyOfChat(store, chat)), userName: userName(messages) }));
         if (faces.length) log(`new faces in ${chat.key}: ${faces.join('、')}`);
     };
 

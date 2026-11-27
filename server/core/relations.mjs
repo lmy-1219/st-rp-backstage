@@ -1,3 +1,4 @@
+import { setupKeyFor } from './setup-key.mjs';
 import { personWord } from './pronoun.mjs';
 // 人物关系表（按局存，用户可在面板里看、改）：每个人现在是谁、地盘和本事、和谁什么关系、故事开始时知道什么、
 // 外人眼里是什么样、跟着谁（不单独出现的人）、什么时候才会来；另有全局的"公开的""备注""不在了"。
@@ -315,9 +316,10 @@ export function slotLines(data, { name, present = [], roster = [], firstTime = f
 // 跟着别人的人改成他跟着的那个人牵头。
 // chatKey（章程 K1）：给了就按这个窗口认主角团——开局单没写主角团时用它上一份交回的规划里写的（setup.crewOf）
 export function planRoster(store, storyId, { chatKey = null } = {}) {
-    const cast = store.getCast(storyId);
+    const SK = chatKey != null ? setupKeyFor(store, chatKey) : storyId;
+    const cast = store.getCast(SK);
     const all = cast.map(e => e.name);
-    const rel = store.relationsOf?.(storyId);
+    const rel = store.relationsOf?.(SK);
     const data = rel ? normalizeRelations(rel) : null;
     const fromTable = data ? data.人.filter(p => usable(p) && !/待定/.test(p.能用)).map(p => p.名) : [];
     const names = [...new Set([...cast.filter(e => e.role !== '不用').map(e => e.name), ...fromTable])];
@@ -329,13 +331,13 @@ export function planRoster(store, storyId, { chatKey = null } = {}) {
             && !(data && (p => p && names.some(m => personOf(data, m, all) === p))(personOf(data, n, all))));
     // 玩家的角色（人设名，连同关系表里他那一行的名字和又名）：规划里的事不能由他牵头——场记只发给开口的角色，没有哪个角色是玩家，
     // 由他牵头的事永远递不出去（试玩 9/30：20 件里 7 件写的是玩家）。这类事改成"世界"：从在场的人眼里、从场面上带出来。
-    const players = store.playerNames?.(storyId) ?? [];
+    const players = store.playerNames?.(storyId, chatKey) ?? [];
     const player = [...new Set(players.flatMap(n => { const p = data ? personOf(data, n, all) : null; return p ? [n, p.名, ...p.又名] : [n]; }))].filter(Boolean);
     // cells：规划者交回的每件事都要有六格里的用意、触发、时效、前提（章程 F1，planner.parsePlan）
     // afterCap："第几天后"的上限按这一局的时间尺度（章程 G2：天 60，年 20）；maxEvents：一个节点至多几件，按这局的节奏（章程 H2：慢档 8，别的 12）
     // unitCap：节奏表每格至多几件（perUnit 上限，章程 H5）——头一格排多了提醒一句
     // categories：开局单的类别（章程 J1）——这一份一件都没撑到的类别，parsePlan 记一句提醒
-    const setup = store.setupOf?.(storyId)?.data ?? null;
+    const setup = store.setupOf?.(SK)?.data ?? null;
     const pace = paceOf(setup);
     // crew：主角团名单（章程 K1）——parsePlan 数主角团的事占几成
     let lastNode = null;

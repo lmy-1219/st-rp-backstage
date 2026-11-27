@@ -2,6 +2,7 @@
 // 卡、user 卡、世界书、局预设、ST 预设读成文本交给扩展；新素材复制进后台数据目录。
 // ZIP/Git 来源也只准备文件，ST 导入仍由扩展完成。题材无关。
 import fs from 'node:fs';
+import { setupKeyFor } from './setup-key.mjs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -36,9 +37,9 @@ export function listPacks(opts) {
     return [...new Set(packRoots(opts).flatMap(dir => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name); } catch { return []; } }))];
 }
 export function packFor(store, chatKey, opts) {
-    let storyId = null;
-    try { storyId = store.requireChat(chatKey).story_id; } catch { return null; }
-    const name = store.getMeta(`pack:${storyId}`);
+    let setupKey = null;
+    try { setupKey = setupKeyFor(store, chatKey); } catch { return null; }
+    const name = store.getMeta(`pack:${setupKey}`);
     if (!name || !listPacks(opts).includes(name)) return null;
     const dir = packRoots(opts).map(root => path.join(root, name)).find(d => { try { return fs.statSync(d).isDirectory(); } catch { return false; } });
     const file = rel => (fs.existsSync(path.join(dir, rel)) ? path.join(dir, rel) : null);

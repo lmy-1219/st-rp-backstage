@@ -1,3 +1,4 @@
+import { setupKeyFor } from './setup-key.mjs';
 // 口味段位和数据目录里的口味包。默认文字由原提示词模块登记，契约仍由原模块持有。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -167,10 +168,10 @@ export function setGlobalPromptPack(store, id) {
 export function promptOptionsFor(store, chatKey, config = null) {
     const env = environments.get(store);
     config ??= env?.getConfig() ?? {};
-    const storyId = store.requireChat(chatKey).story_id;
-    const setup = store.setupOf?.(storyId)?.data ?? {};
+    const storyId = store.requireChat(chatKey).story_id, SK = setupKeyFor(store, chatKey);
+    const setup = store.setupOf?.(SK)?.data ?? {};
     const tier = tierOf(config, setup);
-    const selected = store.getMeta?.(`prompt_pack:${storyId}`) || config.content?.pack || DEFAULT_PACK;
+    const selected = store.getMeta?.(`prompt_pack:${setupKeyFor(store, chatKey)}`) || config.content?.pack || DEFAULT_PACK;
     let pack = builtin(), warning = '';
     try { pack = env?.packs?.read(selected) ?? builtin(); }
     catch { warning = '所选口味包读不出来，暂用系统默认；原包保留。'; }

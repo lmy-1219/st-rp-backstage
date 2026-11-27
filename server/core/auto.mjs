@@ -28,6 +28,7 @@ import { narrationOf } from './timeline.mjs';
 import { confirmedContacts } from './contact-verdict.mjs';
 import { resolveIdentity, sameIdentity, messageIsPerson } from './cast.mjs';
 import { isPrivate } from './visibility.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 export const KNOCKS = chatKey => `knocks:${chatKey}`;
 export const PENDING = chatKey => `knock_pending:${chatKey}`;
@@ -67,7 +68,7 @@ function executionBasis(store, chatKey, item) {
     const chat=store.requireChat(chatKey), board=boardFor(store,null,chatKey);
     let members=[],anchors={};try{members=JSON.parse(chat.members??'[]');anchors=JSON.parse(chat.anchors??'{}');}catch{}
     const person=board.people.find(p=>p.avatar===item.avatar);
-    const scope=store.getCast?.(chat.story_id)??[];
+    const scope=store.getCast?.(setupKeyOfChat(store, chat))??[];
     const manualRevision=createHash('sha256').update(JSON.stringify([
         anchors?.[item.avatar]?.rpeManualRevision??null,
         store.currentMessages(chatKey).filter(m=>m.pos<=(item.through??Infinity)&&m.boardMark).map(m=>[m.pos,m.boardMark]),
@@ -345,7 +346,7 @@ export const knocksOf = (store, chatKey) => read(store, KNOCKS(chatKey), []).fil
 const blockedKnock = (store, chatKey, k) => playModeOf(store, chatKey) === 'memory' && ['pocket','contact','reach'].includes(k?.source?.type);
 // 请求证据绑定请求本身，不能借普通来源的 sameMessage 改稿兼容续命。
 function playerRequestFor(store, chatKey, person, { through = Infinity } = {}) {
-    const chat = store.requireChat(chatKey), roster = store.getCast(chat.story_id) ?? [];
+    const chat = store.requireChat(chatKey), roster = store.getCast(setupKeyOfChat(store, chat)) ?? [];
     const messages = store.currentMessages(chatKey).filter(m => m.pos <= through);
     const last = messages.at(-1)?.pos ?? -1;
     const called = m => confirmedContacts(store, chatKey, m ? [m] : [], { phase: 'prepare' }).find(r => sameIdentity(r, person, roster));
@@ -369,8 +370,8 @@ function playerRequestFor(store, chatKey, person, { through = Infinity } = {}) {
 }
 // 旧 pending 和直接远程进场也要守门；只有可辨认的玩家点名/请求能让依附者单独来。
 export function unrequestedFollower(store, chatKey, person, { through = Infinity } = {}) {
-    const chat = store.requireChat(chatKey), roster = store.getCast(chat.story_id) ?? [];
-    const raw = store.relationsOf?.(chat.story_id), rel = raw ? normalizeRelations(raw) : null;
+    const chat = store.requireChat(chatKey), roster = store.getCast(setupKeyOfChat(store, chat)) ?? [];
+    const raw = store.relationsOf?.(setupKeyOfChat(store, chat)), rel = raw ? normalizeRelations(raw) : null;
     const names = roster.map(p => p.name);
     if (!rel || !leaderOf(rel, person.who, names)) return false;
     if (person.source?.type === 'named') return false;
@@ -444,8 +445,8 @@ function context(store, records, chatKey, { present = [], recentUser = '', timel
     const chat = store.requireChat(chatKey);
     const messages = live(store.currentMessages(chatKey));
     const tl = timeline ?? timelineFor(store, records, chatKey, messages);
-    const roster = store.getCast?.(chat.story_id) ?? [];
-    const relations = store.relationsOf?.(chat.story_id) ?? null;
+    const roster = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
+    const relations = store.relationsOf?.(setupKeyOfChat(store, chat)) ?? null;
     const names = roster.map(e => e.name);
     let members = [];
     try { const parsed = JSON.parse(chat.members ?? '[]'); if (Array.isArray(parsed)) members = parsed; } catch {}
@@ -456,7 +457,7 @@ function context(store, records, chatKey, { present = [], recentUser = '', timel
 export function avatarFor(ctx, who, fallback = null) {
     return resolveIdentity(ctx.roster, { name: who, avatar: fallback }, { members: ctx.members, identityChoices: ctx.identityChoices }).person?.avatar ?? null;
 }
-const sameFor = (store, chatKey, a, b) => sameIdentity(a, b, store.getCast(store.requireChat(chatKey).story_id).filter(e => e.role !== '不用'));
+const sameFor = (store, chatKey, a, b) => sameIdentity(a, b, store.getCast(setupKeyFor(store, chatKey)).filter(e => e.role !== '不用'));
 const candidates = list => list.map((d,i) => ({ ...d, candidateId: `候选${i+1}` }));
 function intimateContacts(store, records, chatKey, ctx) {
     if (intimateStopped(store, records, chatKey, { present: ctx.present })) return new Set();
@@ -465,7 +466,7 @@ function intimateContacts(store, records, chatKey, ctx) {
         .map(name => resolveIdentity(scope, { name }, { members: ctx.members, identityChoices: ctx.identityChoices }).person?.avatar).filter(Boolean));
 }
 function verdictFor(store, chatKey, doubts, d, verdicts) {
-    const scope = store.getCast(store.requireChat(chatKey).story_id).filter(e => e.role !== '不用');
+    const scope = store.getCast(setupKeyFor(store, chatKey)).filter(e => e.role !== '不用');
     const key = [d.candidateId, d.avatar].find(k => k && Object.hasOwn(verdicts ?? {}, k));
     const legacy = resolveIdentity(scope, d.who).person?.avatar === d.avatar && doubts.filter(x => x.who === d.who).length === 1;
     const value = key ? verdicts[key] : legacy ? verdicts?.[d.who] : undefined;
@@ -581,8 +582,8 @@ export function beginKnock(store, chatKey, k) {
     const basisDay = k.basisDay ?? store.confirmedDayAt?.(chatKey, k.at - 1) ?? timelineFor(store, null, chatKey).firmToday;
     const pending = { who: k.who, avatar: k.avatar ?? null, way: k.way, mode: k.mode ?? modeOf(k.way), at: k.at, fp: k.fp, through:k.at-1, sourceVersion:sourceVersion(store,chatKey,k.at-1), basisDay, source: k.source ?? null, sourceStep: sourceStep(store, chatKey, k), label: k.label ?? '', since: Date.now() };
     if (k.handoff) pending.handoff = k.handoff;
-    const chat = store.requireChat(chatKey), raw = store.relationsOf?.(chat.story_id);
-    const names = (store.getCast(chat.story_id) ?? []).map(p => p.name);
+    const chat = store.requireChat(chatKey), raw = store.relationsOf?.(setupKeyOfChat(store, chat));
+    const names = (store.getCast(setupKeyOfChat(store, chat)) ?? []).map(p => p.name);
     // 联系候选可能排在 named 前面；进场会消费 arrival_request，先把可核实的请求随这次叩门留下。
     if (k.playerRequest || raw && leaderOf(normalizeRelations(raw), k.who, names)) {
         const request = playerRequestFor(store, chatKey, k, { through: k.at - 1 });
@@ -596,7 +597,7 @@ export function beginKnock(store, chatKey, k) {
 // 快捷按钮（方案第二节第 3 条）：接／让他进来＝进场，不理＝作废；写在他这次叩门上，状态机先看它
 export function answerKnock(store, chatKey, { who, avatar = null, answer }) {
     const knocks = knocksOf(store, chatKey);
-    const scope = store.getCast(store.requireChat(chatKey).story_id).filter(e => e.role !== '不用');
+    const scope = store.getCast(setupKeyFor(store, chatKey)).filter(e => e.role !== '不用');
     const person = resolveIdentity(scope, { name: who, avatar }).person;
     const k = person && [...knocks].reverse().find(x => sameIdentity(x, person, scope) && !x.entered && !x.lapsed);
     if (!k) return { ok: false, why: '他没有候着的叩门' };
@@ -993,7 +994,7 @@ export function answerLeaves(store, chatKey, doubts, verdicts) {
         if(!last || (d.throughFp && last.fp!==d.throughFp)) continue;
         if (state === '走了' && !completedDeparture(messages.filter(m => m.pos <= through), d.who, {
             avatar: d.avatar, aliases: d.aliases, status: d.status, at: evidence.pos, quote: legacy ? null : v['引'],
-            roster: store.getCast(store.requireChat(chatKey).story_id) ?? [], remoteNames: d.remoteNames,
+            roster: store.getCast(setupKeyFor(store, chatKey)) ?? [], remoteNames: d.remoteNames,
         })) {
             store.logEvent?.(chatKey, 'auto_left_rejected', { avatar: d.avatar, at: evidence.pos, reason: '引文不能确认本人已经离场，保留待核' });
             continue;

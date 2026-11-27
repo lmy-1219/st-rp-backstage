@@ -11,6 +11,7 @@ import { foldState } from './state.mjs';
 import { sameIdentity, resolveIdentity } from './cast.mjs';
 import { knockState } from './knock.mjs';
 import { assertKnockReader } from './store.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 const CAMERA_NAME = '旁白';   // 镜头那张卡的名字（slot.mjs 也是这个）
 const MOVE_WORDS = '走进|走到|进了|进入|来到|到了|回到|下楼到|下楼找到|上楼到|推门进|拐进|踏进|钻进|跟着[^，。；！？,;!?]{0,12}进了';
@@ -377,8 +378,8 @@ function cacheVersion(store, chat, chatKey, present, recentUser, marks) {
         notes: [notes.length, notes.at(-1)?.id ?? null],
         group: chat.group_id ?? null,
         members: chat.members ?? null,
-        cast: (store.getCast?.(chat.story_id) ?? []).map(p => [p.avatar, p.name, p.role]),
-        relations: store.relationsOf?.(chat.story_id) ?? null,
+        cast: (store.getCast?.(setupKeyOfChat(store, chat)) ?? []).map(p => [p.avatar, p.name, p.role]),
+        relations: store.relationsOf?.(setupKeyOfChat(store, chat)) ?? null,
         anchors: createHash('sha256').update(String(chat.anchors ?? '')).digest('hex'),
         arrived,
         arrivals: store.getMeta?.(`arrivals:${chatKey}`) ?? '',
@@ -390,7 +391,7 @@ function cacheVersion(store, chat, chatKey, present, recentUser, marks) {
         correctionRev: store.getMeta?.(`correction_rev:${chat.story_id}`) ?? '',
         identityChoices: store.getMeta?.(`card_choices:${chatKey}`) ?? '',
         contacts: store.getMeta?.(`contact_verdict_revision:${chatKey}`) ?? '',
-        setup: store.setupOf?.(chat.story_id)?.id ?? null,
+        setup: store.setupOf?.(setupKeyOfChat(store, chat))?.id ?? null,
         recentUser: recentUser ?? '',
         // 纠正是存在各条上的 JSON 文本：哪几条有、写了什么，都进版本（试玩 10/7：只数条数，改了纠正还拿到旧表）
         marks: (marks ?? []).map((m, i) => (m ? `${i}:${m}` : '')).filter(Boolean).join('|'),
@@ -421,8 +422,8 @@ export function boardLoader(store, records, chatKey, { present = null, recentUse
     const visible = records?.visible?.(chatKey) ?? records ?? [];
     const homes = lifeSheet(visible).homes;
     const stateNotes = store.stateNotesOf?.(chatKey) ?? [];
-    const roster = store.getCast?.(chat.story_id) ?? [];
-    const relations = store.relationsOf?.(chat.story_id) ?? null;
+    const roster = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
+    const relations = store.relationsOf?.(setupKeyOfChat(store, chat)) ?? null;
     const solo = soloMember(chat, roster);
     let identityChoices={};try{identityChoices=JSON.parse(store.getMeta?.(`card_choices:${chatKey}`)??'{}');}catch{}
     const sourceCurrent=e=>factCurrent(e,{messages:all,roster,identityChoices});
@@ -477,7 +478,7 @@ export function boardFor(store, records, chatKey, { anchor = null, present = nul
 // 来源版本只覆盖判断实际读过的前缀；后来的新段不会使较早的事件失效。
 export function sourceVersion(store, chatKey, through = null) {
     const chat = store.requireChat(chatKey);
-    return versionOf({messages:store.currentMessages(chatKey),roster:store.getCast?.(chat.story_id)??[],correctionRev:store.getMeta?.(`correction_rev:${chat.story_id}`)??'',identityChoices:store.getMeta?.(`card_choices:${chatKey}`)??''},through);
+    return versionOf({messages:store.currentMessages(chatKey),roster:store.getCast?.(setupKeyOfChat(store, chat))??[],correctionRev:store.getMeta?.(`correction_rev:${chat.story_id}`)??'',identityChoices:store.getMeta?.(`card_choices:${chatKey}`)??''},through);
 }
 function versionOf({messages,roster,correctionRev,identityChoices},through) {
     const rows=messages.filter(m=>through==null||m.pos<=through);
@@ -509,7 +510,7 @@ export function factCurrent(item, input) {
 export function factInput(store, chatKey) {
     const chat = store.requireChat(chatKey);
     let identityChoices = {}; try { identityChoices = JSON.parse(store.getMeta?.(`card_choices:${chatKey}`) ?? '{}'); } catch {}
-    return { messages: store.currentMessages(chatKey), roster: store.getCast?.(chat.story_id) ?? [], identityChoices };
+    return { messages: store.currentMessages(chatKey), roster: store.getCast?.(setupKeyOfChat(store, chat)) ?? [], identityChoices };
 }
 
 // 闭段是投影，只有仍有效的离场事件或明确人工裁决才是离场来源。

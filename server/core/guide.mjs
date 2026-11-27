@@ -13,6 +13,7 @@ import { occasionOf, heartToHeart, closeCountsByMessage, tenseStrict } from './o
 import { narrationOf } from './timeline.mjs';
 import { scaleOf, DAY } from './timescale.mjs';
 import { sameName } from './setup.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 // 数值：默认、范围集中放这里（config.mjs 读、tuning.mjs 列；没填、乱填按默认）
 export const GUIDE = Object.freeze({
@@ -160,14 +161,14 @@ export function guideFor(store, records, chatKey, { present = [], config = null,
     const last = store.lastReadyPlan?.(chatKey) ?? null;
     let node = null; try { node = last?.node ? JSON.parse(last.node) : null; } catch {}
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? null;
-    const players = [userName, ...(store.playerNames?.(chat.story_id) ?? [])].filter(Boolean);
-    const roster = store.getCast?.(chat.story_id) ?? [];
+    const players = [userName, ...(store.playerNames?.(chat.story_id, chatKey) ?? [])].filter(Boolean);
+    const roster = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
     const names = roster.map(e => e.name);
     const same = (a, b) => store.sameMessage?.(a, b) ?? false;
     const events = eventsOf({ messages, menu, arrivals: read(store, `arrivals:${chatKey}`, []), plans: store.readyPlans?.(chatKey) ?? [], same });
     const visible = (records.visible?.(chatKey) ?? []).filter(r => r.pos <= (messages.at(-1)?.pos ?? -1));
     const render = (text, m, part, today) => renderEntry(text, m, { sourceDay: part.pos != null ? timeline.dayOf(part.pos) : part.day ?? m.said_day, today, timeScale: scaleFor(store, chatKey), roster, messages });
-    const out = guideAt({ cfg: config, messages, events, shown: read(store, SHOWN_KEY(chatKey), null), same, menu, today: timeline.today, node, players, present, names, roster, relations: store.relationsOf?.(chat.story_id), visible, timeScale: scaleFor(store, chatKey), nearPlace, render });
+    const out = guideAt({ cfg: config, messages, events, shown: read(store, SHOWN_KEY(chatKey), null), same, menu, today: timeline.today, node, players, present, names, roster, relations: store.relationsOf?.(setupKeyOfChat(store, chat)), visible, timeScale: scaleFor(store, chatKey), nearPlace, render });
     return { ...out, last, lastMessage: messages.at(-1) ?? null };
 }
 

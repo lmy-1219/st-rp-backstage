@@ -4,6 +4,7 @@
 // 比的时候：口袋只认快照那时已经有的那几步（之后才补记的不算），还没回的那一步不算（他正在写）；
 // 群里的人有进有出（拉人、移出不是消息，删消息撤不回）的那几个人不比。题材无关。
 import { boardFor } from './board.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 const STEP = { waiting: '还没到', pocket: '在口袋里', offered: '在口袋里', shown: '拿出来了', used: '用上了', sunk: '沉了', sunk_told: '沉了', void: '撤了', expired: '过期了' };
 const WHERE = { present: '在场', remote: '隔着消息电话', away: '在外头', absent: '不在', never: '没出场' };
@@ -24,7 +25,7 @@ export function stateNow(store, records, chatKey, { logUpTo = null } = {}) {
     try { people = Object.fromEntries(boardFor(store, records, chatKey, { present: [], recentUser: '' }).people.map(p => [p.name, WHERE[p.status] ?? p.status])); } catch {}
     let anchors = {};
     try { anchors = JSON.parse(chat.anchors ?? 'null') ?? {}; } catch {}
-    const cast = store.getCast?.(chat.story_id) ?? [];
+    const cast = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
     const spans = {};
     for (const [avatar, rec] of Object.entries(anchors ?? {})) {
         const name = cast.find(e => e.avatar === avatar)?.name ?? rec?.name ?? avatar;

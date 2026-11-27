@@ -212,6 +212,9 @@ export const META = [
     meta('pack', 'story', 'none', 'copy', 'copy-at-fork', 'YNN', 'D12', { note: '局设置' }),
     meta('prompt_pack', 'story', 'none', 'copy', 'copy-at-fork', 'YNN', 'D12', { note: '局设置' }),
     meta('relations_draft', 'story', 'none', 'copy', 'copy-at-fork', 'YNN', 'D12'),
+    // T154g1：开局设定分开存的记号和开局单编号对照（按窗；开分支时写，只读）
+    meta('setup_split', 'window', 'none', 'none', 'cache', '+新', '+新(D12)', { knows: false, note: '这个窗的开局设定已分开存（值 1）；没有＝键用 story_id（新局和旧窗）' }),
+    meta('setup_idmap', 'window', 'none', 'none', 'cache', '+新', '+新(D12)', { knows: false, note: '开分支复制开局单各版时旧编号→新编号，核对前史证据时换算' }),
     meta('secret_leaks', 'story', 'none', 'copy', 'per-window', 'YNN', 'D13'),
     meta('correction_rev', 'story', 'none', 'copy', 'per-window', 'YNN', 'D13', { knows: false, note: '纠正版本号' }),
     meta('vis_protocol', 'story', 'none', 'copy', 'per-window', 'YNN', 'D13', { knows: false, note: '逐楼协议标记，同步时从消息重推' }),
@@ -234,6 +237,8 @@ export const ADDED = [
     { key: 'meta:branch_cut', as: 'C2a 进场·在不在', why: 'T154c 分支窗首次同步时按切出点截过一次的标记（值是切出点楼数），防止重复截；内部标记' },
     { key: 'meta:errand', as: 'C8', why: '去办的事的冷却游标，键 errand:<窗>:<菜单项>；总账 C8 的 22 个前缀里没有' },
     { key: 'meta:advanced', as: 'C7', why: '场景推进缓存（slot.mjs），总账 C7 的 13 个前缀里没有' },
+    { key: 'meta:setup_split', as: 'D12', why: 'T154g1 开分支时记下这个窗的开局设定已分开存；决定读写键用 chatKey 还是 story_id' },
+    { key: 'meta:setup_idmap', as: 'D12', why: 'T154g1 开分支复制开局单各版时的旧→新编号对照，核对前史证据用' },
     { key: 'meta:authorization_rev', as: 'C9', why: '内部授权序号，键 authorization_rev:<窗> 和 authorization_rev:story:<局>；总账 C9 里没有，归内部序号' },
 ];
 
@@ -246,5 +251,8 @@ export const DYNAMIC_KEY_SITES = [
     { file: 'main.mjs', match: '`${k}:${chat.story_id}`', count: 1, note: 'meta(k)，k 取 long_rolled / long_events 等已登记前缀' },
     { file: 'pending.mjs', match: '`${prefix}${c.name}`', count: 1, note: 'prefix＝settled_contact:<窗>: ，已登记 settled_contact' },
     { file: 'slot.mjs', match: '`${key}:${chatKey}`', count: 2, note: "for key of ['world_day','situation_ran'] 读/清缓存（同一循环两行）" },
+    { file: 'store.mjs', match: '${name}:${from}', count: 1, note: 'forkSetup：开分支时整份复制开局设定那批 meta，name 取 SETUP_META 里已登记的前缀（plan_persona / lore_tries / lore_ver / roster_listed / pack / prompt_pack / relations_draft）' },
+    { file: 'store.mjs', match: '${name}:${to}', count: 1, note: 'forkSetup：同上，写到子窗的设定归属键下' },
+    { file: 'store.mjs', match: '${prefix}:${to}:', count: 1, note: 'forkSetup：opening_seeded / cast_promotion_dismissed 两个带后缀的前缀，整份复制到子窗的设定归属键下' },
     { file: 'store.mjs', match: '`${key}:${chatKey}`', count: 1, note: 'authorizationVersion 里 read(\'arrivals\'|\'card_choices\'|…)，读的是已登记前缀' },
 ];

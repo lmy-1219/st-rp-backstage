@@ -6,6 +6,7 @@
 import { briefSection } from './setup.mjs';
 import { rankByOverlap } from './recall.mjs';
 import { DAY } from './timescale.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 export const TALK_SYSTEM = [
     '你是一部长篇角色扮演的后台，不是故事里的任何角色。玩家从戏里切出来直接跟你说话：问已经发生过、记下了的事，商量接下来的方向和口味，或者指出哪件事记错了、前台写错了。',
@@ -148,9 +149,9 @@ export function createTalk({ store, records, context, client, log = () => {}, pl
                 if (!recordOf(chatKey)(p.id)) throw Object.assign(new Error('这条记录已经不在了（消息改过或删了）'), { status: 409 });
                 records.correct(p.id, p.kind === 'fix' ? p.text : null, p.kind === 'fix' ? '玩家在"跟后台说话"里改的' : `玩家在"跟后台说话"里作废：${p.why ?? ''}`);
             } else if (p.kind === 'fact') {
-                const setup = store.setupOf(chat.story_id)?.data;
+                const setup = store.setupOf(setupKeyOfChat(store, chat))?.data;
                 if (!setup) throw Object.assign(new Error('这一局还没有开局单，先在面板"开局单"里建一份'), { status: 409 });
-                store.confirmSetup({ storyId: chat.story_id, data: { ...setup, 前史: [...(setup.前史 ?? []), { 事: p.text, 谁知道: p.who ?? [], 层: '本局私设', 谁的版本: '', 常驻: true }] } });
+                store.confirmSetup({ storyId: setupKeyOfChat(store, chat), data: { ...setup, 前史: [...(setup.前史 ?? []), { 事: p.text, 谁知道: p.who ?? [], 层: '本局私设', 谁的版本: '', 常驻: true }] } });
             } else if (p.kind === 'plan' || p.kind === 'play') {
                 const s = context(chatKey).s;
                 store.addNote({ chatKey, kind: p.kind === 'plan' ? '聊' : '玩', text: p.text, storyDay: s.today, pos: s.lastPos });

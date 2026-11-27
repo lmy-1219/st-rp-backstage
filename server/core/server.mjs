@@ -45,6 +45,7 @@ import { withTaste, tasteFor } from './taste.mjs';
 import { intimateSetup, paceFor, withdrawIntimateForTier, intimateProgressFor } from './slot.mjs';
 import { paceCap } from './tempo.mjs';
 import { renderPronouns, playerContext } from './pronoun.mjs';
+import { setupKeyFor, setupKeyOfChat, metaSetupKey } from './setup-key.mjs';
 
 export const VERSION = '0.3.0';
 const BODY_LIMIT = 16 * 1024 * 1024;
@@ -112,11 +113,11 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
     const materialTimer = setInterval(() => { try { materialManager?.cleanup(); } catch {} }, 60000); materialTimer.unref();
     const contentView = chatKey => {
         const options = promptOptionsFor(store, chatKey), env = promptEnvironmentFor(store);
-        const rows = intimateRows(options.setup, { names: setupNames(store.requireChat(chatKey).story_id) });
+        const rows = intimateRows(options.setup, { names: setupNames(setupKeyFor(store, chatKey)) });
         const progress = intimateProgressFor(store, records, chatKey);
         return { playMode: playModeOf(store, chatKey, options.config), globalPlay: options.config.play?.mode ?? 'full', ownPlay: options.setup.玩法 ?? '', playReason: playStop(store, chatKey, options.config)?.reason ?? '', tier: options.tier, tiers: allowedTiers(options.config), ownTier: options.setup.档位 ?? '', pace: options.setup.节奏 ?? '中',
             selected: options.selected, pack: options.pack, globalPack: options.config.content?.pack ?? DEFAULT_PACK, warning: options.warning,
-            ownPack: store.getMeta(`prompt_pack:${store.requireChat(chatKey).story_id}`) ?? '', packs: env?.packs?.list() ?? [], slots: slotTable(options),
+            ownPack: store.getMeta(`prompt_pack:${setupKeyFor(store, chatKey)}`) ?? '', packs: env?.packs?.list() ?? [], slots: slotTable(options),
             pureIntimateInactive: options.tier === '纯NSFW' && !rows.some(r => r.ok),
             // 纯NSFW 的口味文字在单独的口味包里（D-228）：这一局用的包没给这一段，就和剧情向一样
             pureNoPack: options.tier === '纯NSFW' && typeof options.paragraphs?.['plan.intimate'] !== 'string',
@@ -127,7 +128,13 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                         choices: [...new Set([r.现在, ...r.阶梯.slice(0, r.阶梯.indexOf(current.current) + 1)])] } } : {}) };
             }) };
     };
-    const setupNames = storyId => [...store.getCast(storyId).filter(e => e.role !== '不用').map(e => e.name), ...(store.playerNames?.(storyId) ?? [])];
+    // 第三十三封：开局单的名单和本窗规划认同一份已确认人设。setupKey 已分开存时就是那个窗的 chatKey（setup_split 标记在它身上），
+    // 把它当 chatKey 传给 playerNames；没分开的（setupKey＝story_id）照旧读原局那份。历史名／曾用名照旧整局收。
+    const setupNames = setupKey => {
+        const storyId = store.db.prepare('select story_id from chats where key = ?').get(setupKey)?.story_id ?? setupKey;
+        const chatKey = setupKey !== storyId && store.getRawMeta?.(`setup_split:${setupKey}`) ? setupKey : null;
+        return [...store.getCast(setupKey).filter(e => e.role !== '不用').map(e => e.name), ...(store.playerNames?.(storyId, chatKey) ?? [])];
+    };
     const withPack = chatKey => { const base = settings?.() ?? {}; const p = base.packOf?.(chatKey) ?? null; return { ...base, economy: { table: p?.table ?? null }, world: { seeds: p?.seeds ?? null, anchors: p?.anchors ?? null, facts: p?.facts ?? null }, factions: { net: p?.factions ?? null } }; };
     const timeListeners = new Map();
     const timeChanged = chatKey => { for (const resolve of [...(timeListeners.get(chatKey) ?? [])]) resolve(); };
@@ -144,37 +151,37 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
     };
     // 开局单分格 API 没响应 ⇒ 整份稿子写成外援包交给窗口；交回的和模型答的走同一套核对，进草稿等用户核对。
     handoffs?.register('setup', {
-        stale: meta => store.setupDraft(meta.storyId)?.id !== meta.setupId,
+        stale: meta => store.setupDraft(metaSetupKey(meta))?.id !== meta.setupId,
         dropped: (meta, h) => {
-            const draft = store.setupDraft(meta.storyId);
+            const draft = store.setupDraft(metaSetupKey(meta));
             if (draft?.id === meta.setupId && draft.status === 'handoff')
                 store.failSetup(draft.id, `${h.payload.why || draft.error || '开局单分格未完成'}；外援已丢弃`);
         },
         retry: async meta => {
             if (!setupMaker) throw new Error('setup_no_model');
-            const d = store.setupDraft(meta.storyId);
-            const names = store.getCast(meta.storyId).filter(e => e.role !== '不用').map(e => e.name);
+            const d = store.setupDraft(metaSetupKey(meta));
+            const names = store.getCast(metaSetupKey(meta)).filter(e => e.role !== '不用').map(e => e.name);
             store.finishSetup(d.id, await setupMaker({ source: d.source, names }));
             return 'done';
         },
         apply: (text, meta) => {
-            const d = store.setupDraft(meta.storyId);
-            const parsed = parseSetup(text, { source: d.source, names: setupNames(meta.storyId) });
+            const d = store.setupDraft(metaSetupKey(meta));
+            const parsed = parseSetup(text, { source: d.source, names: setupNames(metaSetupKey(meta)) });
             store.finishSetup(d.id, parsed);
             return { unchecked: parsed.unchecked.length };
         },
     });
     // 确认了一版开局单 ⇒ 给前史配检索词（便宜模型一次）；调不通交给外援。检索词写回那一版，用户不用管。
     handoffs?.register('keys', {
-        stale: meta => store.setupOf(meta.storyId)?.id !== meta.setupId,
+        stale: meta => store.setupOf(metaSetupKey(meta))?.id !== meta.setupId,
         retry: async meta => {
             if (!keysMaker) throw new Error('keys_no_model');
-            const c = store.setupOf(meta.storyId);
+            const c = store.setupOf(metaSetupKey(meta));
             store.updateSetupData(c.id, withKeys(c.data, await keysMaker(c.data)));
             return 'done';
         },
         apply: (text, meta) => {
-            const c = store.setupOf(meta.storyId);
+            const c = store.setupOf(metaSetupKey(meta));
             store.updateSetupData(c.id, withKeys(c.data, parseBackstoryKeys(text, c.data.前史.length)));
             return { entries: c.data.前史.length };
         },
@@ -184,7 +191,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
     const openingAbsent = chat => {
         const config = promptOptionsFor(store, chat.key).config;
         if (!chat.group_id || config.auto?.enabled !== true || store.currentMessages(chat.key).some(m => m.is_user)) return [];
-        const members = JSON.parse(chat.members ?? '[]'), players = store.playerNames(chat.story_id);
+        const members = JSON.parse(chat.members ?? '[]'), players = store.playerNames(chat.story_id, chat.key);
         return boardFor(store, records, chat.key).people
             .filter(p => (p.status === 'absent' || (p.status === 'away' && !p.plan?.seed)) && p.card && p.name !== '旁白' && !players.includes(p.name) && members.some(m => m.avatar === p.avatar))
             .map(p => p.avatar);
@@ -195,7 +202,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
         const packet = why => handoffs?.request({
             kind: 'keys', key: String(c.id), chatKey, why, system: KEYS_SYSTEM, user: keysPrompt(c.data),
             task: '当配检索词的模型：给【输入】里每一条配检索词，只输出它要的那个 JSON', checks: '按编号对上每一条',
-            meta: { storyId, setupId: c.id },
+            meta: { storyId, setupKey: storyId, setupId: c.id },
         });
         if (!keysMaker) return void packet('给开局单的前史配检索词（这里没接模型）');
         keysMaker(c.data, { chatKey }).then(
@@ -208,14 +215,14 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             kind: 'setup', key: String(id), chatKey, why, system: SETUP_SYSTEM, user: setupPrompt({ source, names }),
             task: '当分格的模型：把【输入】里用户的开局稿按【系统提示】分到各格，只输出它要的那个 JSON',
             checks: '每条的原文片段在用户稿里逐字核对，找不到的标出来请用户看',
-            meta: { storyId, setupId: id },
+            meta: { storyId, setupKey: storyId, setupId: id },
         });
         store.markSetupHandoff(id, handoffId);
         return handoffId;
     };
     // 一整段交给后台分格（贴的、上传的素材里当开局单用的）：后台跑，好了进草稿等用户核对；模型没响应写成外援包。
     const startDraft = (chat, source) => {
-        const storyId = chat.story_id;
+        const storyId = setupKeyOfChat(store, chat);
         const id = store.startSetup({ storyId, source });
         const names = store.getCast(storyId).filter(e => e.role !== '不用').map(e => e.name);
         setupMaker({ source, names, chatKey: chat.key }).then(r => store.finishSetup(id, r), e => {
@@ -228,8 +235,9 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
     return {
         // code：这个进程是用哪个版本的代码起来的（插件开 ST 时拿它和磁盘上的比，D-163）
         'GET /v1/health': () => ({ ok: true, version: VERSION, code: settings().code ?? null }),
-        'POST /v1/declarations': b => store.declarationsOf(b.story),
-        'POST /v1/declarations-save': b => store.putDeclarations(b.story, b.groups, b.version),
+        // 带 chatKey：按这个窗的设定归属键（分开存的新分支＝自己那份）；不带 chatKey 的本机工具调用：照旧按 story 值，动的是没分开的那份（T154g1）。
+        'POST /v1/declarations': b => store.declarationsOf(b.chatKey != null ? setupKeyFor(store, str(b.chatKey, 'chatKey')) : b.story),
+        'POST /v1/declarations-save': b => store.putDeclarations(b.chatKey != null ? setupKeyFor(store, str(b.chatKey, 'chatKey')) : b.story, b.groups, b.version),
         'POST /v1/camera-card': () => cameraCardPrompt(),
         'POST /v1/join': b => {
             const r = store.join({
@@ -289,10 +297,10 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             return { records: records.visible(chatKey, { status: b.rejected ? 'rejected' : 'ok', type: str(b.type, 'type', { optional: true }), all: true }) };
         },
         'POST /v1/content': b => {
-            const chatKey = str(b.chatKey, 'chatKey'), storyId = store.requireChat(chatKey).story_id;
+            const chatKey = str(b.chatKey, 'chatKey'), setupKey = setupKeyFor(store, chatKey);
             const options = promptOptionsFor(store, chatKey), env = promptEnvironmentFor(store), packs = env?.packs;
             if (b.action === 'progress') {
-                const rows = intimateRows(options.setup, { names: setupNames(storyId) });
+                const rows = intimateRows(options.setup, { names: setupNames(setupKey) });
                 const line = Number.isInteger(b.index) ? rows[b.index] : null;
                 const current = contentView(chatKey).intimate.find(r => r.index === b.index)?.progress;
                 if (!line || !current || !current.choices.includes(b.value)) bad('只能改回这一条已走过的阶梯或开局原文');
@@ -301,8 +309,8 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 if (b.play !== undefined && !['', '完整', '只记忆'].includes(b.play)) bad('玩法要选完整或只记忆');
                 if (b.tier !== undefined && b.tier !== '' && !allowedTiers(options.config).includes(b.tier)) bad('系统没有开放这个档位');
                 if (b.pace !== undefined && !['快', '中', '慢'].includes(b.pace)) bad('节奏要选快、中或慢');
-                const current = store.setupOf(storyId);
-                if (!current && store.setupDraft(storyId)) bad('请先保存开局单，再改这一局的口味');
+                const current = store.setupOf(setupKey);
+                if (!current && store.setupDraft(setupKey)) bad('请先保存开局单，再改这一局的口味');
                 const form = { ...(b.play !== undefined ? { 玩法: b.play } : {}), ...(b.tier !== undefined ? { 档位: b.tier } : {}), ...(b.pace !== undefined ? { 节奏: b.pace } : {}) };
                 const data = formMerge(current?.data, form);
                 if (b.adult !== undefined) {
@@ -315,12 +323,12 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                     });
                 }
                 // 只改快捷设置对应的格，不确认或覆盖用户还没交的草稿。
-                if (current) store.updateSetupData(current.id, data); else store.confirmSetup({ storyId, data });
+                if (current) store.updateSetupData(current.id, data); else store.confirmSetup({ storyId: setupKey, data });
                 withdrawIntimateForTier(store, chatKey);
             } else if (b.action === 'select') {
                 if (b.id !== '') { if (!packs) bad('口味包目录还没接好'); packs.read(str(b.id, 'id', { max: 64 })); }
                 if (b.global === true) setGlobalPromptPack(store, b.id || DEFAULT_PACK);
-                else store.setMeta(`prompt_pack:${storyId}`, b.id || null);
+                else store.setMeta(`prompt_pack:${setupKey}`, b.id || null);
             } else if (b.action === 'export') {
                 if (!packs) bad('口味包目录还没接好');
                 return { bundle: packs.exportPack(b.id || options.pack) };
@@ -333,7 +341,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 }
                 const result = packs.write(bundle, { id: b.action === 'save' ? str(b.id, 'id', { max: 64 }) : null, mode: ['overwrite', 'copy'].includes(b.mode) ? b.mode : null });
                 if (result.conflict) return result;
-                if (b.action === 'copy' || b.select === true) store.setMeta(`prompt_pack:${storyId}`, result.id);
+                if (b.action === 'copy' || b.select === true) store.setMeta(`prompt_pack:${setupKey}`, result.id);
                 settings().refreshPlanPackets?.();
                 return { ...contentView(chatKey), saved: result.id, warnings: result.warnings ?? [] };
             } else if (b.action === 'preview') {
@@ -391,7 +399,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             const handoff = narratorHandoff(store, chatKey);
             const items = capFresh(store, records, chatKey, { present: strings(b.present, 60, 200), recentUser: typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : '', timeline: timelineFor(store, records, chatKey, messages), litWho: mark?.by === 'named' ? mark.who : null, litPerson: handoff && !handoff.reason ? handoff : null });
             const chat = store.requireChat(chatKey);
-            const occasion = occasionOf(messages, { roster: store.getCast(chat.story_id), relations: store.relationsOf?.(chat.story_id) }), holdReason = occasion ? `场合不合适：${OCCASION_WHY[occasion]}` : null;
+            const occasion = occasionOf(messages, { roster: store.getCast(setupKeyOfChat(store, chat)), relations: store.relationsOf?.(setupKeyOfChat(store, chat)) }), holdReason = occasion ? `场合不合适：${OCCASION_WHY[occasion]}` : null;
             let lit = null;
             if (mark && !mark.consumed && !handoff?.reason && (!holdReason || mark.by !== 'program') && items.some(i => mark.avatar ? i.avatar === mark.avatar : i.who === mark.who && items.filter(x => x.who === mark.who).length === 1)) lit = mark;
             if (!lit && !handoff && !holdReason) { const first = items.find(i => i.ready && i.known); if (first) lit = { who: first.who, way: first.ways[0] ?? '他过来', by: 'program' }; }
@@ -427,7 +435,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             if (by === 'narrator') return receiveDoorHandoff(store, records, chatKey, { who, way });
             const messages = store.currentMessages(chatKey), last = messages.at(-1);
             const items = doorFor(store, records, chatKey, { present: [], recentUser: '', timeline: timelineFor(store, records, chatKey, messages) }).items;
-            if (!items.some(i => i.who === who) && !(store.getCast?.(store.requireChat(chatKey).story_id) ?? []).some(e => e.name === who)) bad('who invalid');
+            if (!items.some(i => i.who === who) && !(store.getCast?.(setupKeyFor(store, chatKey)) ?? []).some(e => e.name === who)) bad('who invalid');
             store.setMeta(`door_lit:${chatKey}`, JSON.stringify({ who, way, by, pos: last?.pos ?? 0, fp: last?.fp ?? null }));
             return { ok: true };
         },
@@ -439,7 +447,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             const present = strings(b.present, 60, 200), recentUser = typeof b.recentUser === 'string' ? b.recentUser.slice(-4000) : null;
             let board = null;
             try { board = boardFor(store, records, chatKey, { present, recentUser: recentUser ?? '', timeline: timelineFor(store, records, chatKey, messages) }); } catch {}
-            return cameraShouldSpeak({ messages, recentUser, present, roster: store.getCast?.(chat.story_id) ?? [], board, stateNotes: store.stateNotesOf?.(chatKey) ?? [], relations: store.relationsOf?.(chat.story_id) ?? null });
+            return cameraShouldSpeak({ messages, recentUser, present, roster: store.getCast?.(setupKeyOfChat(store, chat)) ?? [], board, stateNotes: store.stateNotesOf?.(chatKey) ?? [], relations: store.relationsOf?.(setupKeyOfChat(store, chat)) ?? null });
         },
         // 有卡的人进场（N-292）：玩家点名要谁来（/进场），下一段旁白写他出现；cancel＝玩家说先不（递过的、点过的都清掉）
         'POST /v1/arrival-request': b => {
@@ -519,7 +527,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 if (fill && (!choices || typeof choices !== 'object' || Array.isArray(choices))) return { ok: false, reason: 'choice-invalid' };
                 const current = fill && Object.hasOwn(choices, name) ? choices[name] : undefined;
                 if (current !== undefined && current !== '' && current !== avatar) return { ok: false, reason: 'choice-changed' };
-                if (!store.getCast(story_id).some(p => p.avatar === avatar && p.role !== '不用')) return { ok: false, why: '所选卡不在本局名册，请先核对名册' };
+                if (!store.getCast(setupKeyFor(store, chatKey)).some(p => p.avatar === avatar && p.role !== '不用')) return { ok: false, why: '所选卡不在本局名册，请先核对名册' };
                 if (current === avatar) return { ok: true };
                 Object.defineProperty(choices, name, { value: avatar, enumerable: true, configurable: true, writable: true });
                 store.setMeta(key, JSON.stringify(choices));
@@ -565,25 +573,25 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             const chatKey = str(b.chatKey, 'chatKey');
             store.requireChat(chatKey);
             const userName = [...store.currentMessages(chatKey)].reverse().find(m => m.is_user)?.name ?? null;
-            const storyId = store.requireChat(chatKey).story_id;
+            const storyId = setupKeyFor(store, chatKey);
             const cast = store.getCast?.(storyId) ?? [];
             const identity = { roster: cast.map(e => e.name), relation: normalizeRelations(store.relationsOf?.(storyId)) };
             const ledger = buildLedger(records.visible(chatKey), { named: namedParties(cast, userName), ...identity });
             const row = r => ({ pos: r.pos, text: r.text, ...r.money, left: r.left ?? null });
             const currency = withPack(chatKey).economy.table?.currency ?? '';
-            const left = balances(records.visible(chatKey), { start: store.setupOf?.(store.requireChat(chatKey).story_id)?.data?.钱 ?? [], people: [userName], ...identity }).map(x => balanceText(x, currency)).filter(Boolean);
+            const left = balances(records.visible(chatKey), { start: store.setupOf?.(setupKeyFor(store, chatKey))?.data?.钱 ?? [], people: [userName], ...identity }).map(x => balanceText(x, currency)).filter(Boolean);
             return { currency, left, debts: ledger.debts.map(row), deals: ledger.deals.map(row), quotes: ledger.quotes.map(row), moves: ledger.moves.map(row) };
         },
         'POST /v1/presence-check': b => {
             const chat = store.requireChat(str(b.chatKey, 'chatKey'));
-            const cast = store.getCast(chat.story_id).map(({ avatar, name, role }) => ({ avatar, name, role }));
+            const cast = store.getCast(setupKeyOfChat(store, chat)).map(({ avatar, name, role }) => ({ avatar, name, role }));
             return { chatKey: chat.key, enabled: chat.enabled === 1, cast };
         },
         // 名册：cards＝ST 里现有的卡（扩展打开窗口时带来，补默认档）；set＝用户改的档位与钩子。
         'POST /v1/cast': b => {
             const chat = store.requireChat(str(b.chatKey, 'chatKey'));
             let need = [];
-            if (typeof b.dismissPromotion === 'string' && store.getCast(chat.story_id).some(e => e.avatar === b.dismissPromotion && String(e.avatar).startsWith('face:'))) store.setMeta(`cast_promotion_dismissed:${chat.story_id}:${b.dismissPromotion}`, '1');
+            if (typeof b.dismissPromotion === 'string' && store.getCast(setupKeyOfChat(store, chat)).some(e => e.avatar === b.dismissPromotion && String(e.avatar).startsWith('face:'))) store.setMeta(`cast_promotion_dismissed:${setupKeyOfChat(store, chat)}:${b.dismissPromotion}`, '1');
             if (Array.isArray(b.cards)) {
                 const cards = b.cards.filter(c => c && typeof c.avatar === 'string' && typeof c.name === 'string').slice(0, 2000)
                     .map(c => ({ avatar: c.avatar.slice(0, 300), name: c.name.slice(0, 100), ...(typeof c.gender === 'string' ? { gender: c.gender } : {}), hash: typeof c.hash === 'string' ? c.hash.slice(0, 64) : null }));
@@ -591,12 +599,13 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 const messages = store.currentMessages(chat.key);
                 const speakers = new Set(messages.filter(m => !m.is_user && m.name).map(m => m.name));
                 // 这一局认得的名字：聊天里、开局单里、关系表里出现过的
-                const known = [messages.map(m => m.text).join(' '), JSON.stringify(store.setupOf(chat.story_id)?.data ?? ''), JSON.stringify(store.relationsOf?.(chat.story_id) ?? '')].join(' ');
-                const listed = store.getMeta(`roster_listed:${chat.story_id}`) === '1'
-                    || store.db.prepare('select set_by from relations where story_id = ?').get(chat.story_id)?.set_by === 'preset';
-                store.putCast(chat.story_id, autoRoster({ cards, members, speakers, mentioned: mentionedIn(known), listed }));
+                const known = [messages.map(m => m.text).join(' '), JSON.stringify(store.setupOf(setupKeyOfChat(store, chat))?.data ?? ''), JSON.stringify(store.relationsOf?.(setupKeyOfChat(store, chat)) ?? '')].join(' ');
+                const SK = setupKeyOfChat(store, chat);
+                const listed = store.getMeta(`roster_listed:${SK}`) === '1'
+                    || store.db.prepare('select set_by from relations where story_id = ?').get(SK)?.set_by === 'preset';
+                store.putCast(SK, autoRoster({ cards, members, speakers, mentioned: mentionedIn(known), listed }));
                 // 这一局用得上的人里，卡还没读过、或者卡改过了的：请扩展把正文交来（D-109）
-                const used = new Set(store.getCast(chat.story_id).filter(e => e.role !== '不用').map(e => e.avatar));
+                const used = new Set(store.getCast(setupKeyOfChat(store, chat)).filter(e => e.role !== '不用').map(e => e.avatar));
                 need = cards.filter(c => c.hash && used.has(c.avatar) && store.profileOf(c.avatar)?.card_hash !== c.hash).map(c => c.avatar);
             }
             if (Array.isArray(b.texts)) {
@@ -609,22 +618,22 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 }
             }
             if (Array.isArray(b.set)) {
-                const known = new Map(store.getCast(chat.story_id).map(e => [e.avatar, e]));
+                const known = new Map(store.getCast(setupKeyOfChat(store, chat)).map(e => [e.avatar, e]));
                 const set = b.set.filter(e => e && known.has(e.avatar) && ROLES.includes(e.role))
                     .map(e => ({ avatar: e.avatar, name: known.get(e.avatar).name, ...(typeof e.gender === 'string' ? { gender: e.gender } : {}), role: e.role, hook: typeof e.hook === 'string' && e.hook.trim() ? e.hook.trim().slice(0, 500) : null,
                         priority: e.priority == null ? null : !!e.priority, bond: 'bond' in e ? (e.bond === '' || e.bond == null ? null : Number(e.bond)) : undefined, ...(typeof e.群体 === 'boolean' ? { 群体: e.群体 } : {}) }));
-                store.putCast(chat.story_id, set, { byUser: true });
-                for (const e of b.set) if (e && known.has(e.avatar) && 'interests' in e) store.setInterests(chat.story_id, e.avatar, typeof e.interests === 'string' ? e.interests : null);
+                store.putCast(setupKeyOfChat(store, chat), set, { byUser: true });
+                for (const e of b.set) if (e && known.has(e.avatar) && 'interests' in e) store.setInterests(setupKeyOfChat(store, chat), e.avatar, typeof e.interests === 'string' ? e.interests : null);
             }
             const near = records ? closenessTable(store, records, chat.key) : new Map();
-            const roster = store.getCast(chat.story_id), names = roster.map(e => e.name), rawRel = store.relationsOf(chat.story_id);
+            const roster = store.getCast(setupKeyOfChat(store, chat)), names = roster.map(e => e.name), rawRel = store.relationsOf(setupKeyOfChat(store, chat));
             const rel = rawRel ? normalizeRelations(rawRel) : null;
             const same = (a, c) => !!a && !!c && (sameName(a, c, names) || (rel && personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, c, names)));
             const player = [...store.currentMessages(chat.key)].reverse().find(m => m.is_user)?.name;
             const thresholds = { ...CAST_PROMOTION_DEFAULTS, ...settings().cast };
             const leaves = (store.readyPlans?.(chat.key) ?? []).flatMap(p => { try { return JSON.parse(p.node ?? 'null')?.留下 ?? []; } catch { return []; } });
             const promotions = records ? new Set(promotionCandidates({ roster, records: records.visible(chat.key), leaves, menu: store.menuOf?.(chat.key) ?? [], player, same, recordThreshold: thresholds.promoteRecords, weightThreshold: thresholds.promoteWeight })) : new Set();
-            return { roles: ROLES, need, cast: roster.map(e => ({ ...e, closeness: near.get(e.avatar) ?? null, ...(promotions.has(e.avatar) && store.getMeta(`cast_promotion_dismissed:${chat.story_id}:${e.avatar}`) !== '1' ? { promote: true } : {}) })) };
+            return { roles: ROLES, need, cast: roster.map(e => ({ ...e, closeness: near.get(e.avatar) ?? null, ...(promotions.has(e.avatar) && store.getMeta(`cast_promotion_dismissed:${setupKeyOfChat(store, chat)}:${e.avatar}`) !== '1' ? { promote: true } : {}) })) };
         },
         // 暂停离开计时（全局）：忙一段时间时勾上，世界等你；取消的那一刻起重新计。
         'POST /v1/absence': b => {
@@ -722,7 +731,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
         // 回给扩展每条的判断（按内容指纹认），扩展据此把开口的人不该知道的条目拿掉。
         'POST /v1/lore': b => {
             const chatKey = str(b.chatKey, 'chatKey');
-            const storyId = store.requireChat(chatKey).story_id;
+            const storyId = setupKeyFor(store, chatKey);
             if (Array.isArray(b.entries)) {
                 const entries = b.entries.slice(0, 2000).filter(e => e && typeof e.key === 'string' && typeof e.hash === 'string')
                     .map(e => ({ key: e.key.slice(0, 300), hash: e.hash.slice(0, 64), world: str(e.world ?? '', 'world', { optional: true, max: 300 }), title: String(e.title ?? '').slice(0, 300), text: String(e.text ?? '').slice(0, 20000) }));
@@ -777,10 +786,10 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             }
             const table = withPack(chatKey).economy.table;
             if (!q.trim() || talksMoney(q, table)) {
-                const identity = { roster: s.roster.map(e => e.name), relation: normalizeRelations(store.relationsOf?.(s.chat.story_id)) };
-                const left = balances(s.visible, { start: store.setupOf?.(s.chat.story_id)?.data?.钱 ?? [], people: [s.userName], ...identity }).map(x => balanceText(x, table?.currency ?? '')).filter(Boolean);
+                const identity = { roster: s.roster.map(e => e.name), relation: normalizeRelations(store.relationsOf?.(setupKeyOfChat(store, s.chat))) };
+                const left = balances(s.visible, { start: store.setupOf?.(setupKeyOfChat(store, s.chat))?.data?.钱 ?? [], people: [s.userName], ...identity }).map(x => balanceText(x, table?.currency ?? '')).filter(Boolean);
                 if (left.length) lines.push('手上的钱（按记下的进出算）：', ...left.map(l => `· ${l}`));
-                lines.push(...moneyLines(buildLedger(s.visible, { named: namedParties(store.getCast?.(s.chat.story_id) ?? [], s.userName), ...identity }), { name: '账上', when: s.when, currency: table?.currency ?? '', max: 10, ...identity }));
+                lines.push(...moneyLines(buildLedger(s.visible, { named: namedParties(store.getCast?.(setupKeyOfChat(store, s.chat)) ?? [], s.userName), ...identity }), { name: '账上', when: s.when, currency: table?.currency ?? '', max: 10, ...identity }));
             }
             return { lines };
         },
@@ -835,9 +844,9 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             if (b.set !== undefined) {
                 const name = typeof b.set === 'string' ? b.set.trim() : '';
                 if (name && !packs.includes(name)) bad('没有这个素材包');
-                store.setMeta(`pack:${chat.story_id}`, name || null);
+                store.setMeta(`pack:${setupKeyOfChat(store, chat)}`, name || null);
             }
-            return { packs, pack: store.getMeta(`pack:${chat.story_id}`) || null };
+            return { packs, pack: store.getMeta(`pack:${setupKeyOfChat(store, chat)}`) || null };
         },
         // 规划：看状态；request＝现在就叫规划者；reveal＝看幕后菜单（会剧透）。
         'POST /v1/plan-persona': b => {
@@ -899,15 +908,15 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             try {
             store.updatePlanAttempt(attempt, { stage: '解析', outputChars: typeof b.text === 'string' ? b.text.length : 0 });
             const chat = store.requireChat(plan.chat_key);
-            const parsed = parsePlan(str(b.text, 'text', { max: 100000 }), { ...intimatePlanOptions(store, plan.chat_key, planRoster(store, chat.story_id, { chatKey: plan.chat_key })), sourceIds: records ? verifiedPlanSourceIds(store, records, plan.chat_key, plan.brief, plan.anchor_pos) : { records: new Set(), menuResults: new Set() } });
+            const parsed = parsePlan(str(b.text, 'text', { max: 100000 }), { ...intimatePlanOptions(store, plan.chat_key, planRoster(store, setupKeyOfChat(store, chat), { chatKey: plan.chat_key })), sourceIds: records ? verifiedPlanSourceIds(store, records, plan.chat_key, plan.brief, plan.anchor_pos) : { records: new Set(), menuResults: new Set() } });
             if (!parsed.items.length) bad(`菜单一条都没过：${parsed.dropped.map(d => d.reason).join('；')}`);
             const anchors = withPack(plan.chat_key).world.anchors;
-            const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(chat.story_id)?.data).map(yearFlagText) : [];
+            const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(setupKeyOfChat(store, chat))?.data).map(yearFlagText) : [];
             if (years.length) bad(`年份和年表对不上，改了再交：${years.join('；')}`);
             if (!store.ownsPlanAttempt(attempt)) throw Object.assign(new Error('plan_late：迟到作废'), { status: 409 });
             store.updatePlanAttempt(attempt, { stage: '落账' });
             const menu = store.submitPlan(plan.id, { ...parsed, raw: b.text });
-            addFaces(store, chat.story_id, parsed.faces);
+            addFaces(store, setupKeyOfChat(store, chat), parsed.faces);
             handoffs?.settle('plan', String(plan.id));
             // 只提醒、不退件的（章程 H5：头一格太密）和退了的一起回给交的人
             store.finishPlanAttempt(attempt);
@@ -920,9 +929,9 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             const plan = b.planId != null ? store.planById(Number(b.planId)) ?? bad('no such plan') : null;
             const chatKey = plan?.chat_key ?? (b.chatKey ? str(b.chatKey, 'chatKey') : null);
             // 这一局的开局单（原则、走向、前史）自动当本局前提带上，问的人只补眼下这一问的前提。
-            const setup = chatKey ? store.setupOf(store.requireChat(chatKey).story_id)?.data : null;
+            const setup = chatKey ? store.setupOf(setupKeyFor(store, chatKey))?.data : null;
             const context = [advisorContext(setup), b.context ? str(b.context, 'context', { max: 4000 }) : ''].filter(Boolean).join('\n');
-            const roster = chatKey ? store.getCast(store.requireChat(chatKey).story_id).map(e => e.name) : [];
+            const roster = chatKey ? store.getCast(setupKeyFor(store, chatKey)).map(e => e.name) : [];
             return advisor.ask({ question: str(b.question, 'question', { max: 2000 }), context, chatKey, roster, year: storyYear(setup) });
         },
         'POST /v1/setup-split': async b => {
@@ -938,7 +947,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             }
             if (b.confirm !== true) bad('先确认分格费用');
             try {
-                const parsed = await setupMaker({ source, names: setupNames(chat.story_id), chatKey: chat.key });
+                const parsed = await setupMaker({ source, names: setupNames(setupKeyOfChat(store, chat)), chatKey: chat.key });
                 const data = parsed.data;
                 const extra = Object.fromEntries(['原则', '口径', '走向', '意向'].map(k => [k, data[k] ?? []]));
                 extra.储备线 = (data.储备线 ?? []).filter(x => x.可选 !== false);
@@ -948,7 +957,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
         // 开局单：看；source＝贴一整段让后台分格（后台跑，隔一会儿再来看）；text＝改过的全文（confirm＝确认生效）；discard＝丢掉草稿。
         'POST /v1/setup': b => {
             const chat = store.requireChat(str(b.chatKey, 'chatKey'));
-            const storyId = chat.story_id;
+            const storyId = setupKeyOfChat(store, chat);
             let receipt = null;
             const view = () => {
                 const c = store.setupOf(storyId), d = store.setupDraft(storyId);
@@ -1007,7 +1016,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 const item = m.list(chat.story_id).find(x => x.name === name) ?? bad('没有这份素材');
                 if (kind === '开局单') {
                     if (!setupMaker) bad('开局单分格没接上');
-                    if (['working', 'handoff'].includes(store.setupDraft(chat.story_id)?.status)) bad('开局单还在分上一份，等它好了再来');
+                    if (['working', 'handoff'].includes(store.setupDraft(setupKeyOfChat(store, chat))?.status)) bad('开局单还在分上一份，等它好了再来');
                     startDraft(chat, m.text(chat.story_id, name).slice(0, 100000));
                     m.update(chat.story_id, name, { kind, status: 'applied' });
                     started = 'setup';
@@ -1036,7 +1045,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             const chat = b.chatKey ? store.requireChat(str(b.chatKey, 'chatKey')) : null;
             if (b.save !== undefined) {
                 if (!chat) bad('chatKey required');
-                const s = snapshot(store, chat.story_id, { name: str(b.save, 'save', { max: 80 }), includeGrownFaces: b.includeGrownFaces === true });
+                const s = snapshot(store, setupKeyOfChat(store, chat), { storyId: chat.story_id, name: str(b.save, 'save', { max: 80 }), includeGrownFaces: b.includeGrownFaces === true });
                 if (!s.setup && !s.cast.length && !s.relations) bad('这一局还没有开局单、名册、关系表，没什么可存的');
                 return { saved: p.put(s), presets: p.list() };
             }
@@ -1044,12 +1053,12 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 if (!chat) bad('chatKey required');
                 const one = p.get(str(b.apply, 'apply', { max: 80 }));
                 if (!one) bad('没有这份预设');
-                p.backup(snapshot(store, chat.story_id, { name: `套用前-${chat.story_id}` }));
-                const applied = applyPreset(store, chat.story_id, one);
+                p.backup(snapshot(store, setupKeyOfChat(store, chat), { name: `套用前-${chat.story_id}`, storyId: chat.story_id }));
+                const applied = applyPreset(store, setupKeyOfChat(store, chat), one, { storyId: chat.story_id });
                 if (one.pack && !(settings().listPacks?.() ?? []).includes(one.pack)) applied.warnings = [...(applied.warnings ?? []), `素材包 ${one.pack} 还没导入，点'导入素材包'`];
-                store.setMeta(`roster_listed:${chat.story_id}`, '1');
+                store.setMeta(`roster_listed:${setupKeyOfChat(store, chat)}`, '1');
                 // 前史还没配检索词的（预设是没配完就存的）补一次
-                if (one.setup?.前史?.some(x => !x.keys?.length)) keysFor(chat.story_id, chat.key);
+                if (one.setup?.前史?.some(x => !x.keys?.length)) keysFor(setupKeyOfChat(store, chat), chat.key);
                 return { applied, presets: p.list(), openingAbsent: openingAbsent(chat) };
             }
             return { presets: p.list() };
@@ -1073,9 +1082,9 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             if (b.go === true) {
                 if (exists && b.overwrite !== true) return { ...r, needsOverwrite: true };
                 r.installed = installPack(dir, packsDir, { overwrite: b.overwrite === true });
-                if (!store.getMeta(`pack:${chat.story_id}`) || b.use === true) store.setMeta(`pack:${chat.story_id}`, name);
+                if (!store.getMeta(`pack:${setupKeyOfChat(store, chat)}`) || b.use === true) store.setMeta(`pack:${setupKeyOfChat(store, chat)}`, name);
                 r.packs = settings().listPacks?.() ?? [];
-                r.pack = store.getMeta(`pack:${chat.story_id}`) || null;
+                r.pack = store.getMeta(`pack:${setupKeyOfChat(store, chat)}`) || null;
             }
             return r;
         },
@@ -1106,19 +1115,19 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             const estimate = service.estimate({ chatKey, cards });
             if (b.confirm !== true) return { estimate };
             void service.start({ chatKey, cards, restart: true }).catch(() => {});
-            return { draft: service.view(store.requireChat(chatKey).story_id) };
+            return { draft: service.view(setupKeyFor(store, chatKey)) };
         },
         // 人物关系表（按局存）：看；text＝面板里改过的全文；data＝整份导入（本机工具用）。
         'POST /v1/relations': b => {
             const chat = store.requireChat(str(b.chatKey, 'chatKey'));
             const drafts = settings().relationsDrafts;
-            if (b.draftId && (drafts?.view(chat.story_id)?.id !== b.draftId || store.relationsOf(chat.story_id)?.人?.length)) bad('关系表或草稿变了，请重新打开核对');
-            if (b.text != null) store.putRelations(chat.story_id, relationsFromText(str(b.text, 'text', { max: 300000 })));
-            else if (b.data != null) store.putRelations(chat.story_id, normalizeRelations(b.data), { by: 'import' });
-            if (b.text != null || b.data != null) drafts?.clear(chat.story_id);
-            const data = store.relationsOf(chat.story_id);
+            if (b.draftId && (drafts?.view(setupKeyOfChat(store, chat))?.id !== b.draftId || store.relationsOf(setupKeyOfChat(store, chat))?.人?.length)) bad('关系表或草稿变了，请重新打开核对');
+            if (b.text != null) store.putRelations(setupKeyOfChat(store, chat), relationsFromText(str(b.text, 'text', { max: 300000 })));
+            else if (b.data != null) store.putRelations(setupKeyOfChat(store, chat), normalizeRelations(b.data), { by: 'import' });
+            if (b.text != null || b.data != null) drafts?.clear(setupKeyOfChat(store, chat));
+            const data = store.relationsOf(setupKeyOfChat(store, chat));
             const d = data ? normalizeRelations(data) : null;
-            const now = d && records ? currentLines(relationsNow(store, chat.key, d, records.visible(chat.key), store.getCast(chat.story_id).map(e => e.name))) : [];
+            const now = d && records ? currentLines(relationsNow(store, chat.key, d, records.visible(chat.key), store.getCast(setupKeyOfChat(store, chat)).map(e => e.name))) : [];
             return { text: d ? relationsText(d) : null, people: d?.人.length ?? 0, unsure: d?.人.filter(p => p.待核.length || /待定/.test(p.能用)).map(p => p.名) ?? [], now, ...(drafts ? { draft: drafts.view(chat.story_id) } : {}) };
         },
         // 打开窗口时问一声：用户是不是离开很久刚回来。是就记下这次离开、开始推各人这些天（后台跑），并说由谁先开口。
@@ -1128,7 +1137,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             const cfg = settings().fresh;
             if (!cfg?.dir) bad('fresh_unavailable');
             const lib = voiceLibrary(cfg.dir);
-            const cast = b.chatKey ? store.getCast(store.requireChat(str(b.chatKey, 'chatKey')).story_id).filter(e => e.role !== '不用' && e.avatar && !e.avatar.startsWith('face:')) : [];
+            const cast = b.chatKey ? store.getCast(setupKeyFor(store, str(b.chatKey, 'chatKey'))).filter(e => e.role !== '不用' && e.avatar && !e.avatar.startsWith('face:')) : [];
             let warning = '';
             if (b.action) {
                 const actor = cast.find(e => e.avatar === b.avatar);
@@ -1317,7 +1326,7 @@ export function dispatchRequest(store, routes, name, body, headers = {}) {
     const chat = store.requireChat(str(operation === 'handoff-ui' ? key : body.chatKey, 'chatKey'));
     if (!window || typeof window !== 'object' || Array.isArray(window) || typeof window.stChatId !== 'string' || !window.stChatId
         || window.stChatId !== chat.st_chat_id || window.groupId !== (chat.group_id || null)) mismatch();
-    if (declaration && body.story !== chat.story_id) mismatch();
+    if (declaration && body.story !== chat.story_id && body.story !== setupKeyOfChat(store, chat)) mismatch();
     return route(body);
 }
 

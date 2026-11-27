@@ -76,6 +76,7 @@ import { relativeDay } from './recall.mjs';
 import { createModelClient, modelTally } from './model.mjs';
 import { createServer, VERSION } from './server.mjs';
 import { wantedProxy, proxyActive, proxyEnv } from './proxy.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = name => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
@@ -174,7 +175,7 @@ const applyPlan = (planId, text, { strict = true, strictFormat = false, attempt 
     const parsed = parsePlan(text, { ...planOptions(plan.chat_key), mode: 'full', strictFormat, sourceIds: planSourceIds(plan.chat_key, plan.brief, plan.anchor_pos) });
     if (!parsed.items.length) throw Object.assign(new Error(`规划里的事一件都没过：${parsed.dropped.map(d => d.reason).join('；')}`), { status: 400 });
     const anchors = packOf(plan.chat_key)?.anchors;
-    const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(chat.story_id)?.data).map(yearFlagText) : [];
+    const years = anchors ? (setup => planYearFlags(parsed, anchors, storyYear(setup), { setup }))(store.setupOf(setupKeyOfChat(store, chat))?.data).map(yearFlagText) : [];
     if (years.length && strict) throw Object.assign(new Error(`年份和年表对不上，改了再交：${years.join('；')}`), { status: 400 });
     if (years.length) log(`plan ${planId} accepted with year flags: ${years.join('；')}`);
     if (parsed.dropped.length) log(`plan ${planId} dropped ${parsed.dropped.length}: ${parsed.dropped.map(d => d.reason).join('；')}`);
@@ -184,7 +185,7 @@ const applyPlan = (planId, text, { strict = true, strictFormat = false, attempt 
     const before = new Set(store.menuOf(plan.chat_key).map(m => m.id));
     store.submitPlan(plan.id, { ...parsed, raw: text });
     const stored = store.menuOf(plan.chat_key).filter(m => !before.has(m.id) && m.plan_id === plan.id);
-    const faces = addFaces(store, chat.story_id, facesForItems(parsed.faces, stored));
+    const faces = addFaces(store, setupKeyOfChat(store, chat), facesForItems(parsed.faces, stored));
     if (faces.length) log(`plan ${planId} new faces: ${faces.join('、')}`);
     extendSofar(plan.chat_key).catch(error => log(`story so far ${plan.chat_key} failed: ${error.message}`));   // 章程 H4：之前的节点多了，更早的并成一段大意
     if (own) store.finishPlanAttempt(attempt);
@@ -505,14 +506,14 @@ async function prepMemo({ chatKey, planId }) {
 
 async function turnMemo({ chatKey, verdict, thread }) {
     const stopped = playStop(store, chatKey, getConfig()); if (stopped) return stopped;
-    const setup = store.setupOf(store.requireChat(chatKey).story_id)?.data ?? null;
+    const setup = store.setupOf(setupKeyFor(store, chatKey))?.data ?? null;
     const line = thread ? [...(setup?.储备线 ?? []), ...(setup?.主线 ?? [])].find(x => x.名 === thread) : null;
     const question = [
         `这一局的玩家角色认真提出了一个新的长期方向：${verdict ?? '（见依据）'}。`,
         line ? `开局单里对应的线「${line.名}」：${line.内容}` : '',
         '从原作（这一局有的话）和世界设定层面推一下：这件事牵涉哪些势力，它们眼下各自的处境、会怎么反应；有哪些情报链、突破口和代价；有哪些用得上的边角人物和没闭环的旧事。只给候选，标出处。',
     ].filter(Boolean).join('\n');
-    const roster = store.getCast(store.requireChat(chatKey).story_id).map(e => e.name);
+    const roster = store.getCast(setupKeyFor(store, chatKey)).map(e => e.name);
     const r = await advisor.ask({ question, context: advisorContext(setup), chatKey, roster, year: storyYear(setup) });
     // 填不出来的空位（"……：空"）不给规划者：只剩个框的"需要一个……"照样会把剧情往那边带。
     const memo = (r?.memo ?? '').split('\n').filter(x => !/[:：]\s*空\s*$/.test(x)).join('\n').trim();
@@ -545,7 +546,7 @@ async function checkTurn({ chatKey, planId, ideas = [], others = [], changes = [
     try { revisions = JSON.parse(store.getMeta(`mind_stale:${planId}`) ?? '[]'); } catch {}
     const node = effectiveNode(originalNode, revisions, { store, chatKey, planId, messages: messagesAtRequest });
     const reasons = mindReasons(node);
-    const setup = store.setupOf(store.requireChat(chatKey).story_id)?.data ?? null;
+    const setup = store.setupOf(setupKeyFor(store, chatKey))?.data ?? null;
     const started = Date.now();
     // 还等着的事连前提（章程 F1）：本来就要跑这一问，顺带看前提还在不在；不另加调用
     const waiting = premiseWaiting(store.menuOf(chatKey));
@@ -686,7 +687,7 @@ async function addToPlan({ chatKey, planId, at, basis, input: offeredInput = nul
             const before = new Set(store.menuOf(chatKey).map(m => m.id));
             store.appendMenu(planId, parsed.items, { chatKey, storyDay: input.scene.today, at });
             const stored = store.menuOf(chatKey).filter(m => !before.has(m.id));
-            addFaces(store, store.requireChat(chatKey).story_id, facesForItems(parsed.faces, stored));
+            addFaces(store, setupKeyFor(store, chatKey), facesForItems(parsed.faces, stored));
         }
         store.setMeta(`plan_attempt_context:${attempt}`, JSON.stringify({ mode: 'beat', basis, empty: parsed.empty }));
         completePlanningBeat(store, records, chatKey, input, parsed.empty);
@@ -732,7 +733,7 @@ function prepareState({ chatKey }) {
         const byPos = new Map(fresh.map(m => [m.pos, m.fp])), textAt = new Map(fresh.map(m => [m.pos, m.text]));
         let arr = null;
         try { arr = JSON.parse(store.getMeta(`arrived:${chatKey}`) ?? 'null'); } catch {}
-        const roster = (store.getCast(chat.story_id) ?? []).map(e => e.name);
+        const roster = (store.getCast(setupKeyOfChat(store, chat)) ?? []).map(e => e.name);
         const here = dropRemoteHere(list.filter(x => byPos.has(x.n)), { remote: arr && isRemote(arr.how) ? arr : null, nameAt: n => fresh.find(m => m.pos === n)?.name, same: (a, b) => sameName(a, b, roster) });
         // 玩家的角色身上的东西只认玩家自己写的（用户 10/13：别的角色给她添的凝胶贴、脸色记成了她的样子）
         const kept = herOwnOnly(grounded(here, n => textAt.get(n)), { isUserAt: n => !!fresh.find(m => m.pos === n)?.is_user, isHer: w => !!userName && sameName(w, userName, roster), posOf: x => x.n });
@@ -830,7 +831,7 @@ export const episodeRetryDue = ({ last, from, fp, end, to, force = false }) => f
 function dropAway(chatKey, person, by = null) {
     try {
         const { who, avatar } = person;
-        const roster = store.getCast(store.requireChat(chatKey).story_id) ?? [];
+        const roster = store.getCast(setupKeyFor(store, chatKey)) ?? [];
         const unique = roster.filter(p=>p.name===who).length===1 && roster.some(p=>p.name===who&&p.avatar===avatar);
         const plans = JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {};
         for (const k of Object.keys(plans)) if (plans[k]?.avatar ? plans[k].avatar === avatar : unique && plans[k]?.who === who) { if (by) plans[k] = { ...plans[k], dropped: by }; else delete plans[k]; }
@@ -841,7 +842,7 @@ const leaving = new Map();
 async function leave({ chatKey, who, avatar = null, anchor = null, how = null, manual = false }) {
     manual = manual === true;
     const chat = store.requireChat(chatKey);
-    const roster = store.getCast(chat.story_id) ?? [], named = roster.filter(p=>p.name===who);
+    const roster = store.getCast(setupKeyOfChat(store, chat)) ?? [], named = roster.filter(p=>p.name===who);
     avatar ??= named.length===1 ? named[0].avatar : null;
     if (!avatar || !roster.some(p=>p.avatar===avatar)) return {ok:false,why:'离场身份未能唯一匹配，请确认卡文件'};
     const matches = p => p?.avatar ? p.avatar===avatar : named.length===1 && named[0].avatar===avatar && p?.who===who;
@@ -866,14 +867,14 @@ async function leave({ chatKey, who, avatar = null, anchor = null, how = null, m
     try { return await work; } finally { leaving.delete(key); }
 }
 async function leaveNow({ chat, chatKey, who, avatar, msgs, last, how = null }) {
-    const scope = store.getCast(chat.story_id) ?? [], named = scope.filter(p=>p.name===who);
+    const scope = store.getCast(setupKeyOfChat(store, chat)) ?? [], named = scope.filter(p=>p.name===who);
     const matches = p => p?.avatar ? p.avatar===avatar : named.length===1 && named[0].avatar===avatar && p?.who===who;
     const userName = [...msgs].reverse().find(m => m.is_user)?.name ?? '玩家';
     // 发消息、打电话来的人挂了：进场那一份用完了；他人一直在外头，离开从上一回出门算、去向接着用（这回说了新的就换成新的）
     let wasRemote = false;
     try { const arr = JSON.parse(store.getMeta(`arrived:${chatKey}`) ?? 'null'); if (arr && matches(arr)) { wasRemote = /电话|消息/.test(arr.how ?? '') && !metInPerson(msgs.filter(m => m.pos >= (arr.at ?? Infinity)), { who, userName: [...msgs].reverse().find(m => m.is_user)?.name ?? null, since: arr.at ?? Infinity, notes: store.stateNotesOf?.(chatKey) ?? [], others: scope.map(e => e.name) }); store.setMeta(`arrived:${chatKey}`, null); } } catch {}
     // 他这回的来意跟着离场过去（场记章程 B2）：挂在眼下这条上，删回去就回来
-    try { const roster = (store.getCast(chat.story_id) ?? []).map(e => e.name); closeIntents({ records, chatKey, storyId: chat.story_id, who, fp: last.fp, same: (a, b) => sameName(a, b, roster) }); } catch {}
+    try { const roster = (store.getCast(setupKeyOfChat(store, chat)) ?? []).map(e => e.name); closeIntents({ records, chatKey, storyId: chat.story_id, who, fp: last.fp, same: (a, b) => sameName(a, b, roster) }); } catch {}
     let plans = {};
     try { plans = JSON.parse(store.getMeta(`away_plan:${chatKey}`) ?? '{}') ?? {}; } catch {}
     const before = wasRemote ? Object.values(plans).find(matches) ?? null : null;
@@ -922,8 +923,8 @@ async function settleAway({ chatKey, who, avatar = null, reason = '换时段', u
     if (!last) return skip('还没有消息', { ok: true, skipped: true });
     // 人名认成名册里的写法（试玩 10/12：等着没人接那条路用短名记下"要来联系"，名册里是全名——后来他进了场、用掉了都认不出，那条一直挂着）
     {
-        const castRows = store.getCast?.(chat.story_id) ?? [], names = castRows.map(c => c.name);
-        let rel = null; try { const raw = store.relationsOf?.(chat.story_id); rel = raw ? normalizeRelations(raw) : null; } catch {}
+        const castRows = store.getCast?.(setupKeyOfChat(store, chat)) ?? [], names = castRows.map(c => c.name);
+        let rel = null; try { const raw = store.relationsOf?.(setupKeyOfChat(store, chat)); rel = raw ? normalizeRelations(raw) : null; } catch {}
         // 同一个人在名册里有两条（全名、旧卡名的短名）：认用户建的那条
         const hit = (list => (l => l.find(x => x.set_by === 'user') ?? l.find(x => Number.isFinite(x.bond)) ?? l[0] ?? list[0])(list.filter(x => x.role !== '不用')))(castRows.filter(c => c.name === who || sameName(c.name, who, names) || (!!rel && !!personOf(rel, who, names) && personOf(rel, who, names) === personOf(rel, c.name, names))));
         if (hit) { who = hit.name; avatar = avatar ?? hit.avatar ?? null; }
@@ -962,7 +963,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
     // 开局单里开场不在场的那份去向也算（opening.mjs）：结算写回时一起存下，之后就是记下的去向
     const plans = awayPlansOf(store, chatKey, { messages });
     const board = boardFor(store, records, chatKey, { present: [], timeline: tl });
-    const rawRel = store.relationsOf?.(chat.story_id), castRows = store.getCast(chat.story_id) ?? [], roster = castRows.map(e => e.name);
+    const rawRel = store.relationsOf?.(setupKeyOfChat(store, chat)), castRows = store.getCast(setupKeyOfChat(store, chat)) ?? [], roster = castRows.map(e => e.name);
     const rel = rawRel ? normalizeRelations(rawRel) : null;
     const sameP = (a, b) => sameName(a, b, roster) || (!!rel && !!personOf(rel, a, roster) && personOf(rel, a, roster) === personOf(rel, b, roster));
     // 只跟着别人出现的人（关系表"跟着"）：镜头外不单独替他结算——他不单独办事、不单独联系人，跟着的那人结算时他就在旁边（T135：依附的人自己发了消息）。
@@ -997,7 +998,7 @@ async function settleOnce({ chat, chatKey, messages, last, tl, who, avatar, unan
     // 每人每格时间至多一次（crew.crewPushDue），别多花钱；不是主角团的人照旧
     const { plan: lastPlan, node } = latestNode(store, chatKey);
     const ownEntry = crewEntry(node, who, sameP);
-    const ownDue = crewPushDue({ who, userName, crew: crewOf(store.setupOf?.(chat.story_id)?.data ?? null, node, userName), entry: ownEntry, pushed: pushedMeta(store, chatKey, who), today: tl.today, messages, same: sameP });
+    const ownDue = crewPushDue({ who, userName, crew: crewOf(store.setupOf?.(setupKeyOfChat(store, chat))?.data ?? null, node, userName), entry: ownEntry, pushed: pushedMeta(store, chatKey, who), today: tl.today, messages, same: sameP });
     // 兜底那一回（T149b）不要求手上有待办：门上久没人，让他照自己的处境定找不找她
     if (!errands.length && !waits.length && !unanswered && !ownDue && !fallback) return skip('没有去办、等回音，也不是主角团该推的', { ok: true, skipped: true });
     const own = ownDue ? { want: String(ownEntry.想干 ?? '').trim(), next: String(ownEntry.下一步 ?? '').trim() } : null;
@@ -1100,8 +1101,8 @@ async function askAway({ chatKey, pos, fp, asker, askerAvatar, target, targetAva
     const visible = records.visible(chatKey);
     const head = `${asker}（${way}）问${target}：`;
     if (visible.some(r => r.fp === fp && String(r.text).startsWith(head))) return { ok: true, skipped: true, idempotent: true };
-    const roster = store.getCast(chat.story_id) ?? [], names = roster.map(e => e.name);
-    const rawRel = store.relationsOf(chat.story_id);
+    const roster = store.getCast(setupKeyOfChat(store, chat)) ?? [], names = roster.map(e => e.name);
+    const rawRel = store.relationsOf(setupKeyOfChat(store, chat));
     const rel = rawRel ? normalizeRelations(rawRel) : null;
     const tie = rel ? personOf(rel, target, names)?.关系?.find(r => sameName(r.对, asker, names))?.是 ?? '' : '';
     const profile = store.profileOf?.(targetAvatar)?.text ?? '';
@@ -1169,8 +1170,8 @@ function rejoined(chat, { avatar, who, len }) {
     try { anchors = JSON.parse(chat.anchors ?? 'null'); } catch {}
     if (avatar && justLeft(anchors, avatar, len)) return true;
     try { members = JSON.parse(chat.members ?? '[]') ?? []; } catch {}
-    const cast = store.getCast(chat.story_id) ?? [], names = cast.map(e => e.name);
-    const raw = store.relationsOf(chat.story_id), rel = raw ? normalizeRelations(raw) : null;
+    const cast = store.getCast(setupKeyOfChat(store, chat)) ?? [], names = cast.map(e => e.name);
+    const raw = store.relationsOf(setupKeyOfChat(store, chat)), rel = raw ? normalizeRelations(raw) : null;
     const lead = rel ? leaderOf(rel, who, names) : null;
     const leadAv = lead ? cast.find(e => sameName(e.name, lead, names))?.avatar : null;
     return !!leadAv && members.some(m => m?.avatar === leadAv) && openNow(anchors, leadAv);
@@ -1179,7 +1180,7 @@ function rejoined(chat, { avatar, who, len }) {
 // anchor（叩门，auto.mjs）：他那条已经落在 anchor.at 上了，进场挂在它前一条（fp）上、他从那条起在场；knock＝候着（上门的去向先不清，玩家回应了再清）
 async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'come', way = '', anchor = null, knock = false, handoff = null }) {
     const chat = store.requireChat(chatKey);
-    const identities = store.getCast(chat.story_id).filter(e => e.role !== '不用');
+    const identities = store.getCast(setupKeyOfChat(store, chat)).filter(e => e.role !== '不用');
     const matches = identities.filter(e => avatar ? e.avatar === avatar : e.name === who);
     if (matches.length !== 1) return { ok: false, why: `${who}的卡身份未能唯一匹配，请确认：${matches.map(e=>e.avatar).join('、') || avatar || who}` };
     avatar = matches[0].avatar; who = matches[0].name;
@@ -1233,10 +1234,10 @@ async function arrive({ chatKey, who, avatar = null, prepare = false, mode = 'co
     // 玩家去找他：他在原地；远程：说好了是消息还是电话，模型答"上门"也不算
     if (offer && mode === 'go') offer = { ...offer, why: [`玩家去找${who}`, offer.lines?.[0], offer.from === 'settle' ? '' : offer.why].filter(Boolean).join('；'), way: '' };
     if (offer && mode === 'remote') offer = { ...offer, way: /电话/.test(way) ? '打来电话' : /消息/.test(way) ? '发来消息' : /电话|消息/.test(offer.way ?? '') ? offer.way : '发来消息' };
-    const roster = (store.getCast(chat.story_id) ?? []).map(e => e.name);
+    const roster = (store.getCast(setupKeyOfChat(store, chat)) ?? []).map(e => e.name);
     if (offer && (offer.avatar ? offer.avatar !== avatar : identities.filter(e=>e.name===offer.who).length!==1 || offer.who!==who)) offer = null;
     const userName = [...msgs].reverse().find(m => m.is_user)?.name ?? '玩家';
-    const raw = store.relationsOf(chat.story_id);
+    const raw = store.relationsOf(setupKeyOfChat(store, chat));
     const rel = raw ? normalizeRelations(raw) : null;
     const me = rel ? personOf(rel, who, roster) : null, you = rel ? personOf(rel, userName, roster) : null;
     const tie = me?.关系?.find(r => sameName(r.对, userName, roster) || (you && personOf(rel, r.对, roster) === you))?.是 ?? '';
@@ -1502,7 +1503,7 @@ async function runLong({ chatKey }) {
             if (!roll) { rolled[w] = 1; continue; }
             const started = Date.now();
             try {
-                const setup = store.setupOf(chat.story_id)?.data ?? null;
+                const setup = store.setupOf(setupKeyOfChat(store, chat))?.data ?? null;
                 const net = packOf(chatKey)?.factions;
                 const factions = (net?.nodes ?? []).map(f => f?.name).filter(Boolean).slice(0, 40);
                 const r = await createModelClient({ ...s, maxOutputTokens: 3000, timeoutMs: 120000, stream: true }).complete({ system: LONG_SYSTEM, user: longPrompt({ roll, setup: setup ? briefSection(setup).filter(l => !l.startsWith('储备线') && !l.startsWith('·')).slice(0, 8) : [], factions, timeScale: ts }) });
@@ -1528,34 +1529,34 @@ const loreBusy = new Set();
 async function runLore({ chatKey }) {
     const cfg = getConfig(), s = cfg.stages.lore;
     const chat = store.requireChat(chatKey);
-    if (!s?.baseUrl || !s.apiKey || !s.model || loreBusy.has(chat.story_id)) return;
-    loreBusy.add(chat.story_id);
+    if (!s?.baseUrl || !s.apiKey || !s.model || loreBusy.has(setupKeyOfChat(store, chat))) return;
+    loreBusy.add(setupKeyOfChat(store, chat));
     try {
         // 判的规矩改了：模型判过的重判（玩家定的不动）
-        if (store.getMeta(`lore_ver:${chat.story_id}`) !== String(LORE_VERSION)) {
-            store.db.prepare("update lore set verdict = null, source = null where story_id = ? and (source is null or source = 'model')").run(chat.story_id);
-            store.setMeta(`lore_ver:${chat.story_id}`, String(LORE_VERSION));
+        if (store.getMeta(`lore_ver:${setupKeyOfChat(store, chat)}`) !== String(LORE_VERSION)) {
+            store.db.prepare("update lore set verdict = null, source = null where story_id = ? and (source is null or source = 'model')").run(setupKeyOfChat(store, chat));
+            store.setMeta(`lore_ver:${setupKeyOfChat(store, chat)}`, String(LORE_VERSION));
         }
         // 开局单"口径"里写明了只有哪几个人知道的事：判的时候照它（名单外的人不给）
-        const bounds = (store.setupOf?.(chat.story_id)?.data?.口径 ?? []).filter(x => x?.事 && Array.isArray(x.谁知道) && x.谁知道.length).slice(0, 60);
+        const bounds = (store.setupOf?.(setupKeyOfChat(store, chat))?.data?.口径 ?? []).filter(x => x?.事 && Array.isArray(x.谁知道) && x.谁知道.length).slice(0, 60);
         // 判不了的（中转拒答、答的不是 JSON）别一轮轮重问（试玩 10/13～10/16：16 条判不了，三天问了 450 次、每次十几秒）：
         // 一批没答上就拆开一条条问，一条单独问也没答上就当所有人都知道、记下来不再问（lore.loreBatch）
-        const triesKey = `lore_tries:${chat.story_id}`;
+        const triesKey = `lore_tries:${setupKeyOfChat(store, chat)}`;
         let tries = {};
         try { tries = JSON.parse(store.getMeta(triesKey) ?? '{}') ?? {}; } catch {}
         for (;;) {
-            const unjudged = store.loreOf(chat.story_id).filter(r => !r.verdict);
+            const unjudged = store.loreOf(setupKeyOfChat(store, chat)).filter(r => !r.verdict);
             const { todo, giveUp } = loreBatch(unjudged, tries);
-            for (const r of giveUp) { store.setLore(chat.story_id, r.key, GIVE_UP_VERDICT, 'model'); log(`lore ${chat.story_id}: gave up on ${r.key} after ${tries[r.key]?.n ?? 0} tries`); }
+            for (const r of giveUp) { store.setLore(setupKeyOfChat(store, chat), r.key, GIVE_UP_VERDICT, 'model'); log(`lore ${chat.story_id}: gave up on ${r.key} after ${tries[r.key]?.n ?? 0} tries`); }
             if (!todo.length || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return;
             const started = Date.now();
-            const roster = store.getCast(chat.story_id).filter(e => e.role !== '不用');
+            const roster = store.getCast(setupKeyOfChat(store, chat)).filter(e => e.role !== '不用');
             const userName = [...store.currentMessages(chatKey)].reverse().find(m => m.is_user)?.name ?? null;
             try {
                 const r = await createModelClient({ ...s, maxOutputTokens: 6000, timeoutMs: 180000, stream: true }).complete({ system: LORE_SYSTEM, user: lorePrompt({ entries: todo, roster, userName, bounds }) });
                 const costUsd = ((r.usage?.input ?? 0) * s.priceInPerM + (r.usage?.output ?? 0) * s.priceOutPerM) / 1e6;
                 records.logAssemble({ chatKey, speaker: '(世界书谁知道)', model: s.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
-                parseLore(r.text, todo.length).forEach((v, i) => store.setLore(chat.story_id, todo[i].key, v, 'model'));
+                parseLore(r.text, todo.length).forEach((v, i) => store.setLore(setupKeyOfChat(store, chat), todo[i].key, v, 'model'));
                 log(`lore ${chat.story_id}: judged ${todo.length} entr(ies), ${todo.length - parseLore(r.text, todo.length).filter(v => v.all).length} limited, $${costUsd.toFixed(4)}`);
             } catch (error) {
                 records.logAssemble({ chatKey, speaker: '(世界书谁知道)', model: s.model, status: 'failed', ms: Date.now() - started, error: error.message });
@@ -1565,7 +1566,7 @@ async function runLore({ chatKey }) {
                 return;
             }
         }
-    } finally { loreBusy.delete(chat.story_id); }
+    } finally { loreBusy.delete(setupKeyOfChat(store, chat)); }
 }
 
 // 兴头：备料（看到哪了、空当隔够没、刚换了地方、场面材料）和收结果分开写——单独调（runScene）和并进"看一眼"（runGlance）共用同一份
@@ -1788,7 +1789,7 @@ function hasBoundVoice({ chatKey, speaker }) {
     const cfg = getConfig();
     if (!cfg.fresh.enabled) return false;
     const chat = store.requireChat(chatKey);
-    const actor = store.getCast(chat.story_id).find(e => e.avatar === speaker && e.role !== '不用' && !String(e.avatar).startsWith('face:'));
+    const actor = store.getCast(setupKeyOfChat(store, chat)).find(e => e.avatar === speaker && e.role !== '不用' && !String(e.avatar).startsWith('face:'));
     return !!actor && !!voiceOf(path.join(home, '口吻'), [actor.name, speaker]);
 }
 async function freshMessage({ chatKey, speaker, text, before = null, lore = null }) {
@@ -1801,7 +1802,7 @@ async function freshMessage({ chatKey, speaker, text, before = null, lore = null
     const messages = cut >= 0 ? all.slice(0, cut + 1) : all;
     const echo = [...messages].reverse().find(m => m.is_user)?.text ?? '';
     const chat = store.requireChat(chatKey);
-    const actor = store.getCast(chat.story_id).find(e => e.avatar === speaker && e.role !== '不用' && !String(e.avatar).startsWith('face:'));
+    const actor = store.getCast(setupKeyOfChat(store, chat)).find(e => e.avatar === speaker && e.role !== '不用' && !String(e.avatar).startsWith('face:'));
     const name = actor?.name ?? messages.filter(m => m.speaker === speaker).at(-1)?.name ?? speaker;
     const voice = cfg.fresh.enabled && actor ? voiceOf(path.join(home, '口吻'), [name, speaker]) : '';
     // 台词段首拿对方的话反问一句（"借钱？"）、"至于……"拎对方话头的：程序直接去掉，不花钱；模型换上来的句子再过一遍
@@ -1822,20 +1823,20 @@ async function freshMessage({ chatKey, speaker, text, before = null, lore = null
     // 他上一次开口之后、别人说的（至多两条）：别顺着别人的比喻往下说
     const lastMine = messages.map(m => m.speaker === speaker && m.text !== text).lastIndexOf(true);
     const others = messages.slice(lastMine + 1).filter(m => !m.is_user && m.speaker !== speaker && m.text !== text).slice(-2).map(m => ({ name: m.name ?? m.speaker, text: m.text }));
-    const exclude = [...store.getCast(chat.story_id).map(e => e.name), ...messages.filter(m => m.is_user).map(m => m.name)].filter(Boolean);
+    const exclude = [...store.getCast(setupKeyOfChat(store, chat)).map(e => e.name), ...messages.filter(m => m.is_user).map(m => m.name)].filter(Boolean);
     // 拿对方原话起头的台词（用户 9/29）也请模型换：当成程序找到的，括起来（段首的上面已经去掉了，剩下段中间的）
     const spans = [...staleSpans(pre.text, previous, { exclude, echo, usual }), ...echoOpenings(pre.text, echo).map(span => ({ span, count: 0, echo: true }))];
     const prices = [a0.priceInPerM, a0.priceOutPerM];
     const started = Date.now();
     try {
         // 他本人的口吻：数据目录 口吻/<名字>.md（fresh.voice，默认开；没放文件就没有）
-        const setupData = store.setupOf?.(chat.story_id)?.data;
-        const roster = store.getCast(chat.story_id).map(e => e.name);
+        const setupData = store.setupOf?.(setupKeyOfChat(store, chat))?.data;
+        const roster = store.getCast(setupKeyOfChat(store, chat)).map(e => e.name);
         const facts = (staleBackstory(setupData, records.visible(chatKey), [...messages].reverse().find(m => m.is_user)?.name)?.前史 ?? []).filter(x => x.常驻 && !x.过时 && (!x.谁知道?.length || x.谁知道.some(p => sameName(p, name, roster)))).map(x => x.事);
         // 核对硬事实的材料（N-279）：这条之前的十来条、这一轮真触发的世界书、此刻的样子
         const context = messages.filter(m => m.text !== text).slice(-12).map(m => ({ name: m.name ?? (m.is_user ? '玩家' : m.speaker), text: m.text }));
         const fired = new Set(lore ?? []);
-        const loreTexts = fired.size ? (store.loreOf?.(chat.story_id) ?? []).filter(e => fired.has(e.key) && e.text).slice(0, 6).map(e => ({ title: e.title, text: e.text })) : [];
+        const loreTexts = fired.size ? (store.loreOf?.(setupKeyOfChat(store, chat)) ?? []).filter(e => fired.has(e.key) && e.text).slice(0, 6).map(e => ({ title: e.title, text: e.text })) : [];
         let stateNow = [];
         try { stateNow = stateBlock(store, { chatKey, name, present: [...new Set(context.map(m => m.name))], records }).slice(1); } catch {}
         // 这一轮给他的回忆（场记里"想起的"那一块，N-284 第三步）：说岔了以前的事，照它改回来。那一格按"这条之前那条"钉着
@@ -2123,7 +2124,7 @@ const talk = createTalk({
         try { clock = clockFor(store, records, chatKey, s.messages); } catch {}
         let edits = [];
         try { edits = JSON.parse(store.getMeta(`edit_report:${chatKey}`) ?? '[]'); } catch {}
-        return { s, setup: store.setupOf(s.chat.story_id)?.data ?? null, clock, digest: storyDigest(s.visible, { dayOf: s.dayOf, today: s.today, when: d => relativeDay(d, s.ts), max: 120 }).days, notes: (store.notesOf(chatKey) ?? []).filter(n => n.kind === '聊'), edits };
+        return { s, setup: store.setupOf(setupKeyOfChat(store, s.chat))?.data ?? null, clock, digest: storyDigest(s.visible, { dayOf: s.dayOf, today: s.today, when: d => relativeDay(d, s.ts), max: 120 }).days, notes: (store.notesOf(chatKey) ?? []).filter(n => n.kind === '聊'), edits };
     },
     plan: chatKey => { const planner = settings().planner; if (planner) requestPlanNow(store, records, chatKey, planner, { reason: 'notes' }); },
 });

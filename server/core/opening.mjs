@@ -17,6 +17,7 @@ import { dueOf } from './promises.mjs';
 import { hasCard } from './arrival.mjs';
 import { emptySegment } from './landing.mjs';
 import { sameName, knowsRow } from './setup.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 export const SEED = 'setup:开场:';
 const CAMERA_NAME = '旁白';   // 镜头那张卡（slot.mjs 也是这个）
@@ -111,12 +112,12 @@ export function ensureOpening(store, records, chatKey) {
     const messages = store.currentMessages(chatKey);
     const first = messages[0];
     if (!first) return { skipped: true };
-    const setup = store.setupOf?.(chat.story_id) ?? null;
+    const setup = store.setupOf?.(setupKeyOfChat(store, chat)) ?? null;
     const userName = userOf(messages);
-    const mark = `opening_seeded:${chat.story_id}:${first.fp}`;
+    const mark = `opening_seeded:${setupKeyOfChat(store, chat)}:${first.fp}`;
     const stamp = `${setup?.id ?? 0}|${userName ?? ''}`;
     if (store.getMeta?.(mark) === stamp) return { skipped: true };
-    const cast = store.getCast?.(chat.story_id) ?? [];
+    const cast = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
     const names = uniq([...cast.map(e => e.name), userName]);
     const same = (a, b) => sameName(a, b, names);
     const want = openingRecords(setup?.data, { userName, names, same, avatarOf: n => resolveIdentity(cast.filter(hasCard), n).person?.avatar ?? null });
@@ -158,13 +159,13 @@ export function awayPlansOf(store, chatKey, { messages = null } = {}) {
     try { plans = JSON.parse(store.getMeta?.(`away_plan:${chatKey}`) ?? '{}') ?? {}; } catch {}
     try {
         const chat = store.requireChat(chatKey);
-        const data = store.setupOf?.(chat.story_id)?.data;
+        const data = store.setupOf?.(setupKeyOfChat(store, chat))?.data;
         const msgs = messages ?? store.currentMessages(chatKey);
         if (!rowsOf(data).length || !msgs.length) return plans;
         let anchors = {}, arrivals = [];
         try { anchors = JSON.parse(chat.anchors ?? 'null') ?? {}; } catch {}
         try { arrivals = JSON.parse(store.getMeta?.(`arrivals:${chatKey}`) ?? '[]') ?? []; } catch {}
-        const roster = store.getCast?.(chat.story_id) ?? [];
+        const roster = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
         const userName = userOf(msgs);
         const names = uniq([...roster.map(e => e.name), userName]);
         const same = (a, b) => sameName(a, b, names);

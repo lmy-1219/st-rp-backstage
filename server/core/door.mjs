@@ -18,6 +18,7 @@ import { enteredSince, emptySegment, arrivalLive, confirmFloorOf } from './landi
 import { leadReady } from './eventlead.mjs';
 import { PER_PART } from './knock.mjs';
 import { paceName, MID } from './tempo.mjs';
+import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
 
 // 被"引子"挂上门的那几件（活动快到了替它放进口袋，eventlead.eventStep）：按套过日子的菜单（和 eventStep 同一套）判引子自己到点没，
 // 没到点标 early——门上不算到时候了。别的进口袋路径（stepPocket、改期、局势当下）一概不动（T073）
@@ -61,7 +62,7 @@ export function narratorHandoff(store, chatKey) {
     if (!source || (messages.at(-1)?.pos ?? 0) - lit.pos > 4) return null;
     const drafts = read(store, `door_handoffs:${chatKey}`);
     if (drafts && !drafts.some(d => d.pos === lit.pos && d.fp === lit.fp && d.revision === lit.revision && d.who === lit.who && d.way === lit.way && (!d.avatar || d.avatar === lit.avatar))) return null;
-    const roster = (store.getCast(store.requireChat(chatKey).story_id) ?? []).filter(p => p.role !== '不用');
+    const roster = (store.getCast(setupKeyFor(store, chatKey)) ?? []).filter(p => p.role !== '不用');
     const person = resolveIdentity(roster, lit).person;
     return { ...lit, avatar: person?.avatar ?? null, reason: lit.reason || (!person ? '旁白点名的卡身份不唯一或已失效' : null) };
 }
@@ -78,7 +79,7 @@ export function receiveDoorHandoff(store, records, chatKey, input) {
     if (!messages.some(m => !m.hidden && m.pos === pos && m.fp === fp)) return { ok: false, why: '原旁白来源已失效' };
     const drafts = read(store, `door_handoffs:${chatKey}`);
     if (drafts && !drafts.some(d => d.pos === pos && d.fp === fp && d.revision === input.revision && d.who === input.who && d.way === (input.way ?? '') && (d.avatar ?? null) === (input.avatar ?? null))) return { ok: false, why: '原旁白稿本已撤回或换稿' };
-    const roster = (store.getCast(store.requireChat(chatKey).story_id) ?? []).filter(p => p.role !== '不用');
+    const roster = (store.getCast(setupKeyFor(store, chatKey)) ?? []).filter(p => p.role !== '不用');
     const identity = resolveIdentity(roster, input), person = identity.person;
     const items = doorFor(store, records, chatKey).items;
     const reason = !person || (input.avatar && person.name !== input.who) ? '旁白点名的卡身份不唯一、不在活跃名册或与姓名不符' : !items.some(i => sameIdentity(i, person, roster) && i.ready) ? '旁白点名的人不在门名单、没有合法请求或还没到时候' : null;
@@ -118,7 +119,7 @@ const rank = c => (c.sent ? 0.5 : priority[c.source.type]);
 export function contactRequests(store, chatKey, messages = store.currentMessages(chatKey)) {
     const visible = messages.filter(m => !m.hidden), message = visible.findLast(m => m.is_user);
     if (!message || visible.at(-1).pos - message.pos > 8) return [];
-    const roster = store.getCast(store.requireChat(chatKey).story_id) ?? [];
+    const roster = store.getCast(setupKeyFor(store, chatKey)) ?? [];
     const history = read({ getMeta: store.getRawMeta ?? store.getMeta }, `knocks:${chatKey}`, []);
     return confirmedContacts(store, chatKey, [message], { phase: 'prepare' }).filter(proof => !history.some(k => k.playerRequest
         && sameIdentity(k, proof, roster) && ['pos', 'fp', 'sw', 'sentAt'].every(key => k.playerRequest[key] === proof[key])));
@@ -270,8 +271,8 @@ export function capFresh(store, records, chatKey, { present = [], recentUser = '
     const messages = store.currentMessages(chatKey);
     timeline ??= timelineFor(store, records, chatKey, messages);
     const { items, allReady = items } = doorFor(store, records, chatKey, { present, recentUser, timeline, automatic });
-    const chat = store.requireChat(chatKey), roster = store.getCast?.(chat.story_id) ?? [];
-    const names = roster.map(c => c.name), relations = store.relationsOf?.(chat.story_id);
+    const chat = store.requireChat(chatKey), roster = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
+    const names = roster.map(c => c.name), relations = store.relationsOf?.(setupKeyOfChat(store, chat));
     const scope = roster.filter(p => p.role !== '不用');
     const litIdentity = litPerson ?? resolveIdentity(scope, litWho).person;
     const rel = relations ? normalizeRelations(relations) : null;
@@ -310,8 +311,8 @@ export function doorFor(store, records, chatKey, { present = [], recentUser = ''
     const options = { present, recentUser, timeline, anchor };
     const board = boardFor(store, records, chatKey, options);
     const pending = pendingFor(store, records, chatKey, options);
-    const roster = store.getCast?.(chat.story_id) ?? [];
-    const relations = store.relationsOf?.(chat.story_id) ?? null;
+    const roster = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
+    const relations = store.relationsOf?.(setupKeyOfChat(store, chat)) ?? null;
     const names = roster.map(e => e.name);
     const rel = relations ? normalizeRelations(relations) : null;
     const sameWho = (a, b) => sameName(a, b, names) || (!!rel && !!personOf(rel, a, names) && personOf(rel, a, names) === personOf(rel, b, names));
@@ -397,7 +398,7 @@ export function fallbackPick(store, records, chatKey, { timeline = null, hearts 
     const chat = store.requireChat(chatKey);
     const messages = store.currentMessages(chatKey);
     timeline ??= timelineFor(store, records, chatKey, messages);
-    const roster = store.getCast?.(chat.story_id) ?? [];
+    const roster = store.getCast?.(setupKeyOfChat(store, chat)) ?? [];
     const visible = records.visible(chatKey);
     const lastPos = messages.at(-1)?.pos ?? 0;
     const userName = [...messages].reverse().find(m => m.is_user)?.name ?? '玩家';
@@ -406,5 +407,5 @@ export function fallbackPick(store, records, chatKey, { timeline = null, hearts 
     const board = boardFor(store, records, chatKey, { present: [], timeline });
     const pending = pendingFor(store, records, chatKey, { present: [], timeline });
     const closenessOf = (name, entry) => closeness({ name, userName, entry, records: visible, dayOf, lastPos, openIdeaIds });
-    return mostTied({ roster, board, relations: store.relationsOf?.(chat.story_id) ?? null, userName, pending, hearts, intimate, closenessOf, cooling });
+    return mostTied({ roster, board, relations: store.relationsOf?.(setupKeyOfChat(store, chat)) ?? null, userName, pending, hearts, intimate, closenessOf, cooling });
 }

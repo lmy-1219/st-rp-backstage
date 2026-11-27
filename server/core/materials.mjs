@@ -9,6 +9,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fromText as relationsFromText } from './relations.mjs';
 import { cleanAnswer, isTransient } from './handoff.mjs';
+import { setupKeyFor, setupKeyOfChat, metaSetupKey } from './setup-key.mjs';
 
 export const KINDS = ['开局单', '关系表', '参考资料'];
 const EXT = /\.(txt|md|markdown|json|csv)$/i;
@@ -72,22 +73,22 @@ export function relationsDraftInput({ cast = [], cards = [], setup = {}, net = '
 
 // 自动草稿与生效关系表分开存，外援和 API 走同一条核验路径。
 export function createRelationsDrafts({ store, records, handoffs, getConfig, clientFor, packFor = () => null, log = () => {} }) {
-    const key = storyId => `relations_draft:${storyId}`;
-    const read = storyId => { try { return JSON.parse(store.getMeta(key(storyId)) ?? 'null'); } catch { return null; } };
-    const write = (storyId, value) => { store.setMeta(key(storyId), value ? JSON.stringify(value) : null); return value; };
-    const populated = storyId => !!store.relationsOf(storyId)?.人?.length;
-    const current = meta => !populated(meta.storyId) && read(meta.storyId)?.id === meta.id;
-    const view = storyId => {
-        const d = read(storyId); if (!d || !current({ ...d, storyId })) return null;
-        const oldSetupAt = store.setupOf(storyId)?.id !== d.setupId
-            ? d.setupAt ?? store.db.prepare('select created_at from setups where story_id = ? and id = ?').get(storyId, d.setupId)?.created_at : null;
+    const key = setupKey => `relations_draft:${setupKey}`;
+    const read = setupKey => { try { return JSON.parse(store.getMeta(key(setupKey)) ?? 'null'); } catch { return null; } };
+    const write = (setupKey, value) => { store.setMeta(key(setupKey), value ? JSON.stringify(value) : null); return value; };
+    const populated = setupKey => !!store.relationsOf(setupKey)?.人?.length;
+    const current = meta => !populated(metaSetupKey(meta)) && read(metaSetupKey(meta))?.id === meta.id;
+    const view = setupKey => {
+        const d = read(setupKey); if (!d || !current({ ...d, setupKey })) return null;
+        const oldSetupAt = store.setupOf(setupKey)?.id !== d.setupId
+            ? d.setupAt ?? store.db.prepare('select created_at from setups where story_id = ? and id = ?').get(setupKey, d.setupId)?.created_at : null;
         return { ...d, ...(oldSetupAt ? { oldSetupAt } : {}) };
     };
     const finish = (text, meta, patch = {}) => {
         if (!current(meta)) throw new Error('relations_draft_stale');
         const answer = cleanAnswer(text), people = relationsFromText(answer).人.length;
         if (!people) throw new Error('关系表草稿里没有可核对的人物，原表保留');
-        const d = write(meta.storyId, { ...read(meta.storyId), status: 'drafted', text: answer, people, ...patch });
+        const d = write(metaSetupKey(meta), { ...read(metaSetupKey(meta)), status: 'drafted', text: answer, people, ...patch });
         return { people: d.people };
     };
     const configured = s => !!(s?.baseUrl && s.apiKey && s.model);
@@ -95,46 +96,46 @@ export function createRelationsDrafts({ store, records, handoffs, getConfig, cli
     const generate = async (meta, user) => {
         const cfg = getConfig(), s = cfg.stages?.setup, started = Date.now();
         if (!current(meta)) return;
-        if (!configured(s)) { write(meta.storyId, { ...read(meta.storyId), status: 'unconfigured', reason: '没配开局单那档的模型，关系表要手写或从素材整理' }); return; }
-        if (Number.isFinite(cfg.extractor?.dailyBudgetUsd) && (records?.spentToday?.() ?? 0) >= cfg.extractor.dailyBudgetUsd) { write(meta.storyId, { ...read(meta.storyId), status: 'blocked', reason: '今天后台预算已到上限，关系表先手写或从素材整理' }); return; }
+        if (!configured(s)) { write(metaSetupKey(meta), { ...read(metaSetupKey(meta)), status: 'unconfigured', reason: '没配开局单那档的模型，关系表要手写或从素材整理' }); return; }
+        if (Number.isFinite(cfg.extractor?.dailyBudgetUsd) && (records?.spentToday?.() ?? 0) >= cfg.extractor.dailyBudgetUsd) { write(metaSetupKey(meta), { ...read(metaSetupKey(meta)), status: 'blocked', reason: '今天后台预算已到上限，关系表先手写或从素材整理' }); return; }
         let response = null;
         try {
             const r = response = await clientFor({ ...s, maxOutputTokens: 16000, timeoutMs: 600000, stream: true }).complete({ system: RELATIONS_SYSTEM, user });
             const usd = cost(r.usage, s);
-            if (current(meta)) finish(r.text, meta, { costUsd: (read(meta.storyId).costUsd ?? 0) + usd, via: 'api' });
+            if (current(meta)) finish(r.text, meta, { costUsd: (read(metaSetupKey(meta)).costUsd ?? 0) + usd, via: 'api' });
             records?.logAssemble({ chatKey: meta.chatKey, speaker: '(开局单·关系表草稿)', model: s.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd: usd, ms: Date.now()-started, raw: r.text });
         } catch (error) {
             const usage = error.usage ?? response?.usage ?? null, usd = cost(usage, s);
             records?.logAssemble({ chatKey: meta.chatKey, speaker: '(开局单·关系表草稿)', model: s.model, status: 'failed', usage, costUsd: usd, ms: Date.now()-started, error: error.message });
             if (!current(meta)) return;
-            const old = read(meta.storyId), base = { ...old, costUsd: (old.costUsd ?? 0) + usd, reason: error.message };
+            const old = read(metaSetupKey(meta)), base = { ...old, costUsd: (old.costUsd ?? 0) + usd, reason: error.message };
             if (handoffs && isTransient(error)) {
                 const id = handoffs.request({ kind: 'relations-draft', key: meta.id, chatKey: meta.chatKey, why: error.message, system: RELATIONS_SYSTEM, user, task: '只把提供的卡介绍、开局单和关系网里写明的内容整理成关系表，等玩家核对保存', checks: '至少有一段可解析的人物；只存草稿，不直接写入关系表', meta });
-                write(meta.storyId, { ...base, status: 'handoff', handoff: id });
-            } else write(meta.storyId, { ...base, status: 'failed' });
+                write(metaSetupKey(meta), { ...base, status: 'handoff', handoff: id });
+            } else write(metaSetupKey(meta), { ...base, status: 'failed' });
             log(`relations draft failed: ${error.message}`);
         }
     };
     handoffs?.register('relations-draft', {
         stale: meta => !current(meta),
         dropped: (meta, h) => {
-            const draft = read(meta.storyId);
+            const draft = read(metaSetupKey(meta));
             if (current(meta) && draft.status === 'handoff' && draft.handoff === h.id)
-                write(meta.storyId, { ...draft, status: 'failed', reason: `${draft.reason || h.payload.why || '关系表起草未完成'}；外援已丢弃` });
+                write(metaSetupKey(meta), { ...draft, status: 'failed', reason: `${draft.reason || h.payload.why || '关系表起草未完成'}；外援已丢弃` });
         },
         apply: (text, meta) => finish(text, meta, { via: 'handoff' }),
-        retry: async (meta, h) => { await generate(meta, h.payload.user); return view(meta.storyId)?.status === 'drafted' ? 'done' : 'failed'; },
+        retry: async (meta, h) => { await generate(meta, h.payload.user); return view(metaSetupKey(meta))?.status === 'drafted' ? 'done' : 'failed'; },
     });
     const inputFor = (chatKey, cards, setup) => {
         const chat = store.requireChat(chatKey), pack = packFor(chatKey); let net = '';
         if (pack?.dir) { try { net = fs.readFileSync(path.join(pack.dir, '关系网.json'), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') log(`relations network read failed: ${error.message}`); } }
-        return relationsDraftInput({ cast: store.getCast(chat.story_id), cards, setup: setup.data, net });
+        return relationsDraftInput({ cast: store.getCast(setupKeyOfChat(store, chat)), cards, setup: setup.data, net });
     };
-    const canRestart = storyId => ['drafted', 'failed'].includes(view(storyId)?.status);
-    return { view, clear: storyId => write(storyId, null),
+    const canRestart = setupKey => ['drafted', 'failed'].includes(view(setupKey)?.status);
+    return { view, clear: setupKey => write(setupKey, null),
         estimate({ chatKey, cards = [] }) {
-            const chat = store.requireChat(chatKey), setup = store.setupOf(chat.story_id);
-            if (!setup || !canRestart(chat.story_id)) throw new Error('当前没有可重新起草的关系表草稿');
+            const chat = store.requireChat(chatKey), SK = setupKeyOfChat(store, chat), setup = store.setupOf(SK);
+            if (!setup || !canRestart(SK)) throw new Error('当前没有可重新起草的关系表草稿');
             const s = getConfig().stages?.setup;
             if (!configured(s)) throw new Error('没配开局单那档的模型');
             const input = inputFor(chatKey, cards, setup);
@@ -143,18 +144,18 @@ export function createRelationsDrafts({ store, records, handoffs, getConfig, cli
             return { model: s.model, costUsd };
         },
         async start({ chatKey, cards = [], restart = false }) {
-            const chat = store.requireChat(chatKey), setup = store.setupOf(chat.story_id);
-            if (!setup || populated(chat.story_id)) return;
-            const old = view(chat.story_id);
+            const chat = store.requireChat(chatKey), SK = setupKeyOfChat(store, chat), setup = store.setupOf(SK);
+            if (!setup || populated(SK)) return;
+            const old = view(SK);
             if (restart) {
-                if (!canRestart(chat.story_id)) return old;
+                if (!canRestart(SK)) return old;
             } else if (old && ['working', 'handoff', 'drafted', 'failed'].includes(old.status)) return old;
-            const id = randomUUID(), meta = { id, chatKey, storyId: chat.story_id, setupId: setup.id };
+            const id = randomUUID(), meta = { id, chatKey, setupKey: SK, setupId: setup.id };
             const input = inputFor(chatKey, cards, setup);
-            write(chat.story_id, { id, setupId: setup.id, setupAt: setup.created_at, status: 'working', costUsd: 0, chars: input.chars, truncatedChars: input.truncatedChars, truncatedCards: input.truncatedCards });
+            write(SK, { id, setupId: setup.id, setupAt: setup.created_at, status: 'working', costUsd: 0, chars: input.chars, truncatedChars: input.truncatedChars, truncatedCards: input.truncatedCards });
             log(`relations draft input: ${input.chars} chars; trimmed ${input.truncatedChars}, cards ${input.truncatedCards}`);
             await generate(meta, input.user);
-            return view(chat.story_id);
+            return view(SK);
         },
     };
 }

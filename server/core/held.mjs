@@ -1,4 +1,5 @@
 import { personWord } from './pronoun.mjs';
+import { setupKeyFor } from './setup-key.mjs';
 import { MENU_EVIDENCE_PROTOCOL, menuEvidenceVersion, menuBoundaryEvidence, citedMenuProof } from './menu-evidence.mjs';
 // 心里压着的事（用户 10/16，小说转卡那边做开局单时的发现："不止是误会，主要是认知错位和角色性格以及剧情条件的关系，这是剧情节奏和拉扯的来源……
 // 同样的还影响'报喜不报忧'这种事——角色心里有事/遇到了事，什么情况会说，不说的时候是什么表现，说的时候会挑在什么场景/时间"）。
@@ -21,17 +22,24 @@ export function identifyNode(node, planId) {
 export function confirmedFacts(store, chatKey) {
     const story = store.requireChat?.(chatKey)?.story_id;
     if (story == null) return [];
-    const setup = store.setupOf?.(story);
+    const setup = store.setupOf?.(setupKeyFor(store, chatKey));
     if (!setup || setup.status !== 'confirmed') return [];
     return (setup.data?.前史 ?? []).flatMap((row, i) => row?.常驻 === true && !row.过时 && str(row.事) && Array.isArray(row.谁知道)
         ? [{ id: `前史:${setup.id}:${i + 1}`, index: i + 1, setupVersion: setup.id, text: row.事, scope: { story }, knownBy: row.谁知道,
             objective: row.层 !== '某人记得的版本', layer: row.层 ?? '' }] : []);
 }
 export const factKnownTo = (fact, who, same = (a, b) => a === b) => Array.isArray(fact?.knownBy) && (!fact.knownBy.length || fact.knownBy.some(n => same(n, who)));
+// 开分支时开局单各版复制成了新编号（store.forkSetup 记了旧→新对照）；子窗顺着父窗读来的规划里，前史证据记的是父窗那一版的旧编号，这里换成子窗自己的新编号再核对。
+// 没有对照（新局、旧窗、没开过分支的窗）原样返回，行为不变。
+function inheritedFact(store, chatKey, fact) {
+    const map = store.setupIdMap?.(chatKey);
+    const to = map && fact?.setupVersion != null ? map[fact.setupVersion] : null;
+    return to == null ? fact : { ...fact, id: `前史:${to}:${fact.index}`, setupVersion: to };
+}
 export function nodeContext(store, chatKey) {
     const facts = confirmedFacts(store, chatKey);
     return { messages: store.currentMessages?.(chatKey) ?? [], facts, menuRecords: store.menuEvidenceRecords?.(chatKey) ?? [],
-        factLive: f => facts.some(x => JSON.stringify(x) === JSON.stringify(f)), recordLive: r => store.recordEvidenceLive?.(chatKey, r) === true };
+        factLive: f => { const g = inheritedFact(store, chatKey, f); return facts.some(x => JSON.stringify(x) === JSON.stringify(f) || JSON.stringify(x) === JSON.stringify(g)); }, recordLive: r => store.recordEvidenceLive?.(chatKey, r) === true };
 }
 export function verificationProofLive(row, ctx) {
     const evidence = row?.evidence ?? [], facts = row?.facts ?? [], records = row?.records ?? [];
@@ -217,8 +225,8 @@ export function withSecretLeaks(data, leaks = []) {
     }) };
 }
 export function secretCandidates(store, chatKey, records = null) {
-    const story = store.requireChat(chatKey).story_id, setup = store.setupOf(story)?.data;
-    const people = [...new Set([...store.getCast(story).filter(p => p.role !== '不用').map(p => p.name), ...(store.playerNames?.(story) ?? []), ...(setup?.主角团 ?? [])].filter(Boolean))];
+    const story = store.requireChat(chatKey).story_id, SK = setupKeyFor(store, chatKey), setup = store.setupOf(SK)?.data;
+    const people = [...new Set([...store.getCast(SK).filter(p => p.role !== '不用').map(p => p.name), ...(store.playerNames?.(story, chatKey) ?? []), ...(setup?.主角团 ?? [])].filter(Boolean))];
     const leaked = activeLeaks(store, records, chatKey), rows = [];
     for (const x of setup?.前史 ?? []) {
         if (x.过时 || !x.不让谁知道?.length || !x.谁知道?.length) continue;
@@ -233,7 +241,7 @@ export function recordSecretLeaks(store, { chatKey, candidates, leaks, evidence 
     const story = store.requireChat(chatKey).story_id, old = secretLeaksOf(store, chatKey), accepted = [];
     const visibleIds = new Set(evidence.map(r => r.id));
     const current = old.filter(x => Number.isInteger(x.proof) && visibleIds.has(x.proof));
-    const roster = store.getCast(story), person = value => roster.find(x => x.avatar === value)?.name ?? value;
+    const roster = store.getCast(setupKeyFor(store, chatKey)), person = value => roster.find(x => x.avatar === value)?.name ?? value;
     const flat = value => String(value ?? '').replace(/\s/g, '');
     for (const row of leaks ?? []) {
         const match = candidates.find(x => x.事 === row.事 && x.不让.includes(row.谁知道了));

@@ -1,3 +1,4 @@
+import { setupKeyOfChat } from './setup-key.mjs';
 // 只渲染提示词模板里的称呼；不猜性别，不改用户资料和引文。
 export const genderOf = value => value === '男' || value === '女' ? value : null;
 export const playerWord = ({ setup = null, name = null } = {}) => genderOf(setup?.玩家性别) === '女' ? '她'
@@ -12,6 +13,6 @@ export function playerContext(store, chatKey) {
     let persona = null;
     try { persona = JSON.parse(store.getMeta?.(`persona:${chatKey}`) ?? 'null'); } catch {}
     const messages = store.currentMessages?.(chatKey) ?? [];
-    return { setup: store.setupOf?.(chat.story_id)?.data ?? null,
+    return { setup: store.setupOf?.(setupKeyOfChat(store, chat))?.data ?? null,
         name: persona?.name || [...messages].reverse().find(m => m.is_user)?.name || null };
 }

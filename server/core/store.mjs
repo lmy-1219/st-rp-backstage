@@ -439,6 +439,7 @@ export function openStore(file) {
     }
     const copyArr = a => [...a];
     const getChat = q('select * from chats where key = ?');
+    const splitQ = q('select 1 from meta where key = ?');   // setupKeyOf 用：开库时就备好句柄（热路径读口不能现场 prepare）
     const castByStory = q(`select c.avatar, c.name, c.gender, c.role, c.hook, c.priority, c.bond, c.set_by, c.call, c.stranger, c.is_group, coalesce(c.interests, p.text) interests, c.interests is not null interests_own
                   from cast c left join card_profiles p on p.avatar = c.avatar where c.story_id = ? order by c.name`);
     const logEvent = q('insert into events(chat_key, at, kind, detail) values (?, ?, ?, ?)');
@@ -449,6 +450,44 @@ export function openStore(file) {
         q('delete from snapshots where chat_key = ? and pos < (select max(pos) from snapshots where chat_key = ?) - 400').run(chatKey, chatKey);
     }
     function snapshotOf(chatKey, fp) { const r = q('select pos, fp, data from snapshots where chat_key = ? and fp = ?').get(chatKey, fp); return r ? { ...r, data: JSON.parse(r.data) } : null; }
+
+    // ---------- T154g1：开局设定按"设定归属键"存（D-405 第 2 条：分支时带一份走，之后各改各的）----------
+    // 没有 setup_split 标记的窗（新局、这一版以前开出来的旧窗）：键＝story_id，父子共用一份，行为不变。
+    // 这一版以后开出来的新分支：键＝子窗自己的 chatKey，开分支时把父窗当时那一份整份复制过来。
+    const SETUP_META = ['plan_persona', 'lore_tries', 'lore_ver', 'roster_listed', 'pack', 'prompt_pack', 'relations_draft'];
+    const SETUP_META_PREFIX = ['opening_seeded', 'cast_promotion_dismissed'];
+    function setupKeyOf(chatKey) {
+        const chat = requireChat(chatKey);
+        return memo('setup_split', chatKey, () => !!splitQ.get(`setup_split:${chatKey}`)) ? chatKey : chat.story_id;
+    }
+    // 旧 id → 新 id（复制开局单各版时 id 会换）：子窗继承来的规划里记着父窗那一版的前史证据，核对时先经这份对照（held.nodeContext）
+    function setupIdMap(chatKey) { try { return JSON.parse(getRawMeta(`setup_idmap:${chatKey}`) ?? '{}') ?? {}; } catch { return {}; } }
+    function forkSetup(parentKey, branchKey) {
+        const from = setupKeyOf(parentKey), to = branchKey;
+        q('insert or replace into cast(story_id, avatar, name, role, hook, set_by, updated_at, priority, bond, gender, interests, call, stranger, is_group) select ?, avatar, name, role, hook, set_by, updated_at, priority, bond, gender, interests, call, stranger, is_group from cast where story_id = ?').run(to, from);
+        q('insert or replace into relations(story_id, data, set_by, updated_at) select ?, data, set_by, updated_at from relations where story_id = ?').run(to, from);
+        q('insert or replace into lore(story_id, ekey, hash, world, title, text, verdict, source, updated_at) select ?, ekey, hash, world, title, text, verdict, source, updated_at from lore where story_id = ?').run(to, from);
+        q('insert or replace into card_groups(story_id, data, version, updated_at) select ?, data, version, updated_at from card_groups where story_id = ?').run(to, from);
+        // 开局单：只带确认过的各版（草稿、分格中、失败的不带），按原来的先后和时间保留
+        const idMap = {};
+        for (const r of q("select * from setups where story_id = ? and status = 'confirmed' order by id").all(from))
+            idMap[r.id] = Number(q('insert into setups(story_id, status, data, source, unchecked, error, cost, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                .run(to, r.status, r.data, r.source, r.unchecked, r.error, r.cost, r.created_at, r.updated_at).lastInsertRowid);
+        const composed = {};
+        for (const [a, b] of Object.entries(setupIdMap(parentKey))) if (idMap[b] != null) composed[a] = idMap[b];
+        Object.assign(composed, idMap);
+        if (Object.keys(composed).length) setMeta(`setup_idmap:${to}`, JSON.stringify(composed));
+        for (const name of SETUP_META) {
+            let v = getRawMeta(`${name}:${from}`);
+            if (v == null) continue;
+            if (name === 'relations_draft') try { const d = JSON.parse(v); if (d && idMap[d.setupId] != null) v = JSON.stringify({ ...d, setupId: idMap[d.setupId] }); } catch {}
+            setMeta(`${name}:${to}`, v);
+        }
+        for (const prefix of SETUP_META_PREFIX)
+            for (const r of q('select key, value from meta where key like ? escape ?').all(`${prefix}:${from.replace(/[\\_%]/g, c => '\\' + c)}:%`, '\\'))
+                setMeta(`${prefix}:${to}:${r.key.slice(prefix.length + from.length + 2)}`, r.value);
+        setMeta(`setup_split:${to}`, '1');
+    }
 
     function requireChat(chatKey) {
         const chat = getChat.get(chatKey);
@@ -558,6 +597,7 @@ export function openStore(file) {
             try { q('update chats set extract = ? where key = ?').run(chat.extract ?? 0, branchKey); } catch {}
             const drafts = getRawMeta(`door_handoffs:${chatKey}`);
             if (drafts) setMeta(`door_handoffs:${branchKey}`, drafts);
+            forkSetup(chatKey, branchKey);
             log(branchKey, 'branch', { parent: chatKey, stChatId });
             return { status: 'branch', chatKey: branchKey, storyId: chat.story_id, enabled: true };
         };
@@ -795,7 +835,7 @@ export function openStore(file) {
             const live = raw ? liveAnchors(raw, seq.map(x => x.d ?? null)) : null;
             q('update chats set synced_at = ?, members = coalesce(?, members), anchors = coalesce(?, anchors) where key = ?')
                 .run(now(), members ? JSON.stringify(members) : null, live ? JSON.stringify(live) : null, chatKey);
-            alignCastToGroup(chat.story_id, members, chatKey);
+            alignCastToGroup(setupKeyOf(chatKey), members, chatKey);
             if (change.added || change.removed) log(chatKey, 'sync', { total: newFps.length, ...change, forced: force || undefined });
             if (chat.parent_key && chat.branch_len == null && newFps.length) branchLen(chat, newFps);
             // 接入时自动开了记账的（extract_from＝-1）：第一次同步时，带着一大段旧聊天的只从接入以后记（旧的要不要补记，面板上给估价由用户点，D-100）。
@@ -965,7 +1005,7 @@ export function openStore(file) {
         on conflict(key) do update set value = value + 1`).run(`authorization_rev:${key}`);
     const authorizationEpoch = (chatKey, external = externalVersion()) => memo('authorization_epoch', chatKey, () => q(`select coalesce(g.version, 0) + coalesce((select sum(value) from meta where key in
             ('authorization_rev:' || c.key, 'authorization_rev:story:' || c.story_id)), 0) n
-            from chats c left join card_groups g on g.story_id = c.story_id where c.key = ?`).get(chatKey)?.n ?? 0);
+            from chats c left join card_groups g on g.story_id = case when (select value from meta where key = 'setup_split:' || c.key) is not null then c.key else c.story_id end where c.key = ?`).get(chatKey)?.n ?? 0);
     function authorizationVersion(chatKey, { reader = null, anchor = null, through = null, mode = 'current' } = {}, external = externalVersion()) {
         const messages = memo('messages', chatKey, () => readMessages(chatKey)).rows;
         const match = /^(\d+):(.+)$/.exec(anchor ?? '');
@@ -975,13 +1015,13 @@ export function openStore(file) {
             try {
                 const chat = requireChat(chatKey), read = key => JSON.parse(getRawMeta(`${key}:${chatKey}`) ?? 'null');
                 const members = JSON.parse(chat.members ?? '[]') ?? [], anchors = JSON.parse(chat.anchors ?? 'null');
-                const cast = getCast(chat.story_id).map(p => [p.avatar, p.name, p.role]).sort();
+                const cast = getCast(setupKeyOf(chatKey)).map(p => [p.avatar, p.name, p.role]).sort();
                 const name = members.find(m => m.avatar === reader)?.name ?? cast.find(([avatar]) => avatar === reader)?.[1];
                 const roster = [...new Map([...cast.map(([avatar, name]) => ({ avatar, name })), ...members].map(m => [m.avatar, m])).values()];
                 const relevant = avatar => !name || avatar === reader || roster.some(m => m.avatar === avatar && m.name === name);
                 const segments = Object.keys(anchors ?? {}).filter(relevant).sort().map(avatar => [avatar, anchors[avatar]?.segments?.filter(s => s.from <= through + 1)
                     .map(s => [s.from, s.to <= through + 1 ? s.to : null, wayOf(s.way), s.fromDate, s.to != null && s.to <= through + 1 ? s.toDate : null]) ?? null]);
-                const groups = cachedDeclarations(chat.story_id).groups;
+                const groups = cachedDeclarations(setupKeyOf(chatKey)).groups;
                 const ownAftermath = groups.some(g => g.卡.includes(reader));
                 const prefix = JSON.stringify([chatKey, through]);
                 const arrivals = memo('authorization_arrivals', prefix, () => (read('arrivals') ?? []).filter(e => e.at <= through + 1).map(e => [e.avatar, e.who, e.at, e.fp, e.how, wayOf(e.way), e.source_basis?.id, knockLive(chatKey, e, { phase: 'fact' })]));
@@ -1412,12 +1452,16 @@ export function openStore(file) {
         return out;
     }
     // 这一局玩家用过的名字：历史消息、各窗口当前人设、已确认规划人设。
-    function playerNames(storyId) {
+    // 第三十二封：规划人设按设定归属读。已分开的窗只认自己那份；没分开的（含父窗、旧窗）只认原局那份——
+    // 不再把别的已分开窗单独确认的人设合进来。玩家历史名／曾用名（T051：消息里玩家用过的名字、各窗 persona）照旧整局收。
+    // 不给 chatKey（旧调用）时等于"没分开的那一份"。
+    function playerNames(storyId, chatKey = null) {
         const names = q('select distinct name from messages where story_id = ? and is_user = 1 and name is not null').all(storyId).map(r => r.name);
         for (const chat of q('select key from chats where story_id = ?').all(storyId)) {
             try { names.push(JSON.parse(getMeta(`persona:${chat.key}`) ?? 'null')?.name); } catch {}
         }
-        names.push(getMeta(`plan_persona:${storyId}`));
+        const split = chatKey != null && getRawMeta(`setup_split:${chatKey}`);
+        names.push(getMeta(`plan_persona:${split ? chatKey : storyId}`));
         return [...new Set(names.filter(n => typeof n === 'string').map(n => n.trim()).filter(Boolean))];
     }
     function markFreshened(newFp, oldFp) { if (newFp && oldFp && newFp !== oldFp) setMeta(`fresh_from:${newFp}`, oldFp); }
@@ -2079,5 +2123,5 @@ export function openStore(file) {
     setSourceContext(db, sourceContext);
     return { authorizationVersion, authorizationEpoch, externalVersion, changeVersion: () => changesQ.get().n, commitSlot: tx, prepareSlotRollback, declarationsOf: readDeclarations, cachedDeclarations, putDeclarations,
         memberNameIndex, recordKnowledgeFor,
-        deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, syncRevision, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+        deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, setupKeyOf, setupIdMap, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, syncRevision, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

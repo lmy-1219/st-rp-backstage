@@ -10,8 +10,12 @@
 //   规范化：去掉登记表 DROP_FIELDS 和该项 strip 里的字段（递归）、窗/局的随机标识换成占位、对象键排序。
 import { situationReader } from './situation.mjs';
 import { DROP_FIELDS, TABLES, META } from './state-registry.mjs';
+import { setupKeyFor } from './setup-key.mjs';
 
 const CHAT = '<chat>', STORY = '<story>';
+// 跟着设定归属键存的 meta（其余 story 域的 meta 是 g2 的剧情进度，仍按 story_id）
+const SETUP_TABLES = new Set(['cast', 'relations', 'setups', 'lore', 'card_groups']);
+const SETUP_META = new Set(['plan_persona', 'lore_tries', 'lore_ver', 'roster_listed', 'opening_seeded', 'cast_promotion_dismissed', 'pack', 'prompt_pack', 'relations_draft']);
 const json = v => { if (v == null) return null; if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return v; } };
 
 function canon(value, drop) {
@@ -27,6 +31,8 @@ function canon(value, drop) {
 export function dumpWindow(store, chatKey, { records = null, situation = null } = {}) {
     const db = store.db;
     const chat = store.requireChat(chatKey), storyId = chat.story_id;
+    // T154g1：开局设定那批（名册、关系表、开局单、世界书、card_groups、规划人设、包设置……）按设定归属键读：新局＝story_id，分开存的新分支＝自己的 chatKey
+    const setupKey = setupKeyFor(store, chatKey);
     const hasTable = name => !!db.prepare("select 1 from sqlite_master where type = 'table' and name = ?").get(name);
     // records 由调用方传入（openRecords 开库时会跑一次迁移写库，倒出来不自己开）；situationReader 只读
     const rec = records;
@@ -88,12 +94,12 @@ export function dumpWindow(store, chatKey, { records = null, situation = null } 
         'table:extract_jobs': () => all('select count(*) n from extract_jobs where chat_key = ?', chatKey)[0]?.n ?? 0,
         'table:assemble_calls': () => all('select count(*) n from assemble_calls where chat_key = ?', chatKey)[0]?.n ?? 0,
         'table:stories': () => ({ exists: !!all('select 1 from stories where id = ?', storyId).length }),
-        'table:cast': () => store.getCast(storyId),
-        'table:relations': () => store.relationsOf(storyId),
-        'table:setups': () => { const s = store.setupOf(storyId); return s ? { status: s.status, data: s.data } : null; },
-        'table:lore': () => store.loreOf(storyId),
-        'table:card_groups': () => store.declarationsOf(storyId),
-        'table:card_profiles': () => store.getCast(storyId).map(e => store.profileOf(e.avatar)).filter(Boolean).map(({ avatar, text, card_text, card_name }) => ({ avatar, text, card_text, card_name })),
+        'table:cast': () => store.getCast(setupKey),
+        'table:relations': () => store.relationsOf(setupKey),
+        'table:setups': () => { const s = store.setupOf(setupKey); return s ? { status: s.status, data: s.data } : null; },
+        'table:lore': () => store.loreOf(setupKey),
+        'table:card_groups': () => store.declarationsOf(setupKey),
+        'table:card_profiles': () => store.getCast(setupKey).map(e => store.profileOf(e.avatar)).filter(Boolean).map(({ avatar, text, card_text, card_name }) => ({ avatar, text, card_text, card_name })),
     };
 
     // meta：按登记表逐项读（getMeta＝现在实际的读口，带来源过滤）
@@ -121,7 +127,7 @@ export function dumpWindow(store, chatKey, { records = null, situation = null } 
             const v = store.getMeta(entry.prefix);
             return v == null ? out : { '-': json(v) };
         }
-        const base = entry.scope === 'story' ? storyId : chatKey;
+        const base = entry.scope === 'story' ? (SETUP_META.has(entry.prefix) ? setupKey : storyId) : chatKey;
         if (entry.prefix === 'arrivals') {   // 进场记账是"顺着父窗读"的：sourceProjection 读同局各窗，只到分叉点
             const list = [];
             for (const origin of h.keys) {
@@ -163,7 +169,10 @@ export function dumpWindow(store, chatKey, { records = null, situation = null } 
     const know = {}, cache = {};
     const finish = (value, entry) => {
         const drop = new Set([...DROP_FIELDS, ...(entry.strip ?? [])]);
-        const text = JSON.stringify(value ?? null).replaceAll(chatKey, CHAT).replaceAll(storyId, STORY);
+        // 这批类（设定归属键下的表和 meta）：设定归属键（story_id 或分开存的新分支自己的 chatKey）统一成占位，两个窗才能直接比；别的类照旧
+        const setupClass = entry.kind === 'table' ? SETUP_TABLES.has(entry.table) : SETUP_META.has(entry.prefix);
+        const raw = JSON.stringify(value ?? null);
+        const text = (setupClass ? raw.replaceAll(setupKey, STORY) : raw).replaceAll(chatKey, CHAT).replaceAll(storyId, STORY);
         return canon(JSON.parse(text), drop);
     };
     for (const entry of TABLES) {
