@@ -5,7 +5,7 @@ import { personWord, renderPronouns } from './pronoun.mjs';
 // 开了叙事组装时再给一批更宽的候选（pool），由 assemble.mjs 请模型串成回忆线。相对时间只认记账里的"时间"记录（§5.6）。
 // repeatedPhrases 留着备用，不再放进格子（否定式提醒对前台无效）。
 
-import { elapsedUnits, relativeUnit, scaleOf, DAY, timeEvidence } from './timescale.mjs';
+import { elapsedUnits, relativeUnit, scaleOf, DAY, timeEvidence, FORWARD } from './timescale.mjs';
 import { similar } from './records.mjs';
 import { uniqueSentences } from './mood.mjs';
 
@@ -69,7 +69,6 @@ export function timeSkipIn(text, { previousPart = null } = {}) {
 // 隔远了也一样（质量窗 9/29：醒来二十多条后他说"你躺的那十一天里"，又被记成过了十一天，剧情日从 20 跳到 31）：
 // 天数对得上、原话里又没有"又过了""N 天后"这类往前走的说法，就是在回头说那一段。
 const ABSENCE_ECHO = 12;
-const FORWARD = /又过|过了|之后|以后|[天周月日年]后|第二天|次日|隔天|翌日|次年|翌年/;
 const recalls = m => m.quotes.length > 0 && !FORWARD.test(m.quotes.join(' '));
 // 用户在消息上点的（N-265，最高权威）：manual＝"从这条起算新的一天"；setDay＝"这条是第几天"（从开场算起、开场＝0；
 // "第六天一早"这种只说第几天的，程序算不出隔了几天）；cancel＝"这里没有跨天"——那条和它后面三条以内

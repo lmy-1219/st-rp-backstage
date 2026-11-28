@@ -182,6 +182,15 @@ export function elapsedUnits(text, timeScale = DAY, { exact = false } = {}) {
 
 // clock JSON 的统一入口。模型判语义，程序核出处、数值和日历；不从摘要正文补时长。
 const TIME_DAYS = { 小时: 1 / 24, 天: 1, 周: 7, 月: 365 / 12, 年: 365 };
+// 引文里有"往后推"的说法，才算镜头往前走了；只写了一段时长不算（recall 回头说那一段时也用这个）。
+export const FORWARD = /又过|过了|之后|以后|[天周月日年]后|第二天|次日|隔天|翌日|次年|翌年/;
+// timeEvidence 按句子的体分"到此时已持续多久"和"从上一刻起又走了多久"（主窗 11/28 退回：只看有没有往后推的词，两头都错）。
+// 持续到现在：时长后面紧跟句末的"了"（"四天了""三年了""过了四天了"）、"……以来"、"这 N 年来"——说的是一段经历延续到此刻，不推进日期。
+// 往后推：N 天／小时……后、……过去了、过了 N 天（后面不再跟"了"）、第二天、第 N 天、一夜过去、天亮了、醒来。
+// 两样都不像的（"一晃三天""这伤拖了四天"）待确认，用户手动定日。FORWARD 本身不动，免得改变 recall 的回声判定。
+const SPAN_UNIT = '(?:年|载|个?月|个?星期|个?礼拜|周|旬|天|日|晚|夜|个?小时|个?钟头|分钟|时辰)';
+const ONGOING = new RegExp(`${SPAN_UNIT}(?:多)?了(?=\\s*(?:[。！？!?，,；;…”」』）)]|$))|${SPAN_UNIT}(?:多)?(?:以来|来[，,。])`);
+const ADVANCE = new RegExp(`${FORWARD.source}|${SPAN_UNIT}(?:之|以)?后|过去了|第\\s*[0-9一二两三四五六七八九十]+\\s*[天日周月年]|一[夜宿晚]过去|天亮了|醒来|一觉`);
 export function calendarSerial(value, { month30 = false } = {}) {
     const m = /^(\d{1,5})-(\d{1,2})-(\d{1,2})$/.exec(String(value ?? ''));
     if (!m) return null;
@@ -204,7 +213,7 @@ export function timeEvidence(record, timeScale = DAY, { start = null } = {}) {
         if (!facts.length) return pending('没有时间证据');
         let setDay = null, units = null;
         for (const f of facts) {
-            if (!f || f.type === 'uncertain' || f.now !== true) return pending('时间是否属于当下尚未确认');
+            if (!f || f.type === 'uncertain' || (f.now !== true && f.type !== 'duration')) return pending('时间是否属于当下尚未确认');
             if (typeof f.quote !== 'string' || !f.quote.trim() || !(r.quotes ?? []).some(q => String(q).includes(f.quote))) return pending('时间引文未核实');
             if (f.type === 'absolute') {
                 const opts = { month30: !!start?.纪年?.length };
@@ -216,10 +225,19 @@ export function timeEvidence(record, timeScale = DAY, { start = null } = {}) {
                     : ts.unit === '年' ? Number(f.date.split('-')[0]) - Number(start.日期.split('-')[0]) : (date - base) / ts.days;
                 if (setDay != null && setDay !== delta) return pending('日期证据矛盾');
                 setDay = delta;
+            } else if (f.type === 'duration') {
+                // 既有经历持续了多久：说过这段时长，但没把场景往后推——引文和数值照样核，不计入剧情日。
+                if (!(Number.isFinite(f.value) && f.value >= 0 && TIME_DAYS[f.unit])) return pending('时长值无效');
+                const said = elapsedUnits(f.quote, scaleOf({ 单位: f.unit === '周' ? '天' : f.unit }), { exact: true });
+                if (Math.abs(said - f.value * (f.unit === '周' ? 7 : 1)) > 1e-8) return pending('时长数值没有原文支持');
             } else if (f.type === 'elapsed') {
                 if (!(Number.isFinite(f.value) && f.value >= 0 && TIME_DAYS[f.unit])) return pending('时长值无效');
                 const quoted = elapsedUnits(f.quote, scaleOf({ 单位: f.unit === '周' ? '天' : f.unit }), { exact: true });
                 if (Math.abs(quoted - f.value * (f.unit === '周' ? 7 : 1)) > 1e-8) return pending('时长数值没有原文支持');
+                // 数字对得上只说明说过这段时长。按体分：持续到现在的是背景（模型把它标成 elapsed 也算背景，不推进）；
+                // 往后推的才算镜头往前走；两样都不像的待确认。
+                if (ONGOING.test(f.quote)) continue;
+                if (!ADVANCE.test(f.quote)) return pending('时长没写明场景往后推');
                 const amount = f.value * TIME_DAYS[f.unit] / ts.days;
                 if (units != null && units !== amount) return pending('时长证据矛盾');
                 units = amount;
