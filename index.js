@@ -7,7 +7,7 @@ import { removedMembers, speakerOf, fingerprintMessage, buildSequence, batches, 
 import { observeManualLeaveCommand, visibilityTag } from './sync.mjs';
 import { cutByPresence, storyTimeAt } from './presence.mjs';
 import { importLegacyPresence } from './presence-import.mjs';
-import { confirmedSync, presentAvatars, historyAnchors as pickHistoryAnchors, writeManual, verifyManual, muteAlignment, confirmedFloor, confirmFloorCheck, previewRows, confirmPanelModel, confirmLineHtml, writeConfirm, captureConfirm, verifyConfirm, revertConfirm } from './presence-confirm.mjs';
+import { confirmedSync, presentAvatars, historyAnchors as pickHistoryAnchors, writeManual, verifyManual, muteAlignment, groupMuteAlignment, confirmedFloor, confirmFloorCheck, previewRows, confirmPanelModel, confirmLineHtml, writeConfirm, captureConfirm, verifyConfirm, revertConfirm } from './presence-confirm.mjs';
 import { captureManualLeave, captureSegmentOpen, manualLeaveCardMatches, manualLeaveWriter, segmentOpenArrivalFailure, segmentOpenFailure, writeSegmentOpen } from './presence-write.mjs';
 import { undoBoardSegmentEdit, frozenBoardAvatars, readBoardMarks, boardDecision, boardEditFor, boardRecordMatches } from './sync.mjs';
 import { failureView, setStage, stageHtml, cardChoiceHtml } from './lifecycle.mjs';
@@ -1190,7 +1190,7 @@ async function openSetupForm(s) {
 async function applyOpeningAbsent(reply, chatKey, window) {
     const c = ctx(), group = currentGroup(c);
     if (state.chatKey !== chatKey || !localTarget(c, window) || !group || c.chat?.some(m => m.is_user) || !Array.isArray(reply?.openingAbsent)) return;
-    const camera = cameraOf(c)?.avatar, disabled = new Set(group.disabled_members ?? []), added = [];
+    const camera = cameraOf(c)?.avatar, disabled = new Set(group.disabled_members ?? []), added = [], addedAvatars = [];
     const metadata = (c.chatMetadata.rp_emergence ??= {});
     metadata.openingMuted ??= [];
     const handled = new Set(metadata.openingMuted), before = handled.size;
@@ -1201,13 +1201,14 @@ async function applyOpeningAbsent(reply, chatKey, window) {
         if (!card || avatar === camera || card.name === c.name1 || !group.members.includes(avatar) || handled.has(avatar)) continue;
         handled.add(avatar);
         if (disabled.has(avatar)) continue;
-        disabled.add(avatar); added.push(card.name);
+        disabled.add(avatar); added.push(card.name); addedAvatars.push(avatar);
     }
     if (added.length) {
         await changeMembers([...disabled].filter(a => !group.disabled_members?.includes(a)), async () => {
             group.disabled_members = [...disabled];
             await stGroups.editGroup(group.id, true, false);
         });
+        if (typeof markSysMuted === 'function' && currentGroup(ctx()) === group) await markSysMuted(group, addedAvatars.filter(a => group.disabled_members?.includes(a)), true);   // T154h：开局单静音的人归系统
     }
     if (!localTarget(c, window)) return;
     if (handled.size !== before) {
@@ -1969,10 +1970,53 @@ async function alignMutes(c = ctx()) {
     const group = currentGroup(c), chatKey = state.chatKey, epoch = state.epoch, chat = c.chat;
     if (!group || !Array.isArray(group.members) || !Array.isArray(group.disabled_members) || !localTarget(c)) return;
     const preparing = Object.values(c.chatMetadata.rpeExecution ?? {}).filter(e => e?.preparation).map(e => e.avatar);
+    // 归属表：拿不到就是 null＝没有归属证据，不解除任何人（只静音）
+    let sysMuted = null;
+    if (typeof state !== 'undefined' && state.sysMuteTrack && group.id != null) {
+        try { const listed = await api('sys-muted', { groupId: String(group.id) }); if (Array.isArray(listed?.avatars)) sysMuted = listed.avatars; } catch {}
+    }
+    if (state.chatKey !== chatKey || state.epoch !== epoch || ctx().chat !== chat) return;
     const plan = muteAlignment(view.view, { members: group.members, disabled: group.disabled_members, manualMuted: c.chatMetadata.rpeManualMuted ?? {},
-        camera: cameraOf(c)?.avatar ?? null, skip: [...state.entering.keys(), ...preparing] });
+        camera: cameraOf(c)?.avatar ?? null, skip: [...state.entering.keys(), ...preparing], sysMuted });
     const same = () => state.chatKey === chatKey && state.epoch === epoch && ctx().chat === chat && currentGroup(ctx()) === group;
     for (const [list, disabled] of [[plan.mute, true], [plan.unmute, false]]) {
+        for (const avatar of list) {
+            if (!same() || state.entering.has(avatar) || c.chatMetadata.rpeManualMuted?.[avatar]) continue;
+            await setMemberMuted(avatar, disabled);
+        }
+    }
+}
+// T154h（E7）：后台按群记"当前仍归系统负责的静音"（sys_muted:<群>）。写失败只记一笔：没记上就当不归系统，偏保守。
+async function markSysMuted(group, avatars, owned) {
+    const list=[...new Set(avatars)].filter(Boolean);
+    if(!state.sysMuteTrack||group?.id==null||!list.length)return;   // 窗口接入后才记；没接入时一字不动
+    try{await api('sys-muted',{groupId:String(group.id),[owned?'add':'remove']:list},undefined,{background:true});}
+    catch(error){console.warn('[RP：幕后] 静音归属没记上',error?.message);}
+}
+// T154h（E7）：切窗、开新聊天（以及重新接入）同步完以后，让群静音名单对上当前这个窗此刻的场面。
+// 只动：场面说不在、还没静音的 → 静音（并记归属）；群里静音着、又归系统的 → 在场/远程或新聊天时解除。她手动静音的、来历不明的旧静音不碰。
+// 确认楼那一路（alignMutes）生效的窗交给它，这里不重复动。场面或归属表拿不到：不改。
+function confirmAlignActive(c) {
+    if (typeof confirmedView !== 'function' || !c?.chatMetadata) return false;
+    if (!c.chatMetadata.rpeConfirmHint && !(Array.isArray(c.chat) && c.chat.some(m => m?.extra && Object.hasOwn(m.extra, 'rpeConfirm')))) return false;
+    return !!confirmedView(c)?.view && !(typeof oldIsolationActive === 'function' && oldIsolationActive(c));
+}
+// 新聊天的判据：后台说这是这个窗的第一次同步（此前没有已同步序列、不是分支），并且玩家还没说过话。后台没给（旧后台、没带）＝不是新聊天，按场面逐个处理。
+async function alignGroupMutes(c = ctx(), { epoch = state.epoch, chatKey = state.chatKey, firstSync = false } = {}) {
+    if (typeof groupMuteAlignment !== 'function' || !chatKey || !c.chatMetadata || !Array.isArray(c.chat) || confirmAlignActive(c)) return;
+    const group = currentGroup(c);
+    if (!group || !Array.isArray(group.members) || !Array.isArray(group.disabled_members) || !localTarget(c)) return;
+    const same = () => state.chatKey === chatKey && state.epoch === epoch && ctx().chat === c.chat && currentGroup(ctx()) === group;
+    const board = await api('board', { chatKey });
+    if (!same()) return;
+    const listed = await api('sys-muted', { groupId: String(group.id) });
+    if (!same() || !Array.isArray(listed?.avatars)) return;
+    const preparing = Object.values(c.chatMetadata.rpeExecution ?? {}).filter(e => e?.preparation).map(e => e.avatar);
+    const plan = groupMuteAlignment({ people: board?.people, members: group.members, disabled: group.disabled_members, sysMuted: listed.avatars,
+        manualMuted: c.chatMetadata.rpeManualMuted ?? {}, camera: cameraOf(c)?.avatar ?? null, skip: [...state.entering.keys(), ...preparing],
+        fresh: firstSync === true && !c.chat.some(m => m?.is_user), openingMuted: c.chatMetadata.rp_emergence?.openingMuted ?? [] });
+    if (plan.release.length) await markSysMuted(group, plan.release, false);
+    for (const [list, disabled] of [[plan.unmute, false], [plan.mute, true]]) {
         for (const avatar of list) {
             if (!same() || state.entering.has(avatar) || c.chatMetadata.rpeManualMuted?.[avatar]) continue;
             await setMemberMuted(avatar, disabled);
@@ -2256,6 +2300,12 @@ async function syncOnce(force = false, light = false) {
             if (state.pendingSyncEpoch === epoch) state.pendingSyncEpoch = null;
             // 记下后台这次认得的序列：生成前用它判断锚点那条是不是已经同步过（anchorCovered）
             state.synced = { chatKey, epoch, seq: seq.map(s => ({ f: s.f, w: s.w })), hasAnchorProjection: result.hasAnchorProjection };
+            // T154h：换窗、开新聊天后的第一次同步落定，群静音名单对到这个窗此刻的场面（每次接入只做一次）
+            if (typeof alignGroupMutes === 'function' && state.groupAlignEpoch !== epoch) {
+                state.groupAlignEpoch = epoch;
+                await alignGroupMutes(c, { epoch, chatKey, firstSync: result.firstSync === true }).catch(error => console.warn('[RP：幕后] 群静音对齐没做完', error?.message));
+                if (!here()) return false;
+            }
             if (result.added || result.removed || result.edited || result.repaired) changed = true;
             // 删改、换稿后不等下一句排队：沿现有事件账落实 undo，不认新离场、不叫人说话。
             // 撤销开回的区间和取消静音后的名单也同步回后台，之后的场面才是新状态。
@@ -2456,7 +2506,7 @@ async function onChatChanged() {
     clearTimeout(state.relationsTimer);
     state.relationsDraft = null;
     clearPrompts();
-    Object.assign(state, { chatKey: null, storyId: null, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
+    Object.assign(state, { chatKey: null, storyId: null, sysMuteTrack: false, status: null, plan: null, collapsed: null, note: '', door: { items: [], lit: null }, remote: null });
     Object.assign(auto, { blocked:null,executionStatus:null,hideSavedStatus:false,on: null, unavailable: false, turnEnabled: null, buttons: true, jobs: new Map(), driving: new Set(), waiting: null, lastTurn: null, noRepeat: null, pending: new Map(), closed: new Set(), remote: new Map(), automodeTold: null });
     state.memberBase = memberSnapshot();
     watchMembers();   // 首次接入也核对旧的手动静音标记，不把初始名单当成人工操作
@@ -2573,7 +2623,7 @@ async function openCurrent(c, epoch, mark, manual) {
         state.chatKey = result.chatKey;
         state.storyId = result.storyId;
         state.openedWindow = window;
-        state.opened = true; state.openUnknown = false; auto.unavailable = false; state.note = '';
+        state.opened = true; state.openUnknown = false; auto.unavailable = false; state.note = ''; state.sysMuteTrack = true;
         setStage(state, 'open', '成功');
         personaWatch.check();
         scheduleSync(0);
@@ -2656,7 +2706,7 @@ async function join(epoch = state.epoch) {
     state.chatKey = result.chatKey;
     state.storyId = result.storyId;
     state.openedWindow = window;
-    state.opened = true; state.openUnknown = false; auto.unavailable = false;
+    state.opened = true; state.openUnknown = false; auto.unavailable = false; state.sysMuteTrack = true;
     setStage(state, 'open', '成功');
     scheduleSync(0);
     setTimeout(() => { if(epoch===state.epoch)autoPeek().catch(() => {}); }, 2500);   // 自动进离场开没开：开了就把群改成手动策略
@@ -5197,7 +5247,11 @@ async function changeMembers(avatars, apply, beforeSave, still) {
 async function setMemberMuted(avatar, disabled, execute = run, beforeSave, still) {
     const group=currentGroup(ctx()),at=group?.members.indexOf(avatar)??-1;
     if(at<0)return;
-    return changeMembers([avatar],()=>execute(`/member-${disabled?'disable':'enable'} ${at}`),beforeSave,still);
+    const was=!!group.disabled_members?.includes(avatar);   // T154h：改之前群里是不是已经静音
+    const result=await changeMembers([avatar],()=>execute(`/member-${disabled?'disable':'enable'} ${at}`),beforeSave,still);
+    // T154h：只在系统这次真把状态翻转了才记归属（静音）/交还（解除）；本来就是目标状态的不记不还（已是静音不能证明是系统刚静音的）
+    if(typeof markSysMuted==='function'){const now=currentGroup(ctx());if(now&&now.id==group.id&&was!==!!disabled&&!!now.disabled_members?.includes(avatar)===!!disabled&&!(disabled&&ctx().chatMetadata?.rpeManualMuted?.[avatar]))await markSysMuted(group,[avatar],!!disabled);}
+    return result;
 }
 function cardNamed(c, who, avatar = null) {
     const group=currentGroup(c),members=group?.members??[c.characters?.[c.characterId]?.avatar].filter(Boolean);
@@ -5468,6 +5522,8 @@ function watchMembers(beforeSave) {
         if(base.disabled.includes(avatar)===snap.disabled.includes(avatar))continue;
         if(state.entering.has(avatar))continue;
         for(const e of Object.values(c.chatMetadata.rpeExecution??{}))if(e.avatar===avatar&&e.preparation)e.preparation.muteRelinquished=true;
+        // T154h：她手动静音或手动解除（不是系统在改）＝接管，这一声不再归系统
+        if(typeof markSysMuted==='function')void markSysMuted(currentGroup(c),[avatar],false);
     }
     for(const avatar of snap.disabled.filter(a=>!base.disabled.includes(a)&&now.includes(a)&&!state.entering.has(a))){
         manual[avatar]=true;(c.chatMetadata.rpeManualMutedAt??={})[avatar]=(c.chat??[]).length;

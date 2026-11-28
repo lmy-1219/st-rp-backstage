@@ -1,5 +1,5 @@
 import { personWord } from './pronoun.mjs';
-import { setupKeyFor } from './setup-key.mjs';
+import { setupKeyFor, progressKeyFor, correctionCount } from './setup-key.mjs';
 import { MENU_EVIDENCE_PROTOCOL, menuEvidenceVersion, menuBoundaryEvidence, citedMenuProof } from './menu-evidence.mjs';
 // 心里压着的事（用户 10/16，小说转卡那边做开局单时的发现："不止是误会，主要是认知错位和角色性格以及剧情条件的关系，这是剧情节奏和拉扯的来源……
 // 同样的还影响'报喜不报忧'这种事——角色心里有事/遇到了事，什么情况会说，不说的时候是什么表现，说的时候会挑在什么场景/时间"）。
@@ -11,7 +11,8 @@ import { MENU_EVIDENCE_PROTOCOL, menuEvidenceVersion, menuBoundaryEvidence, cite
 export const HOLD_KINDS = ['瞒着', '闷着', '挑时候说', '直说'];
 export const HOLD_KEYS = ['处置', '开口条件', '不说时外显', '说的场合'];
 const str = v => (typeof v === 'string' ? v.trim() : '');
-export const correctionRev = (store, chatKey) => Number((store.getRawMeta ?? store.getMeta)?.call(store, `correction_rev:${store.requireChat(chatKey).story_id}`)) || 0;
+// 纠正版本＝改共用记录/共用设定的次数（按局）＋只改本窗的私有提议的次数（按窗）：别的窗的私有提议不会让这个窗的判断失效
+export const correctionRev = (store, chatKey) => correctionCount(store, store.requireChat(chatKey));
 
 // 身份按原节点、原序号生成；投影过滤不重编。跨规划只认显式沿用。
 export function identifyNode(node, planId) {
@@ -209,7 +210,7 @@ export function heldLine(x) {
 }
 
 export function secretLeaksOf(store, chatKey) {
-    try { const value = JSON.parse(store.getMeta(`secret_leaks:${store.requireChat(chatKey).story_id}`) ?? '[]'); return Array.isArray(value) ? value : []; } catch { return []; }
+    try { const value = JSON.parse(store.getMeta(`secret_leaks:${progressKeyFor(store, chatKey)}`) ?? '[]'); return Array.isArray(value) ? value : []; } catch { return []; }
 }
 export function activeLeaks(store, records, chatKey) {
     const ids = new Set((records?.visible?.(chatKey) ?? []).map(r => r.id));
@@ -238,7 +239,7 @@ export function secretCandidates(store, chatKey, records = null) {
     return rows.map(x => ({ ...x, 不让: x.不让.filter(n => !leaked.some(l => l.事 === x.事 && l.谁知道了 === n)) })).filter(x => x.不让.length);
 }
 export function recordSecretLeaks(store, { chatKey, candidates, leaks, evidence = [], at = null }) {
-    const story = store.requireChat(chatKey).story_id, old = secretLeaksOf(store, chatKey), accepted = [];
+    const progressKey = progressKeyFor(store, chatKey), old = secretLeaksOf(store, chatKey), accepted = [];
     const visibleIds = new Set(evidence.map(r => r.id));
     const current = old.filter(x => Number.isInteger(x.proof) && visibleIds.has(x.proof));
     const roster = store.getCast(setupKeyFor(store, chatKey)), person = value => roster.find(x => x.avatar === value)?.name ?? value;
@@ -252,7 +253,7 @@ export function recordSecretLeaks(store, { chatKey, candidates, leaks, evidence 
         accepted.push({ 事: row.事, 谁知道了: row.谁知道了, 怎么: str(row.怎么).slice(0, 150), 依据: str(row.依据).slice(0, 300), 谁漏的: proof.type === '说' ? person(proof.holder_name ?? proof.holder) : '', source: match.source, proof: proof.id, at });
     }
     if (!accepted.length) return [];
-    store.setMeta(`secret_leaks:${story}`, JSON.stringify(old.concat(accepted)));
+    store.setMeta(`secret_leaks:${progressKey}`, JSON.stringify(old.concat(accepted)));
     store.setMeta(`secret_notice:${chatKey}`, JSON.stringify({ id: `secret:${old.length + accepted.length}`, text: '有件瞒着的事被人知道了，下一份规划会接上。' }));
     return accepted;
 }

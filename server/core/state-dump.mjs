@@ -13,9 +13,10 @@ import { DROP_FIELDS, TABLES, META } from './state-registry.mjs';
 import { setupKeyFor } from './setup-key.mjs';
 
 const CHAT = '<chat>', STORY = '<story>';
-// 跟着设定归属键存的 meta（其余 story 域的 meta 是 g2 的剧情进度，仍按 story_id）
+// 跟着设定归属键存的 meta；剧情进度那批（g2）跟着进度归属键；其余 story 域的（correction_rev、vis_protocol）仍按 story_id
 const SETUP_TABLES = new Set(['cast', 'relations', 'setups', 'lore', 'card_groups']);
 const SETUP_META = new Set(['plan_persona', 'lore_tries', 'lore_ver', 'roster_listed', 'opening_seeded', 'cast_promotion_dismissed', 'pack', 'prompt_pack', 'relations_draft']);
+const PROGRESS_META = new Set(['absence_mode', 'absence_resumed_at', 'absence_mode_log', 'long_events', 'long_rolled', 'long_told', 'told', 'story_sofar', 'state_read', 'world_used', 'secret_leaks']);
 const json = v => { if (v == null) return null; if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return v; } };
 
 function canon(value, drop) {
@@ -33,6 +34,7 @@ export function dumpWindow(store, chatKey, { records = null, situation = null } 
     const chat = store.requireChat(chatKey), storyId = chat.story_id;
     // T154g1：开局设定那批（名册、关系表、开局单、世界书、card_groups、规划人设、包设置……）按设定归属键读：新局＝story_id，分开存的新分支＝自己的 chatKey
     const setupKey = setupKeyFor(store, chatKey);
+    const progressKey = store.progressKeyOf ? store.progressKeyOf(chatKey) : storyId;   // T154g2：剧情进度按窗（新局和旧窗＝story_id）
     const hasTable = name => !!db.prepare("select 1 from sqlite_master where type = 'table' and name = ?").get(name);
     // records 由调用方传入（openRecords 开库时会跑一次迁移写库，倒出来不自己开）；situationReader 只读
     const rec = records;
@@ -88,7 +90,7 @@ export function dumpWindow(store, chatKey, { records = null, situation = null } 
         'table:snapshots': () => all('select pos, fp, data from snapshots where chat_key = ? order by pos', chatKey),
         'table:notes': () => store.notesOf(chatKey),
         'table:contact_offers': () => store.contactOffers(chatKey),
-        'table:handoffs': () => store.pendingHandoffs().filter(x => x.chat_key == null || h.keys.includes(x.chat_key)).map(x => ({ kind: x.kind, key: x.key, global: x.chat_key == null, status: x.status })),
+        'table:handoffs': () => store.pendingHandoffs().filter(x => x.chat_key == null || x.chat_key === chatKey).map(x => ({ kind: x.kind, key: x.key, global: x.chat_key == null, status: x.status })),
         'table:plan_attempts': () => all('select count(*) n from plan_attempts where chat_key = ?', chatKey)[0]?.n ?? 0,
         'table:events': () => all('select kind from events where chat_key = ? order by id', chatKey).map(e => e.kind),
         'table:extract_jobs': () => all('select count(*) n from extract_jobs where chat_key = ?', chatKey)[0]?.n ?? 0,
@@ -127,7 +129,7 @@ export function dumpWindow(store, chatKey, { records = null, situation = null } 
             const v = store.getMeta(entry.prefix);
             return v == null ? out : { '-': json(v) };
         }
-        const base = entry.scope === 'story' ? (SETUP_META.has(entry.prefix) ? setupKey : storyId) : chatKey;
+        const base = entry.scope === 'story' ? (SETUP_META.has(entry.prefix) ? setupKey : PROGRESS_META.has(entry.prefix) ? progressKey : storyId) : chatKey;
         if (entry.prefix === 'arrivals') {   // 进场记账是"顺着父窗读"的：sourceProjection 读同局各窗，只到分叉点
             const list = [];
             for (const origin of h.keys) {
@@ -172,7 +174,8 @@ export function dumpWindow(store, chatKey, { records = null, situation = null } 
         // 这批类（设定归属键下的表和 meta）：设定归属键（story_id 或分开存的新分支自己的 chatKey）统一成占位，两个窗才能直接比；别的类照旧
         const setupClass = entry.kind === 'table' ? SETUP_TABLES.has(entry.table) : SETUP_META.has(entry.prefix);
         const raw = JSON.stringify(value ?? null);
-        const text = (setupClass ? raw.replaceAll(setupKey, STORY) : raw).replaceAll(chatKey, CHAT).replaceAll(storyId, STORY);
+        const progressClass = entry.kind === 'meta' && PROGRESS_META.has(entry.prefix);
+        const text = (setupClass ? raw.replaceAll(setupKey, STORY) : progressClass ? raw.replaceAll(progressKey, STORY) : raw).replaceAll(chatKey, CHAT).replaceAll(storyId, STORY);
         return canon(JSON.parse(text), drop);
     };
     for (const entry of TABLES) {

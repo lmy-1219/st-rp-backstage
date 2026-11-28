@@ -11,7 +11,7 @@ import { foldState } from './state.mjs';
 import { sameIdentity, resolveIdentity } from './cast.mjs';
 import { knockState } from './knock.mjs';
 import { assertKnockReader } from './store.mjs';
-import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
+import { setupKeyFor, setupKeyOfChat, correctionTag } from './setup-key.mjs';
 
 const CAMERA_NAME = '旁白';   // 镜头那张卡的名字（slot.mjs 也是这个）
 const MOVE_WORDS = '走进|走到|进了|进入|来到|到了|回到|下楼到|下楼找到|上楼到|推门进|拐进|踏进|钻进|跟着[^，。；！？,;!?]{0,12}进了';
@@ -388,7 +388,7 @@ function cacheVersion(store, chat, chatKey, present, recentUser, marks) {
         departures: store.getMeta?.(`auto_leave_events:${chatKey}`) ?? '',
         ...(store.getMeta?.(`confirm_floor:${chatKey}`) == null ? {} : { confirmFloor: store.getMeta(`confirm_floor:${chatKey}`) }),
         plans,
-        correctionRev: store.getMeta?.(`correction_rev:${chat.story_id}`) ?? '',
+        correctionRev: typeof correctionTag === 'function' ? correctionTag(store, chat) : (store.getMeta?.(`correction_rev:${chat.story_id}`) ?? ''),
         identityChoices: store.getMeta?.(`card_choices:${chatKey}`) ?? '',
         contacts: store.getMeta?.(`contact_verdict_revision:${chatKey}`) ?? '',
         setup: store.setupOf?.(setupKeyOfChat(store, chat))?.id ?? null,
@@ -476,9 +476,10 @@ export function boardFor(store, records, chatKey, { anchor = null, present = nul
 }
 
 // 来源版本只覆盖判断实际读过的前缀；后来的新段不会使较早的事件失效。
+// 纠正版本的标记＝按局那份＋（本窗有私有提议时）本窗那份；没有时和以前逐值相同，已存的判断不会因升级失效。内联写，按函数名拆源码的测试夹具取不到外面的常量\r
 export function sourceVersion(store, chatKey, through = null) {
     const chat = store.requireChat(chatKey);
-    return versionOf({messages:store.currentMessages(chatKey),roster:store.getCast?.(setupKeyOfChat(store, chat))??[],correctionRev:store.getMeta?.(`correction_rev:${chat.story_id}`)??'',identityChoices:store.getMeta?.(`card_choices:${chatKey}`)??''},through);
+    return versionOf({messages:store.currentMessages(chatKey),roster:store.getCast?.(setupKeyOfChat(store, chat))??[],correctionRev:typeof correctionTag==='function'?correctionTag(store,chat):(store.getMeta?.(`correction_rev:${chat.story_id}`)??''),identityChoices:store.getMeta?.(`card_choices:${chatKey}`)??''},through);
 }
 function versionOf({messages,roster,correctionRev,identityChoices},through) {
     const rows=messages.filter(m=>through==null||m.pos<=through);

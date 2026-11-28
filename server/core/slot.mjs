@@ -73,7 +73,7 @@ import { pocketGate, ttlOf, triggerTimeReady, afterBlocked, planSystem, withInti
 import { paceCap } from './tempo.mjs';
 import { withTaste } from './taste.mjs';
 import { datedEvent } from './eventlead.mjs';
-import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
+import { setupKeyFor, setupKeyOfChat, progressKeyFor, progressKeyOfChat } from './setup-key.mjs';
 // 测试里按函数名拆 core 源码运行的宿主，依赖表是把 slot.mjs 的导出整个展开；这两个跟着导出，宿主才拿得到（T154g1）
 export { setupKeyFor, setupKeyOfChat };
 
@@ -1162,7 +1162,7 @@ export function absencePaused(store) { return store.getMeta?.('absence_paused') 
 // 这一局在面板上选过就按它；没选跟着配置的 absence.mode（默认照现实过）。
 export function absenceModeOf(store, chatKey, absence) {
     const storyId = store.requireChat?.(chatKey)?.story_id;
-    const own = storyId ? store.getMeta?.(`absence_mode:${storyId}`) : null;
+    const own = storyId ? store.getMeta?.(`absence_mode:${progressKeyFor(store, chatKey)}`) : null;
     return own === 'pause' || own === 'real' ? own : absence?.mode === 'pause' ? 'pause' : 'real';
 }
 const awayOff = (store, chatKey, absence) => absenceModeOf(store, chatKey, absence) === 'pause' || absencePaused(store);
@@ -1171,11 +1171,11 @@ export function noteAbsence(store, chatKey, absence) {
         // 复用暂停计时的基点：恢复完整后不补算只记忆期间的离开。
         // 键是 absence_resumed_at:<局>（记忆模式的基点）；全局键 absence_resumed_at（无后缀）是"暂停离开计时"的基点，
         // 由 server.mjs 的暂停开关读写、下面第 832 行读取，两者各管各的，不是同一件事。
-        store.setMeta?.('absence_resumed_at:' + store.requireChat(chatKey).story_id, String(Date.now()));
+        store.setMeta?.('absence_resumed_at:' + progressKeyFor(store, chatKey), String(Date.now()));
         return null;
     }
     if (!store.putAbsence || absence?.record === false || awayOff(store, chatKey, absence)) return null;
-    const memoryKey='absence_resumed_at:' + store.requireChat(chatKey).story_id;
+    const memoryKey='absence_resumed_at:' + progressKeyFor(store, chatKey);
     const wasMemory=store.getMeta?.(memoryKey)!=null;
     if(wasMemory) { store.setMeta?.(memoryKey,null); store.setMeta?.('act:'+chatKey,JSON.stringify({last:Date.now()})); store.setMeta?.('gap:'+chatKey,null); return null; }
     const resumed = Number(store.getMeta?.('absence_resumed_at'));
@@ -1468,12 +1468,12 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
     // 走完了给一次"过去了"。给过的记在 long_told 里，挂在当时最后那条消息上：那条删了就当没给过，同一条上重来（重新生成）照样再给。
     if (drift?.long !== false) {
         let events = [];
-        try { events = JSON.parse(store.getMeta?.(`long_events:${storyId}`) ?? '[]'); } catch {}
+        try { events = JSON.parse(store.getMeta?.(`long_events:${progressKeyFor(store, chatKey)}`) ?? '[]'); } catch {}
         if (events.length) {
             const who = camera ? '(旁白)' : name;
             const fpAt = new Map(messages.map(m => [m.pos, m.fp]));
             let told = [];
-            try { told = JSON.parse(store.getMeta?.(`long_told:${storyId}`) ?? '[]'); } catch {}
+            try { told = JSON.parse(store.getMeta?.(`long_told:${progressKeyFor(store, chatKey)}`) ?? '[]'); } catch {}
             const rawTold = told;
             told = liveLongTold(told, fpAt, (pos, day) => store.basisLive?.(chatKey, pos, day) !== false);
             const earlier = told.filter(t => t.who === who && t.pos < lastPos);
@@ -1483,7 +1483,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             add(2, give.lines, 'world', 'scene');
             const at = messages.at(-1);
             const fresh = give.told.filter(g => !told.some(t => t.who === who && t.pos === lastPos && t.kind === g.kind && t.k === g.k));
-            if (planner?.record !== false && at && fresh.length) store.setMeta?.(`long_told:${storyId}`, JSON.stringify([...rawTold, ...fresh.map(g => ({ ...g, who, day: today, basisDay: today, pos: at.pos, fp: at.fp }))].slice(-300)));
+            if (planner?.record !== false && at && fresh.length) store.setMeta?.(`long_told:${progressKeyFor(store, chatKey)}`, JSON.stringify([...rawTold, ...fresh.map(g => ({ ...g, who, day: today, basisDay: today, pos: at.pos, fp: at.fp }))].slice(-300)));
         }
     }
     // 别人讲到一半停下的（N-124）：他在场听了一半，过后还惦记着——有空当可以追问，讲完了（记账"了结"）就不再给。
@@ -1611,7 +1611,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         // 说她伤病的那一截切掉（bodyGuardFor：她这阵子没提身子时，"以为她伤得重、药还没送来"不跟着回来那一段一起给）
         add(0, [...guard.away(returnLines({ name, userName: userName ?? '对方', absence: fresh, open: material.open, attempts, first, level: away.length ? null : closenessOf(name).level, reasoned: away.length > 0, opening })), ...guard.away(away, fresh.id)]);
         // 推演还没回来就先不记"给过了"：左滑重来或下一轮还会带上这段，那时推好的就能用上。
-        if (absence?.record !== false && !pendingAway) store.markAbsenceSeen(due.id, speaker);
+        if (absence?.record !== false && !pendingAway) store.markAbsenceSeen(due.id, speaker, chatKey);
         const carry = [...(away.length ? awayCarry(fresh.story, { name, userName: userName ?? '对方', same, id: fresh.id, days: fresh.days })
             : returnCarry({ name, userName: userName ?? '对方', absence: fresh, level: closenessOf(name).level })),
             ...(opening ? phoneCarry({ userName: userName ?? '对方', absence: fresh, attempts }) : [])];
@@ -1689,8 +1689,8 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
                 // 交出去的往事算讲过了：同一件一局只讲一回（D-112）
                 if (imp.kind === '冒一句' && imp.tale?.text) {
                     let told = [];
-                    try { told = JSON.parse(store.getMeta(`told:${storyId}`) ?? '[]'); } catch {}
-                    store.setMeta(`told:${storyId}`, JSON.stringify([...told, { who: imp.who, n: imp.tale.n, text: imp.tale.text, at: lastPos, fp: messages.at(-1)?.fp }].slice(-80)));
+                    try { told = JSON.parse(store.getMeta(`told:${progressKeyFor(store, chatKey)}`) ?? '[]'); } catch {}
+                    store.setMeta(`told:${progressKeyFor(store, chatKey)}`, JSON.stringify([...told, { who: imp.who, n: imp.tale.n, text: imp.tale.text, at: lastPos, fp: messages.at(-1)?.fp }].slice(-80)));
                 }
             };
             add(own ? 1 : 2, guard.lines(impulseLines(imp, { userName: userName ?? '玩家', knownWhy: !camera && sameName(imp.who, name, rosterNames) ? imp.knownWhy : '' })), 'now', own ? 'person' : 'scene',
@@ -1905,7 +1905,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
         try { worldDay = JSON.parse(store.getMeta(dayKey)); } catch {}
         if (!worldDay?.timeBasis || !timeBasisLive(store, records, chatKey, worldDay.timeBasis) || worldDay.day !== today) {
             // 用过的世界种子记成 { i, pos, fp }，挂在写它的那条消息上：那条还在本窗口才算用过（分叉前共有所以继承、分叉后各算各的、删回去也撤得掉）。旧格式纯数字照旧算用过。
-            const raw = JSON.parse(store.getMeta(`world_used:${storyId}`) ?? '[]');
+            const raw = JSON.parse(store.getMeta(`world_used:${progressKeyFor(store, chatKey)}`) ?? '[]');
             const same = (a, b) => !!store.sameMessage?.(a, b);
             const used = raw.filter(u => Number.isInteger(u) ? true : u && stillThere({ pos: u.pos, fp: u.fp }, messages, same)).map(u => Number.isInteger(u) ? u : u.i);
             const current = dateIn(setup?.时间, today, { calendar: true })?.d;
@@ -1914,7 +1914,7 @@ function extrasFor(store, records, { chatKey, speaker, speakerName, anchor = nul
             const seed = pickSeed(world.seeds, { key: `${storyId}:${today}`, used, now, elapsed: { today, timeScale: ts } });
             if (world.record !== false) {
                 store.setMeta(dayKey, JSON.stringify({ day: today, timeBasis: timeBasisFor(store, records, chatKey) }));
-                if (seed) store.setMeta(`world_used:${storyId}`, JSON.stringify([...raw, { i: seed.i, pos: lastPos, fp: messages.at(-1)?.fp }]));
+                if (seed) store.setMeta(`world_used:${progressKeyFor(store, chatKey)}`, JSON.stringify([...raw, { i: seed.i, pos: lastPos, fp: messages.at(-1)?.fp }]));
             }
             if (seed) add(3, seedLines(seed, { year, start: setup?.时间 }), 'world', 'scene');
         }
@@ -3614,7 +3614,7 @@ export function planBrief(store, records, chatKey, { present = null, reason = nu
         // 势力账（Q-8）：各方之间、人的明面／实际归属、约定，全给并写明谁知道实情；外加素材包势力网里沾边的原作底子。
         factions: [...factionBrief(factionLedger(s.visible, { resolve: nameResolver(factionNet), dayOf: s.dayOf }), { net: factionNet, today: s.today, relDay: d => relativeDay(d, s.ts) }),
             ...(sit ? situationBrief(situationNow(sit, { proofLive: proof => timeBasisLive(store, records, chatKey, proof), storyId: s.chat.story_id, messages: s.messages, visibleIds: new Set(s.visible.map(r => r.id)), dayOf: s.dayOf, live: moveLiveCtx(store, chatKey, { records: s.visible, principal: s.userName }) }), { today: s.today, relDay: d => relativeDay(d, s.ts), timeScale: s.ts }) : []),
-            ...(() => { try { return activeLong(JSON.parse(store.getMeta?.(`long_events:${s.chat.story_id}`) ?? '[]'), s.today, { lastPos: s.messages.at(-1)?.pos ?? null }); } catch { return []; } })()
+            ...(() => { try { return activeLong(JSON.parse(store.getMeta?.(`long_events:${progressKeyOfChat(store, s.chat)}`) ?? '[]'), s.today, { lastPos: s.messages.at(-1)?.pos ?? null }); } catch { return []; } })()
                 .map(e => `持续的事（${relativeDay(s.today - e.起, s.ts)}起，约 ${s.ts.span(e.天数)}；${e.谁会知道.length ? `${e.谁会知道.join('、')}知道` : '所有人都听说了'}）：${e.名}——${e.一句话}；眼下${e.阶段[e.第几阶段]}${e.阶段.length > e.第几阶段 + 1 ? `；之后：${e.阶段.slice(e.第几阶段 + 1).join(' → ')}` : ''}`)],
         currentRelations: rel ? current : null,
         prices: planPriceLines(prices),
@@ -3634,7 +3634,7 @@ export const pastNodesOf = (store, chatKey) => (store.readyPlans?.(chatKey) ?? [
 export const RECENT_NODES = 5;   // 之前的节点压过时，最近几个一行
 export const ACTIVE_MESSAGES = 300;   // 名册、关系表压过时：最近多少条消息里露过面、被提到的算活着（条数，不分时间尺度）
 // "开局到现在"的大意（main 里便宜那档续写，存 story_sofar:<局>）：{ ids: [盖到的节点编号，从早到晚], text }
-export const sofarOf = (store, storyId) => { try { const v = JSON.parse(store.getMeta?.(`story_sofar:${storyId}`) ?? 'null'); return v?.text && Array.isArray(v.ids) ? v : null; } catch { return null; } };
+export const sofarOf = (store, progressKey) => { try { const v = JSON.parse(store.getMeta?.(`story_sofar:${progressKey}`) ?? 'null'); return v?.text && Array.isArray(v.ids) ? v : null; } catch { return null; } };
 
 // 规划简报超了预算（章程 H4，用户 10/11）：按"远的先压"收。压的先后、各块配额见 planner.BRIEF_SHARES 那段注释。
 // 没超：原样返回（和以前一字不差）。压过、或者压不下去的块超了：meta brief_cut:<窗口> 记一句，面板顶上提示一回（notice:<窗口>）。
@@ -3664,7 +3664,7 @@ function squeezeBrief(store, chatKey, s, base, { budget, last, lastNode, menu })
     const storyView = R => { const L = storyLayers(s.visible, { dayOf: s.dayOf, today: s.today, when: d => relativeDay(d, s.ts), recent: R, nodeStart, episodes }); return { story: L.days, storyCut: 0, lasting: L.lasting, storyLayer: layerNote(R, s.ts, { node: nodeStart > -Infinity }) }; };
     // 之前的节点：最近 RECENT_NODES 个一行，更早的用写好的大意（盖到的节点对得上才用；没写成就照旧一行一个）
     const earlier = base.pastNodes.slice(0, -RECENT_NODES);
-    const sofar = sofarOf(store, s.chat.story_id);
+    const sofar = sofarOf(store, progressKeyOfChat(store, s.chat));
     const sofarOk = !!sofar && earlier.length > 0 && sofar.ids.length <= earlier.length && sofar.ids.every((id, i) => earlier[i].id === id);
     const pastView = sofarOk ? { pastSofar: { text: sofar.text, count: sofar.ids.length }, pastNodes: base.pastNodes.slice(sofar.ids.length) } : {};
     const half = p => { const t = String(p); const cut = t.lastIndexOf('\n', Math.ceil(t.length / 2)); return `${t.slice(0, cut > 0 ? cut : Math.ceil(t.length / 2))}\n（太长，后半截略去了）`; };
@@ -3828,10 +3828,10 @@ export function driveMaterial(store, records, chatKey, { seeds = [], prices = nu
     const linksOf = r => [r?.matter?.menu != null ? `menu:${r.matter.menu}` : null].filter(Boolean);
     const owner = r => [r.holder_name ?? s.roster.find(p => p.avatar === r.holder)?.name].filter(Boolean);
     const live = s.visible.filter(r => !r.superseded_by && !r.closed_by);
-    const selected = meta(`world_used:${s.chat.story_id}`, []).filter(r => typeof r === 'object' && s.messages.some(m => m.pos === r.pos && m.fp === r.fp) && s.dayOf(r.pos) === s.today).at(-1);
+    const selected = meta(`world_used:${progressKeyOfChat(store, s.chat)}`, []).filter(r => typeof r === 'object' && s.messages.some(m => m.pos === r.pos && m.fp === r.fp) && s.dayOf(r.pos) === s.today).at(-1);
     const seed = selected && seeds?.find(e => e.i === selected.i);
     if (seed) add('环境', `seed:${seed.i}`, [], seed.text, { kind: '底色', pos: selected.pos });
-    for (const e of activeLong(meta(`long_events:${s.chat.story_id}`, []), s.today, { lastPos: s.lastPos }))
+    for (const e of activeLong(meta(`long_events:${progressKeyOfChat(store, s.chat)}`, []), s.today, { lastPos: s.lastPos }))
         add('环境', `long:${e.起}:${e.名}`, e.谁会知道, `${e.名}：${e.一句话}；眼下${e.阶段[e.第几阶段]}`, { pos: e.起_pos });
     if (prices?.items?.length) driftItems(prices.items, { seed: s.chat.story_id, day: s.today, timeScale: s.ts }).forEach((e, i) => {
         if (e !== prices.items[i]) add('环境', `price:${e.name}`, [], `${e.name}：${e.note}`, { kind: '底色', pos: s.lastPos });
@@ -3914,7 +3914,7 @@ export function sceneMaterial(store, records, chatKey, sources = {}) {
     try { recent = JSON.parse(store.getMeta?.(`impulses:${chatKey}`) ?? '[]'); } catch {}
     // 删回去以后，被删那段里冒过的兴头不算"刚冒过"（不然位置比眼下还靠后，隔多久都算没隔够，就地的一个也出不来）
     recent = recent.filter(x => stillThere(x.at, s.messages, (a, b) => !!store.sameMessage?.(a, b)));
-    try { told = JSON.parse(store.getMeta?.(`told:${s.chat.story_id}`) ?? '[]'); } catch {}
+    try { told = JSON.parse(store.getMeta?.(`told:${progressKeyOfChat(store, s.chat)}`) ?? '[]'); } catch {}
     // 讲过的往事挂在写它的那条消息上：那条还在本窗口才算讲过（分叉前共有的 fp 相同所以继承，分叉后各自不同所以不串，删回去也撤得掉）。旧数据只有 at 没有 fp，stillThere 按位置算。
     told = told.filter(t => t && stillThere({ pos: t.at, fp: t.fp }, s.messages, (a, b) => !!store.sameMessage?.(a, b)));
     const { plan, node: originalNode } = latestNode(store, chatKey);

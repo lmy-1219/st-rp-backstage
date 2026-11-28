@@ -76,7 +76,7 @@ import { relativeDay } from './recall.mjs';
 import { createModelClient, modelTally } from './model.mjs';
 import { createServer, VERSION } from './server.mjs';
 import { wantedProxy, proxyActive, proxyEnv } from './proxy.mjs';
-import { setupKeyFor, setupKeyOfChat } from './setup-key.mjs';
+import { setupKeyFor, setupKeyOfChat, progressKeyOfChat } from './setup-key.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = name => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
@@ -715,7 +715,7 @@ function prepareState({ chatKey }) {
     const chat = store.requireChat(chatKey);
     if (!chat.enabled) return null;
     const msgs = store.currentMessages(chatKey).filter(m => !m.hidden);
-    const readKey = `state_read:${chat.story_id}`;
+    const readKey = `state_read:${progressKeyOfChat(store, chat)}`;
     let read = [];
     try { read = JSON.parse(store.getMeta(readKey) ?? '[]'); } catch {}
     const seen = new Set(read);
@@ -1481,17 +1481,17 @@ async function runLong({ chatKey }) {
     if (!chat.enabled || longBusy.has(chat.story_id)) return;
     // 10/10 以前起的事没记起时的消息位置：补成那一天头一条消息的位置，阶段才能按消息数也往前走（drift.longStage）
     try {
-        const events = JSON.parse(store.getMeta(`long_events:${chat.story_id}`) ?? 'null');
+        const events = JSON.parse(store.getMeta(`long_events:${progressKeyOfChat(store, chat)}`) ?? 'null');
         if (Array.isArray(events) && events.some(e => e && !Number.isFinite(e.起_pos))) {
             const msgs = store.currentMessages(chatKey), tl = timelineFor(store, records, chatKey, msgs);
             const fixed = events.map(e => { if (!e || Number.isFinite(e.起_pos)) return e; const first = msgs.find(m => tl.dayOf(m.pos) >= e.起) ?? msgs[0]; return first ? { ...e, 起_pos: first.pos } : e; });
-            store.setMeta(`long_events:${chat.story_id}`, JSON.stringify(fixed));
+            store.setMeta(`long_events:${progressKeyOfChat(store, chat)}`, JSON.stringify(fixed));
         }
     } catch {}
     if (cfg.drift?.long === false || !s?.baseUrl || !s.apiKey || !s.model) return;
     const ctxNow = storyContext(store, records, chatKey);
     const ts = ctxNow.ts, week = weekOf(ctxNow.today, ts), nowPos = store.currentMessages(chatKey).at(-1)?.pos ?? null;
-    const meta = k => { try { return JSON.parse(store.getMeta(`${k}:${chat.story_id}`) ?? 'null'); } catch { return null; } };
+    const meta = k => { try { return JSON.parse(store.getMeta(`${k}:${progressKeyOfChat(store, chat)}`) ?? 'null'); } catch { return null; } };
     const rolled = meta('long_rolled') ?? {};
     const todo = Array.from({ length: week + 1 }, (_, w) => w).filter(w => !(rolled[w] >= 1 || rolled[w] <= -3));
     if (!todo.length || records.spentToday() >= cfg.extractor.dailyBudgetUsd) return;
@@ -1510,7 +1510,7 @@ async function runLong({ chatKey }) {
                 const costUsd = ((r.usage?.input ?? 0) * s.priceInPerM + (r.usage?.output ?? 0) * s.priceOutPerM) / 1e6;
                 records.logAssemble({ chatKey, speaker: '(持续的事)', model: s.model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
                 const e = parseLong(r.text, roll, w === week ? ctxNow.today : w * ts.perWeek, w === week ? nowPos : null);   // 这一周的从今天起；补掷以前的周从那周开头起
-                if (e) { store.setMeta(`long_events:${chat.story_id}`, JSON.stringify([...events, e])); log(`long event ${chat.story_id} week ${w}: ${e.名}（${ts.span(e.天数)}）$${costUsd.toFixed(4)}`); }
+                if (e) { store.setMeta(`long_events:${progressKeyOfChat(store, chat)}`, JSON.stringify([...events, e])); log(`long event ${chat.story_id} week ${w}: ${e.名}（${ts.span(e.天数)}）$${costUsd.toFixed(4)}`); }
                 rolled[w] = 1;
             } catch (error) {
                 records.logAssemble({ chatKey, speaker: '(持续的事)', model: s.model, status: 'failed', ms: Date.now() - started, error: error.message });
@@ -1519,7 +1519,7 @@ async function runLong({ chatKey }) {
             }
         }
     } finally {
-        store.setMeta(`long_rolled:${chat.story_id}`, JSON.stringify(rolled));
+        store.setMeta(`long_rolled:${progressKeyOfChat(store, chat)}`, JSON.stringify(rolled));
         longBusy.delete(chat.story_id);
     }
 }
@@ -1712,13 +1712,9 @@ function reviseAway({ chatKey, absenceId }) {
             try { parsed = pinNames(parseAway(r.text), [...material.cast.map(e => e.name), ...material.names]); } catch (error) { if (actual !== 0) throw error; }
             const story = { ...(parsed ?? { 空白: '玩家说没有空白，接着刚才那一刻', 各人: [], 别人: [] }), 已按玩家改: true, 原来的空白: a.story.空白, 改自: a.id, ...(actual === 0 ? { 没有空白: true } : {}) };
             // 这条离开是从上一个窗口带过来的（分支）：改的只算这个窗口，另存一份，别动别的分支的
-            let id = absenceId;
-            if (a.chat_key !== chatKey) {
-                id = store.putAbsence({ chatKey, fromFp: a.from_fp, toFp: a.to_fp, startedAt: a.started_at, endedAt: a.ended_at, hours: a.hours, days: a.days }).id;
-                for (const sp of a.seen ?? []) store.markAbsenceSeen(id, sp);
-            }
-            store.setAbsenceStory(id, 'ready', story);
-            if (actual != null && actual !== a.days) store.setAbsenceDays(id, actual);
+            // T154i：写本窗覆盖（继承来的行不动，也不再另存一份行）
+            store.setAbsenceStory(absenceId, 'ready', story, chatKey);
+            if (actual != null && actual !== a.days) store.setAbsenceDays(absenceId, actual, chatKey);
             log(`away ${absenceId} revised after the player spoke`);
             return story;
         } catch (error) {
@@ -1741,8 +1737,8 @@ function thinkAway({ chatKey, absenceId }) {
         const cfg = getConfig(), e = cfg.extractor, a0 = cfg.stages.away;   // 离开推演那一环节（D-106）
         const model = a0.model;
         const prices = [a0.priceInPerM, a0.priceOutPerM];
-        if (!a0.baseUrl || !a0.apiKey || !model || records.spentToday() >= e.dailyBudgetUsd) { store.setAbsenceStory(absenceId, 'failed'); return null; }
-        store.setAbsenceStory(absenceId, 'working');
+        if (!a0.baseUrl || !a0.apiKey || !model || records.spentToday() >= e.dailyBudgetUsd) { store.setAbsenceStory(absenceId, 'failed', null, chatKey); return null; }
+        store.setAbsenceStory(absenceId, 'working', null, chatKey);
         const started = Date.now();
         try {
             const material = awayMaterial(store, records, chatKey, a);
@@ -1750,13 +1746,13 @@ function thinkAway({ chatKey, absenceId }) {
             const costUsd = ((r.usage?.input ?? 0) * prices[0] + (r.usage?.output ?? 0) * prices[1]) / 1e6;
             records.logAssemble({ chatKey, speaker: '(离开推演)', model, servedModel: r.servedModel, status: 'done', usage: r.usage, costUsd, ms: Date.now() - started, raw: r.text });
             const story = pinNames(parseAway(r.text), [...material.cast.map(e => e.name), ...material.names]);
-            store.setAbsenceStory(absenceId, 'ready', story);
+            store.setAbsenceStory(absenceId, 'ready', story, chatKey);
             log(`away ${absenceId} (${a.days} days) reasoned: ${story.各人.map(x => x.谁).join('、')}`);
             return story;
         } catch (error) {
             records.logAssemble({ chatKey, speaker: '(离开推演)', model, status: 'failed', ms: Date.now() - started, error: error.message });
             log(`away ${absenceId} failed: ${error.message}`);
-            store.setAbsenceStory(absenceId, 'failed');
+            store.setAbsenceStory(absenceId, 'failed', null, chatKey);
             return null;
         }
     })().finally(() => thinking.delete(absenceId));
@@ -1871,7 +1867,7 @@ async function extendSofar(chatKey) {
     if (!p.judge || !a.baseUrl || !a.apiKey || !p.judgeModel) return;
     const chat = store.requireChat(chatKey);
     const earlier = pastNodesOf(store, chatKey).slice(0, -RECENT_NODES);
-    let cur = sofarOf(store, chat.story_id) ?? { ids: [], text: '' };
+    let cur = sofarOf(store, progressKeyOfChat(store, chat)) ?? { ids: [], text: '' };
     if (cur.ids.length > earlier.length || cur.ids.some((id, i) => earlier[i].id !== id)) cur = { ids: [], text: '' };
     for (const node of earlier.slice(cur.ids.length, cur.ids.length + 10)) {
         if (records.spentToday() >= cfg.extractor.dailyBudgetUsd) return;
@@ -1883,7 +1879,7 @@ async function extendSofar(chatKey) {
             const text = parseSofar(r.text);
             if (!text) return;
             cur = { ids: [...cur.ids, node.id], text };
-            store.setMeta(`story_sofar:${chat.story_id}`, JSON.stringify(cur));
+            store.setMeta(`story_sofar:${progressKeyOfChat(store, chat)}`, JSON.stringify(cur));
         } catch (error) {
             records.logAssemble({ chatKey, speaker: '(前情大意)', model: p.judgeModel, status: 'failed', ms: Date.now() - started, error: error.message });
             throw error;

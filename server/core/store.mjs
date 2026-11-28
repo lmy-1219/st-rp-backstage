@@ -10,6 +10,7 @@ import { currentMenuRecords, menuRecordVersion, shownMenuProofLive } from './men
 import { decideRecordKnowledge, recordAudienceFor, legacyMenuCopies } from './records.mjs';
 import { visibilityTag, visOf, visibleTo, wayOf } from './visibility.mjs';
 import { measure } from './request-timing.mjs';
+import { weekOf } from './drift.mjs';
 
 // 按函数对象登记，不导出；只有正式绑定和统一派生 API 能创建合法的来源读口。
 const KNOCK_READERS = new WeakSet();
@@ -489,6 +490,79 @@ export function openStore(file) {
         setMeta(`setup_split:${to}`, '1');
     }
 
+    // ---------- T154g2：剧情进度按窗存（D-405：玩家在切点之后才触发的进度不出现在子窗，子窗自己玩出的也不改父窗）----------
+    // 没有 progress_split 标记的窗（新局、这一版以前开出来的旧窗，含 g1 时开出来的分支）：键＝story_id，父子共用一份，行为不变。
+    // 这一版以后开出来的新分支：键＝子窗自己的 chatKey；开分支时整份带过去，第一次量出切点（branchLen）时按楼号/指纹截一次，认不出位置的不带。
+    // absence_resumed_at 是毫秒时间戳基点（游标），按窗存但不复制，子窗自己重算。
+    // 不按窗的：correction_rev（共用记录被纠正的版本号，只用来让缓存失效）、vis_protocol（同局消息格式标记，同步时重推）——都不是"这个窗知道的东西"，保持按局。
+    const PROGRESS_META = ['absence_mode', 'absence_mode_log', 'long_events', 'long_rolled', 'long_told', 'told', 'story_sofar', 'state_read', 'world_used', 'secret_leaks'];
+    function progressKeyOf(chatKey) {
+        const chat = requireChat(chatKey);
+        return memo('progress_split', chatKey, () => !!splitQ.get(`progress_split:${chatKey}`)) ? chatKey : chat.story_id;
+    }
+    function forkProgress(parentKey, branchKey) {
+        const from = progressKeyOf(parentKey);
+        for (const name of PROGRESS_META) {
+            const v = getRawMeta(`${name}:${from}`);
+            if (v != null) setMeta(`${name}:${branchKey}`, v);
+        }
+        setMeta(`progress_split:${branchKey}`, '1');
+    }
+    // 切点量出来以后（n＝和父窗共有的前缀条数，own＝这个窗的指纹序列）：只留切点以前的。唯一调用点是 branchLen 刚写下 branch_len 的那一刻（已有值就提前返回），所以只会跑一次。
+    function cutProgress(chatKey, n, own) {
+        if (!getRawMeta(`progress_split:${chatKey}`)) return;
+        sealAbsences(chatKey, n, own);
+        const live = (pos, fp) => Number.isInteger(pos) && pos >= 0 && pos < n && typeof fp === 'string' && own[pos] != null && sameMessage(own[pos], fp);
+        const read = name => { try { return JSON.parse(getRawMeta(`${name}:${chatKey}`) ?? 'null'); } catch { return null; } };
+        const put = (name, value) => {
+            const empty = value == null || (Array.isArray(value) ? !value.length : typeof value === 'object' && !Object.keys(value).length);
+            setMeta(`${name}:${chatKey}`, empty ? null : JSON.stringify(value));
+        };
+        const list = name => { const v = read(name); return Array.isArray(v) ? v.filter(x => x && typeof x === 'object') : []; };
+        const events = list('long_events').filter(e => Number.isFinite(e.起_pos) && e.起_pos < n);
+        put('long_events', events);
+        // 掷过的周没有楼号：只留到"留下来的最后一件事所在那一周"；更晚的周让子窗自己重掷（同一局同一周掷出来一样，不会重复起事）
+        const rolled = read('long_rolled');
+        const lastWeek = Math.max(-1, ...events.filter(e => Number.isFinite(e.起)).map(e => weekOf(e.起, setupOf(progressKeyOfSetup(chatKey))?.data ?? undefined)));
+        put('long_rolled', rolled && typeof rolled === 'object' && !Array.isArray(rolled) ? Object.fromEntries(Object.entries(rolled).filter(([w]) => /^\d+$/.test(w) && Number(w) <= lastWeek)) : null);
+        put('long_told', list('long_told').filter(t => live(t.pos, t.fp)));
+        put('told', list('told').filter(t => live(t.at, t.fp)));
+        put('world_used', list('world_used').filter(u => live(u.pos, u.fp)));   // 旧格式纯数字没有楼号，不带
+        put('secret_leaks', list('secret_leaks').filter(x => x.at && live(x.at.pos, x.at.fp)));   // 没记楼号的不带
+        const seen = new Set();
+        for (const fp of own.slice(0, n)) for (const f of freshChain(fp, p => getMeta(`fresh_from:${p}`))) seen.add(f);
+        const reads = read('state_read');
+        put('state_read', Array.isArray(reads) ? reads.filter(f => typeof f === 'string' && seen.has(f)) : null);
+        // 前情大意是一整段话盖到哪几个节点：节点都在切点以前才整段带，有一个在切点以后就不带（让子窗从头续写）
+        // 离开模式：按切点那一刻父窗的值（absence_mode_log 里每次切换记着楼号/指纹）；没有记录的旧值定位不了，不带，子窗用默认（跟着配置）
+        const modeLog = list('absence_mode_log').filter(e => e.pos === -1 || live(e.pos, e.fp));
+        setMeta(`absence_mode:${chatKey}`, modeLog.at(-1)?.mode ?? null);
+        put('absence_mode_log', modeLog);
+        const sofar = read('story_sofar');
+        const planAt = id => q('select chat_key, anchor_pos, anchor_fp from plans where id = ?').get(id);
+        put('story_sofar', sofar && Array.isArray(sofar.ids) && sofar.ids.length && sofar.ids.every(id => { const p = planAt(id); return p && live(p.anchor_pos, p.anchor_fp); }) ? sofar : null);
+    }
+    const progressKeyOfSetup = chatKey => setupKeyOf(chatKey);
+    // T154i 第四十二封：新分支第一次量出切点时，把继承来的每条离开记录此刻的进度（读过/处理/故事/天数）封存进子窗自己的 absence_ov 覆盖，
+    // 之后父窗再改行、子窗再改覆盖互不影响。和 cutProgress 同一时机（只跑一次）；没有 progress_split 标记的旧窗、新局不封存，照旧读公共行值。
+    function sealAbsences(chatKey, n, own) {
+        const chat = getChat.get(chatKey);
+        if (!chat?.parent_key) return;
+        for (const a of absences(chat.parent_key)) {
+            if (a.chat_key === chatKey || !Number.isInteger(a.from_pos) || a.from_pos >= n || own[a.from_pos] == null || !sameMessage(own[a.from_pos], a.from_fp)) continue;
+            if (getMeta(`absence_ov:${chatKey}:${a.from_fp}`) != null) continue;
+            setMeta(`absence_ov:${chatKey}:${a.from_fp}`, JSON.stringify({ seen: a.seen, story_status: a.story_status ?? null, story: a.story ?? null, days: a.days }));
+        }
+    }
+
+    // 这一窗的离开模式（real｜pause｜null＝跟着配置）：写值的同时记下是在第几楼切的，开分支时才能按切点取当时的值
+    function setAbsenceMode(chatKey, mode) {
+        const key = progressKeyOf(chatKey), last = currentMessages(chatKey).at(-1);
+        let log = []; try { log = JSON.parse(getRawMeta(`absence_mode_log:${key}`) ?? '[]') ?? []; } catch {}
+        setMeta(`absence_mode:${key}`, mode ?? null);
+        setMeta(`absence_mode_log:${key}`, JSON.stringify([...(Array.isArray(log) ? log : []), { mode: mode ?? null, pos: last?.pos ?? -1, fp: last?.fp ?? null }].slice(-50)));
+    }
+
     function requireChat(chatKey) {
         const chat = getChat.get(chatKey);
         if (!chat) throw Object.assign(new Error('unknown_chat'), { status: 404 });
@@ -598,6 +672,7 @@ export function openStore(file) {
             const drafts = getRawMeta(`door_handoffs:${chatKey}`);
             if (drafts) setMeta(`door_handoffs:${branchKey}`, drafts);
             forkSetup(chatKey, branchKey);
+            forkProgress(chatKey, branchKey);
             log(branchKey, 'branch', { parent: chatKey, stChatId });
             return { status: 'branch', chatKey: branchKey, storyId: chat.story_id, enabled: true };
         };
@@ -843,7 +918,9 @@ export function openStore(file) {
             if (authorizationWrite) bumpAuthorization(chatKey);
             setMeta(`sync_rev:${chatKey}`, String(Number(syncRevision(chatKey)) + 1));
             return { committed: true, need: [], total: newFps.length, ...change, hasAnchorProjection: raw != null || chat.anchors != null,
-                ...(edits.length ? { edited: edits.map(e => e.pos) } : {}), ...(repaired ? { repaired } : {}), ...(reportK != null ? { branchCut: { k: reportK } } : {}) };
+                ...(edits.length ? { edited: edits.map(e => e.pos) } : {}), ...(repaired ? { repaired } : {}), ...(reportK != null ? { branchCut: { k: reportK } } : {}),
+                // T154h：后台此前没有这个窗的已同步序列、也不是分支窗＝真·新聊天的第一次同步（旧窗回来、分支都不会是）
+                ...(oldRows.length === 0 && !chat.parent_key && newFps.length ? { firstSync: true } : {}) };
         }
     }
 
@@ -1224,7 +1301,24 @@ export function openStore(file) {
             .sort((a, b) => (a.chat_key === chatKey ? 0 : 1) - (b.chat_key === chatKey ? 0 : 1) || a.id - b.id);
         const seenFp = new Set();
         return rows.filter(a => !seenFp.has(a.from_fp) && seenFp.add(a.from_fp)).sort((a, b) => a.id - b.id)
-            .map(a => ({ ...a, seen: JSON.parse(a.seen), story: a.story ? JSON.parse(a.story) : null }));
+            .map(a => {
+                const ov = absenceOverlay(chatKey, a.from_fp);   // T154i：本窗对这条离开的读过/处理/天数，盖在行上的公共值之上
+                return {
+                    ...a, ...(ov?.days != null ? { days: ov.days } : {}), ...(ov?.story_status !== undefined ? { story_status: ov.story_status } : {}),
+                    seen: ov?.seen ?? JSON.parse(a.seen), story: ov && 'story' in ov ? ov.story : a.story ? JSON.parse(a.story) : null,
+                };
+            });
+    }
+    // 本窗覆盖：meta absence_ov:<窗>:<那条离开的 from_fp> = { seen?, story_status?, story?, days? }；没有这个键＝照旧读行上的公共值（旧窗、新局不变）
+    function absenceOverlay(chatKey, fromFp) {
+        try { const v = JSON.parse(getMeta(`absence_ov:${chatKey}:${fromFp}`) ?? 'null'); return v && typeof v === 'object' ? v : null; } catch { return null; }
+    }
+    // 改"读过/处理/天数"：不带 chatKey＝旧写法直接改行；带了且这行是本窗自己建的＝改行（分支认分叉前父窗已给过的，靠它）；是继承来的（别窗的行）＝只写本窗覆盖，不动那一行
+    function absenceWrite(id, chatKey, patch, direct) {
+        const row = chatKey == null ? null : q('select chat_key, from_fp, seen from absences where id = ?').get(id);
+        if (!row || row.chat_key === chatKey) return direct();
+        const old = absenceOverlay(chatKey, row.from_fp) ?? {};
+        setMeta(`absence_ov:${chatKey}:${row.from_fp}`, JSON.stringify({ ...old, ...patch(old, row) }));
     }
     function putAbsence({ chatKey, fromFp, toFp = null, startedAt, endedAt, hours, days }) {
         q(`insert or ignore into absences(chat_key, from_fp, to_fp, started_at, ended_at, hours, days, created_at)
@@ -1232,14 +1326,19 @@ export function openStore(file) {
         return absences(chatKey).find(a => a.from_fp === fromFp);
     }
     // 玩家交代了实际过了几天（重推离开时，质量窗 10/3）：0＝其实没空白，日期不跳、回来那一段和余波都撤
-    function setAbsenceDays(id, days) { q('update absences set days = ? where id = ?').run(days, id); }
-    function setAbsenceStory(id, status, story = null) {
-        q('update absences set story_status = ?, story = coalesce(?, story) where id = ?').run(status, story ? JSON.stringify(story) : null, id);
+    function setAbsenceDays(id, days, chatKey = null) {
+        absenceWrite(id, chatKey, () => ({ days }), () => { q('update absences set days = ? where id = ?').run(days, id); });
     }
-    function markAbsenceSeen(id, speaker) {
-        const row = q('select seen from absences where id = ?').get(id);
-        const seen = new Set(JSON.parse(row?.seen ?? '[]')); seen.add(speaker);
-        q('update absences set seen = ? where id = ?').run(JSON.stringify([...seen]), id);
+    function setAbsenceStory(id, status, story = null, chatKey = null) {
+        absenceWrite(id, chatKey, (old, row) => ({ story_status: status, ...(story ? { story } : {}) }),
+            () => { q('update absences set story_status = ?, story = coalesce(?, story) where id = ?').run(status, story ? JSON.stringify(story) : null, id); });
+    }
+    function markAbsenceSeen(id, speaker, chatKey = null) {
+        absenceWrite(id, chatKey, (old, row) => ({ seen: [...new Set([...(old.seen ?? JSON.parse(row.seen ?? '[]')), speaker])] }), () => {
+            const row = q('select seen from absences where id = ?').get(id);
+            const seen = new Set(JSON.parse(row?.seen ?? '[]')); seen.add(speaker);
+            q('update absences set seen = ? where id = ?').run(JSON.stringify([...seen]), id);
+        });
     }
 
     // 全局小设置（离开计时暂停等）。
@@ -1414,6 +1513,7 @@ export function openStore(file) {
         let n = 0;
         while (n < own.length && n < parent.length && own[n] === parent[n]) n++;
         q('update chats set branch_len = ? where key = ?').run(n, chat.key);
+        cutProgress(chat.key, n, own);
         return n;
     }
 
@@ -2123,5 +2223,5 @@ export function openStore(file) {
     setSourceContext(db, sourceContext);
     return { authorizationVersion, authorizationEpoch, externalVersion, changeVersion: () => changesQ.get().n, commitSlot: tx, prepareSlotRollback, declarationsOf: readDeclarations, cachedDeclarations, putDeclarations,
         memberNameIndex, recordKnowledgeFor,
-        deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, setupKeyOf, setupIdMap, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, syncRevision, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
+        deriveReader, arrivalBasis: (chatKey, input) => arrivalBasis({ currentMessages }, chatKey, input), menuEvidenceRecords, recordEvidenceLive, setConfirmedDayOf, confirmedDayAt: (chatKey, pos) => confirmedDayOf?.(chatKey, pos) ?? null, basisLive, sourceLive, sourceReader, knockLive, knockLiveFor, getRawMeta, setupKeyOf, setupIdMap, progressKeyOf, setAbsenceMode, planAttemptTimings, planNumber, setPlanSource, abandonPlan, savePlanPartial, planAttemptText, planRepairCandidate, intimateProgressOf, putIntimateProgress, logIntimateStop, intimateStopsOf, beginPlanAttempt, activePlanAttempt, ownsPlanAttempt, updatePlanAttempt, finishPlanAttempt, planAttempts, planningState, moveMenu, putSnapshot, snapshotOf, logEvent: log, menuLogMax, settledSince, putGiven, seeLore, loreOf, setLore, db, markFreshened, sameMessage, historyOf, playerNames, putEpisodes, episodesOf, editEpisode, putStateNotes, stateNotesOf, join, open, autoExtract, setEnabled, setOptions, putMessages, sync, syncRevision, alignCastToGroup: (storyId, members, chatKey = null) => tx(() => alignCastToGroup(storyId, members, chatKey)), currentMessages, getSlot, getSlotParts, putSlot, recentSlotIds, putCarry, carryBefore, contactOffers, putContactOffer, getCast, putCast, profileOf, putProfile, putCardText, setInterests, absences, putAbsence, markAbsenceSeen, setAbsenceStory, setAbsenceDays, getMeta, setMeta, lastPlan, lastReadyPlan, readyPlans, planById, setPlanBrief, pendingPlans, requestPlan, failPlan, submitPlan, appendMenu, menuOf, planItems, updateMenu, addHandoff, handoffById, pendingHandoff, pendingHandoffs, closeHandoff, relationsOf, putRelations, setupOf, setupAt, setupDraft, startSetup, finishSetup, markSetupHandoff, failSetup, saveSetupDraft, confirmSetup, updateSetupData, discardSetupDraft, addNote, clearNotes, notesOf, status, requireChat, close: () => db.close() };
 }

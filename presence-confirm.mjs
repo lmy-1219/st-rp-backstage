@@ -277,19 +277,46 @@ export async function verifyManual(receipt, { current, read }) {
 
 // T150d：谁能开口。新记录算出"此刻不在"的人静音，"此刻在场或远程"的人取消静音。
 // 只动系统替他静音的那部分：她手动静音的（manualMuted 里有）、旁白卡、正在被系统改静音的（skip）、场面里没有记录或状态不明的，一律不碰。
-export function muteAlignment(view, { members = [], disabled = [], manualMuted = {}, camera = null, skip = [] } = {}) {
+// T154h：两条对齐路径共用的"这声静音系统能不能解除"：群里静音着、又在 sysMuted（后台记的"仍归系统"）里。sysMuted 拿不到或不在表里＝没有归属证据＝不解除。
+export function sysOwnsMute(avatar, { disabled = [], sysMuted = null } = {}) {
+    return Array.isArray(sysMuted) && sysMuted.includes(avatar) && (disabled instanceof Set ? disabled.has(avatar) : (disabled ?? []).includes(avatar));
+}
+export function muteAlignment(view, { members = [], disabled = [], manualMuted = {}, camera = null, skip = [], sysMuted = null } = {}) {
     const plan = { mute: [], unmute: [] };
     if (!view?.byAvatar) return plan;
     const skipped = new Set(skip), off = new Set(disabled);
     for (const avatar of new Set(members)) {
         if (avatar === camera || skipped.has(avatar) || manualMuted?.[avatar]) continue;
         const now = view.byAvatar[avatar]?.changes.at(-1)?.state;
-        if ((now === 'present' || now === 'remote') && off.has(avatar)) plan.unmute.push(avatar);
+        if ((now === 'present' || now === 'remote') && sysOwnsMute(avatar, { disabled: off, sysMuted })) plan.unmute.push(avatar);
         else if (now === 'absent' && !off.has(avatar)) plan.mute.push(avatar);
     }
     return plan;
 }
 
+// T154h（E7）：群静音名单随当前窗对齐。依据是后台场面（board.people）和"群里这一声静音还归不归系统"（sysMuted，后台按群记）。
+// 只动：①场面说不在（away）、没静音的 → 静音；②群里静音着、又在 sysMuted 里的：场面说在场/远程，或这是新聊天（fresh）且不是本窗开局单定下不在场的 → 解除。
+// 静音着但不在 sysMuted 的（她手动点的、来历不明的旧静音）一律不碰；rpeManualMuted 里的人任何时候都不碰。
+// release＝sysMuted 里记着、但群里已不是静音／已不在群／已被她手动接管的人：把归属交还。
+// board 拿不到（people 不是数组）或 sysMuted 拿不到（不是数组）：什么都不改。
+export function groupMuteAlignment({ people, members = [], disabled = [], sysMuted = null, manualMuted = {}, camera = null, skip = [], fresh = false, openingMuted = [] } = {}) {
+    const plan = { mute: [], unmute: [], release: [] };
+    if (!Array.isArray(people) || !Array.isArray(sysMuted)) return plan;
+    const skipped = new Set(skip), off = new Set(disabled), inGroup = new Set(members), opening = new Set(openingMuted ?? []);
+    const status = new Map();
+    for (const p of people) if (object(p) && nonempty(p.avatar)) status.set(p.avatar, p.status);
+    for (const avatar of new Set(sysMuted)) {
+        if (!inGroup.has(avatar) || !off.has(avatar) || manualMuted?.[avatar]) { plan.release.push(avatar); continue; }
+        if (avatar === camera || skipped.has(avatar)) continue;
+        const now = status.get(avatar);
+        if (sysOwnsMute(avatar, { disabled: off, sysMuted }) && (now === 'present' || now === 'remote' || (fresh && !opening.has(avatar)))) plan.unmute.push(avatar);
+    }
+    for (const avatar of inGroup) {
+        if (avatar === camera || skipped.has(avatar) || manualMuted?.[avatar] || off.has(avatar) || String(avatar).startsWith('face:')) continue;
+        if (!fresh && (status.get(avatar) === 'absent' || status.get(avatar) === 'away')) plan.mute.push(avatar);   // 真实 board：离场后此刻不在＝absent（也可能 away）；never/unknown 归开局名单管，不在这里静音
+    }
+    return plan;
+}
 // T150e：点确认前先看末楼合不合格（正在生成、左滑未定、隐藏、空楼不行）。合格返回 null，否则返回原因。
 export function confirmFloorCheck({ chat, generating = null }) {
     if (!Array.isArray(chat) || !chat.length) return 'empty-floor';

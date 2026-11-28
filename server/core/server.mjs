@@ -45,7 +45,7 @@ import { withTaste, tasteFor } from './taste.mjs';
 import { intimateSetup, paceFor, withdrawIntimateForTier, intimateProgressFor } from './slot.mjs';
 import { paceCap } from './tempo.mjs';
 import { renderPronouns, playerContext } from './pronoun.mjs';
-import { setupKeyFor, setupKeyOfChat, metaSetupKey } from './setup-key.mjs';
+import { setupKeyFor, setupKeyOfChat, metaSetupKey, progressKeyOfChat } from './setup-key.mjs';
 
 export const VERSION = '0.3.0';
 const BODY_LIMIT = 16 * 1024 * 1024;
@@ -646,10 +646,23 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             let mode = null;
             if (typeof b.chatKey === 'string' && b.chatKey) {
                 const chat = store.requireChat(b.chatKey);
-                if (b.mode !== undefined) store.setMeta(`absence_mode:${chat.story_id}`, b.mode === 'pause' || b.mode === 'real' ? b.mode : null);
-                mode = { own: store.getMeta(`absence_mode:${chat.story_id}`) || '', now: absenceModeOf(store, b.chatKey, settings().absence) };
+                if (b.mode !== undefined) store.setAbsenceMode(b.chatKey, b.mode === 'pause' || b.mode === 'real' ? b.mode : null);
+                mode = { own: store.getMeta(`absence_mode:${progressKeyOfChat(store, chat)}`) || '', now: absenceModeOf(store, b.chatKey, settings().absence) };
             }
             return { paused: store.getMeta('absence_paused') === '1', resumedAt: Number(store.getMeta('absence_resumed_at')) || null, mode };
+        },
+        // T154h（E7）：群里哪些静音仍归系统负责。按群记（群的静音名单本来就是整群一份、跨窗），值是头像列表。
+        // add：系统刚静音的；remove：系统解除、或她手动接管的；都不给＝只读。
+        'POST /v1/sys-muted': b => {
+            const groupId = str(b.groupId, 'groupId', { max: 200 }), key = `sys_muted:${groupId}`;
+            let list = []; try { const v = JSON.parse(store.getMeta(key) ?? '[]'); if (Array.isArray(v)) list = v.filter(x => typeof x === 'string'); } catch {}
+            const add = strings(b.add, 200, 300), remove = new Set(strings(b.remove, 200, 300));
+            if (add.length || remove.size) {
+                const next = [...new Set([...list.filter(x => !remove.has(x)), ...add])];
+                if (JSON.stringify(next) !== JSON.stringify(list)) store.setMeta(key, next.length ? JSON.stringify(next) : null);
+                list = next;
+            }
+            return { groupId, avatars: list };
         },
         // /写 /玩 /聊：用户临时的要求（原话），不进聊天记录。clear＝收回这一类。
         'POST /v1/note': b => {
@@ -1045,7 +1058,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             const chat = b.chatKey ? store.requireChat(str(b.chatKey, 'chatKey')) : null;
             if (b.save !== undefined) {
                 if (!chat) bad('chatKey required');
-                const s = snapshot(store, setupKeyOfChat(store, chat), { storyId: chat.story_id, name: str(b.save, 'save', { max: 80 }), includeGrownFaces: b.includeGrownFaces === true });
+                const s = snapshot(store, setupKeyOfChat(store, chat), { progressKey: progressKeyOfChat(store, chat), name: str(b.save, 'save', { max: 80 }), includeGrownFaces: b.includeGrownFaces === true });
                 if (!s.setup && !s.cast.length && !s.relations) bad('这一局还没有开局单、名册、关系表，没什么可存的');
                 return { saved: p.put(s), presets: p.list() };
             }
@@ -1053,8 +1066,8 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                 if (!chat) bad('chatKey required');
                 const one = p.get(str(b.apply, 'apply', { max: 80 }));
                 if (!one) bad('没有这份预设');
-                p.backup(snapshot(store, setupKeyOfChat(store, chat), { name: `套用前-${chat.story_id}`, storyId: chat.story_id }));
-                const applied = applyPreset(store, setupKeyOfChat(store, chat), one, { storyId: chat.story_id });
+                p.backup(snapshot(store, setupKeyOfChat(store, chat), { name: `套用前-${chat.story_id}`, progressKey: progressKeyOfChat(store, chat) }));
+                const applied = applyPreset(store, setupKeyOfChat(store, chat), one, { progressKey: progressKeyOfChat(store, chat), chatKey: chat.key });
                 if (one.pack && !(settings().listPacks?.() ?? []).includes(one.pack)) applied.warnings = [...(applied.warnings ?? []), `素材包 ${one.pack} 还没导入，点'导入素材包'`];
                 store.setMeta(`roster_listed:${setupKeyOfChat(store, chat)}`, '1');
                 // 前史还没配检索词的（预设是没配完就存的）补一次
@@ -1198,14 +1211,17 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
         // 外援队列面板：复制题目、贴回答案、再试 API、自动重试开关。列表和开关按窗口（N-441/D-260）。
         'POST /v1/handoff-ui': async b => {
             const chatKey = str(b.chatKey, 'chatKey', { optional: true });
+            const actingKey = chatKey ?? str(b.sourceChatKey, 'sourceChatKey', { optional: true });   // T154i：处理包的窗（面板交回/放弃/再试带的是 chatKey 或 sourceChatKey）
             if (b.action === 'prompt' || b.action === 'submit') {
                 try {
                     if (!handoffs) throw new Error('no_such_handoff');
-                    if (b.action === 'submit') return { ok: true, result: await handoffs.submit(Number(b.id), str(b.text, 'text', { max: 500000 })) };
+                    if (b.action === 'submit') return { ok: true, result: await handoffs.submit(Number(b.id), str(b.text, 'text', { max: 500000 }), { chatKey: actingKey }) };
                     const h = store.handoffById(Number(b.id));
                     if (!h) throw new Error('no_such_handoff');
                     if (h.status !== 'pending') throw new Error('handoff_closed');
-                    const listed = handoffs.list().find(x => x.id === h.id);
+                    handoffs.own(h, actingKey);   // T154i：先校本窗归属（别窗/无归属抛 handoff_window_mismatch），不触发别窗的过期清理
+                    const scoped = handoffs.list(actingKey != null ? { chatKey: actingKey } : {});
+                    const listed = (Array.isArray(scoped) ? scoped : scoped.pending).find(x => x.id === h.id);
                     if (!listed) throw new Error('handoff_stale');
                     const prompt = renderPrompt(h);
                     return { id: h.id, kind: h.kind, title: listed.title, prompt, chars: prompt.length };
@@ -1220,6 +1236,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                         handoff_stale: '这件活后来已经做完了或者不需要了（比如重新规划成功了），不用再交。',
                         handoff_closed: '这件活后来已经做完了或者不需要了（比如重新规划成功了），不用再交。',
                         no_such_handoff: '没有这一件。',
+                        handoff_window_mismatch: '这份外援属于别的窗口，请切到那个窗口再处理。',
                     };
                     return { ok: false, error: e.message, why: errors[e.message] ?? `格式不对：${e.message}` };
                 }
@@ -1228,6 +1245,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             let retryResult = null;
             if (b.action === 'retry') {
                 const h = store.handoffById(Number(b.id));
+                if (h) { try { handoffs.own(h, actingKey); } catch (e) { return { ok: false, error: e.message, why: '这份外援属于别的窗口，请切到那个窗口再处理。' }; } }
                 if (h?.kind === 'extract') {
                     const pendingMessages = worker?.plan({ chatKey: h.chat_key }).pendingMessages ?? 0;
                     retryResult = { ...await handoffs.retry(Number(b.id)), pendingMessages };
@@ -1238,6 +1256,7 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
             if (b.action === 'drop') {
                 const id = Number(b.id), h = store.handoffById(id);
                 if (h && h.status === 'pending') {
+                    try { handoffs.own(h, actingKey); } catch (e) { return { ok: false, error: e.message, why: '这份外援属于别的窗口，请切到那个窗口再处理。' }; }
                     const rawPlanId = h.kind === 'plan' ? (h.payload?.meta?.planId ?? h.key) : null;
                     const planId = rawPlanId == null || rawPlanId === '' ? NaN : Number(rawPlanId);
                     if (Number.isInteger(planId) && planId > 0) {
@@ -1249,19 +1268,19 @@ export function createRoutes(store, { log = () => {}, worker = null, records = n
                         for (const p of store.pendingHandoffs().filter(p => p.kind === 'plan' && p.key === String(planId))) handoffs.drop(p.id, 'plan_abandoned');
                         dropped = { ok: true, ...(note ? { note } : {}) };
                     } else {
-                        handoffs.drop(id, 'panel_gave_up');
+                        handoffs.drop(id, 'panel_gave_up', { chatKey: actingKey });
                         dropped = { ok: true };
                     }
                 }
             }
             if (b.action === 'auto' && chatKey) store.setMeta(`handoff_autoretry:${chatKey}`, b.on ? '1' : '0');
-            const { pending, others } = chatKey ? (handoffs.list({ chatKey }) ?? { pending: [], others: [] }) : { pending: handoffs.list(), others: [] };
+            const { pending } = chatKey ? (handoffs.list({ chatKey }) ?? { pending: [] }) : { pending: handoffs.list() };
             const withChars = h => ({ ...h, chars: renderPrompt(store.handoffById(h.id)).length });
             return {
                 ...(dropped ?? {}),
                 ...(retryResult ? { retryResult } : {}),
                 pending: pending.map(({ file, ...h }) => withChars(h)),
-                others: (others ?? []).map(g => ({ chatKey: g.chatKey, label: g.label, n: g.n, items: g.items.map(({ file, ...h }) => withChars(h)) })),
+                others: [],   // 面板不显示别的窗口的外援（T154i 第四十二封）
                 auto: chatKey ? store.getMeta(`handoff_autoretry:${chatKey}`) === '1' : false,
             };
         },
@@ -1290,7 +1309,7 @@ function readBody(req) {
 
 const globalRoutes = new Set([
     'health', 'timings', 'camera-card', 'stages', 'stages-fit', 'stage-models', 'stage-probe', 'update', 'tuning',
-    'material-pack-upload', 'material-pack-git', 'opening-pack-upload', 'opening-pack-git', 'opening-pack',
+    'material-pack-upload', 'material-pack-git', 'opening-pack-upload', 'opening-pack-git', 'opening-pack', 'sys-muted',
 ]);
 const mismatch = () => { throw Object.assign(new Error('window-mismatch'), { status: 409 }); };
 const windowId = value => typeof value === 'string' && value.trim() !== '';

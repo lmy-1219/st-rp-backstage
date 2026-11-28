@@ -158,7 +158,14 @@ export function createTalk({ store, records, context, client, log = () => {}, pl
                 if (p.kind === 'plan') plan(chatKey);
             }
             if (['fix', 'void', 'fact', 'play'].includes(p.kind)) {
-                const key = `correction_rev:${chat.story_id}`;
+                // 改的是双方都读的（记录：fix/void）→ 按局的版本 correction_rev:<局>，所有窗都读；
+                // 只给本窗的（这阵子这么玩的笔记、本窗那份开局单）：
+                //   已分开存的窗 → 只动本窗的 correction_rev:<窗>；
+                //   没分开存的窗（新局、旧窗、父窗）→ 动"没分开那一份"的 correction_rev:own:<局>，只有没分开的窗读它，已分开的子窗不读（第三十六封）。
+                // 旧窗之间照旧共用这一份，不做迁移。
+                const splitWindow = setupKeyOfChat(store, chat) !== chat.story_id || (store.progressKeyOf?.(chatKey) ?? chat.story_id) !== chat.story_id;
+                const shared = p.kind === 'fix' || p.kind === 'void';
+                const key = shared ? `correction_rev:${chat.story_id}` : splitWindow ? `correction_rev:${chatKey}` : `correction_rev:own:${chat.story_id}`;
                 store.setMeta(key, String((Number(store.getRawMeta(key)) || 0) + 1));
             }
             p.status = 'done';

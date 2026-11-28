@@ -101,27 +101,25 @@ export function createHandoffs({ store, home, log = () => {} }) {
             return self.list();
         },
         // 等着的；已经不需要的（比如要它的那段消息删了）顺手撤掉。
-        // 不带 chatKey：照旧返回全部（本机工具 tools/handoff.mjs 用）。带 chatKey：返回 { pending, others }，
-        // pending＝本窗口的（自己＋分叉点前继承的 keys，chat_key 为空的全局活每个窗口都算），others＝别的窗口的按窗口归并。
+        // 不带 chatKey：照旧返回全部（本机工具 tools/handoff.mjs 用，含无窗号的）。带 chatKey（面板）：只认 chat_key＝本窗的；others 恒空（不显示别窗数目/标题/详情）；无窗号的包归命令行（T154i 第四十二封）。
         list({ chatKey = null } = {}) {
-            const all = store.pendingHandoffs().filter(h => {
+            // 先按窗定范围、再只在范围内清过期：面板只动本窗的包，别窗和无归属的不碰；命令行（不带 chatKey）范围＝全部。
+            const all = store.pendingHandoffs().filter(h => chatKey == null || h.chat_key === chatKey).filter(h => {
                 if (!kinds.get(h.kind)?.stale?.(h.payload.meta, h)) return true;
                 store.closeHandoff(h.id, 'dropped', { reason: 'stale' });
                 remove(h.id);
                 return false;
             }).map(h => ({ id: h.id, kind: h.kind, title: TITLES[h.kind] ?? h.kind, chatKey: h.chat_key, why: h.payload.why, createdAt: h.created_at, file: file(h.id), retry: !!kinds.get(h.kind)?.retry, busy: false }));
             if (chatKey == null) return all;
-            const keys = new Set(store.historyOf(chatKey).keys);
-            const pending = all.filter(h => h.chatKey == null || keys.has(h.chatKey));
-            const others = all.filter(h => h.chatKey != null && !keys.has(h.chatKey));
-            const labelOf = key => { try { const c = store.requireChat(key); return c.label || c.st_chat_id || key; } catch { return key; } };
-            const groups = new Map();
-            for (const h of others) { const g = groups.get(h.chatKey) ?? { chatKey: h.chatKey, label: labelOf(h.chatKey), items: [] }; g.items.push(h); groups.set(h.chatKey, g); }
-            return { pending, others: [...groups.values()].map(g => ({ chatKey: g.chatKey, label: g.label, n: g.items.length, items: g.items })) };
+            const pending = all.filter(h => h.chatKey === chatKey);
+            return { pending, others: [] };
         },
-        async submit(id, text) {
+        // T154i：带 chatKey 的调用（面板）只能处理本窗自己的包（无窗号的归命令行，面板也不处理）；不带＝命令行，不限。
+        own(h, chatKey) { if (chatKey != null && h.chat_key !== chatKey) throw Object.assign(new Error('handoff_window_mismatch'), { status: 409 }); },
+        async submit(id, text, { chatKey = null } = {}) {
             const h = store.handoffById(Number(id));
             if (!h) throw Object.assign(new Error('no_such_handoff'), { status: 404 });
+            self.own(h, chatKey);
             if (h.status !== 'pending') throw Object.assign(new Error('handoff_closed'), { status: 409 });
             const spec = kinds.get(h.kind);
             if (!spec) throw Object.assign(new Error(`no_handler_${h.kind}`), { status: 500 });
@@ -165,9 +163,10 @@ export function createHandoffs({ store, home, log = () => {} }) {
             }
         },
         canRetry(kind) { return !!kinds.get(kind)?.retry; },
-        drop(id, reason = 'dropped') {
+        drop(id, reason = 'dropped', { chatKey = null } = {}) {
             const h = store.handoffById(Number(id));
             if (!h || h.status !== 'pending') return false;
+            self.own(h, chatKey);
             store.closeHandoff(h.id, 'dropped', { reason });
             remove(h.id);
             kinds.get(h.kind)?.dropped?.(h.payload.meta, h);
